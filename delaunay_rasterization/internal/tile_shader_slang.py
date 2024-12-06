@@ -42,6 +42,9 @@ def vertex_and_tile_shader(indices,
                                                                                        fovx,
                                                                                        render_grid)
 
+    # ic(tiles_touched.float().mean(), tiles_touched.max(), (tiles_touched.max() == tiles_touched).sum())
+    # ic((vs_tetra[(tiles_touched.max() == tiles_touched), 2] > 0).sum())
+    # ic((vs_tetra[(tiles_touched.max() == tiles_touched), 2] < 0).sum())
     # ic(tiles_touched, rect_tile_space)
     with torch.no_grad():
         mask = tiles_touched > 0

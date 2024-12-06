@@ -173,7 +173,7 @@ float3 geom_transform_points2(float3 point, float4x4 transf_matrix)
 float3 project_point_w_depth(float3 point, Camera cam) {
     float4 cam_space_homo = mul(cam.world_view_transform, float4(point, 1.f));
     float3 cam_space_nohomo = safe_div(cam_space_homo.xyz, cam_space_homo.w);
-    float3 pix_space = mul(cam.K, float3(safe_div(cam_space_homo.xy, cam_space_homo.z), 1.f));
+    float3 pix_space = mul(cam.K, float3(safe_div(cam_space_homo.xy, abs(cam_space_homo.z)), 1.f));
 
 
     pix_space.z = cam_space_nohomo.z;

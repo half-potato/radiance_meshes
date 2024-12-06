@@ -19,9 +19,11 @@ import time
 import tinycudann as tcnn
 from utils.contraction import contract_mean_std
 from utils import topo_utils
+from gDel3D.build.gdel3d import Del
+from tqdm import tqdm
 
 tile_size = 8
-K = 20
+K = 1
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
@@ -69,7 +71,7 @@ def common_camera_properties_from_gsplat(viewmats, Ks, height, width):
 
 
 # %%
-train_cameras, test_cameras, scene_info = loader.load_dataset("/data/nerf_datasets/360/bicycle", "images_8", data_device="cuda", eval=True)
+train_cameras, test_cameras, scene_info = loader.load_dataset("/optane/nerf_datasets/360/bicycle", "images_8", data_device="cuda", eval=True)
 
 # %%
 
@@ -190,11 +192,14 @@ optim = torch.optim.Adam([
     {"params": [vertices], "lr": 1e-4},
 ])
 images = []
-v = Delaunay(vertices.detach().cpu().numpy())
-indices_np = v.simplices
+# v = Delaunay(vertices.detach().cpu().numpy())
+# indices_np = v.simplices
+v = Del(vertices.shape[0])
+indices_np = v.compute(vertices.detach().cpu()).numpy()
 indices = torch.as_tensor(indices_np).cuda()
 old_vertices = vertices.detach().cpu().numpy()
-for i in range(5001):
+progress_bar = tqdm(range(2001))
+for i in progress_bar:
     optim.zero_grad()
 
 
@@ -217,10 +222,15 @@ for i in range(5001):
     loss.backward()
     optim.step()
 
+    psnr = 20 * math.log10(1.0 / math.sqrt(loss.detach().cpu().item()))
+    progress_bar.set_postfix({"PSNR": f"{psnr:.02f}"})
+
     st = time.time()
     if i % K == 0:
-        v = Delaunay(vertices.detach().cpu().numpy())
-        indices_np = v.simplices
+        v = Del(vertices.shape[0])
+        indices_np = v.compute(vertices.detach().cpu()).numpy()
+        # v = Delaunay(vertices.detach().cpu().numpy())
+        # indices_np = v.simplices
         indices = torch.as_tensor(indices_np).cuda()
         old_vertices = vertices.detach().cpu().numpy()
 

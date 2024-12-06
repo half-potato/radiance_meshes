@@ -63,9 +63,6 @@ void vertex_shader(TensorView<int32_t> indices,
     Tetrahedra pixel_tet = project_tetrahedra(tet, cam);
     // Tetrahedra pixel_tet = tet_ndc2pix(proj_tet, image_height, image_width);
     float3 circumcenter = calculate_circumcenter(tet);
-    out_circumcenter.storeOnce(uint2(g_idx, 0), circumcenter.x);
-    out_circumcenter.storeOnce(uint2(g_idx, 1), circumcenter.y);
-    out_circumcenter.storeOnce(uint2(g_idx, 2), circumcenter.z);
 
     float3 minv, maxv;
     minmax_tet(pixel_tet, minv, maxv);
@@ -77,14 +74,15 @@ void vertex_shader(TensorView<int32_t> indices,
         rect_tile_space.max_x = grid_width;
         rect_tile_space.min_y = 0;
         rect_tile_space.max_y = grid_height;
+        out_vs.storeOnce(uint2(g_idx, 1), 1);
     } else {
-        out_vs.storeOnce(uint2(g_idx, 0), minv.x);
-        out_vs.storeOnce(uint2(g_idx, 1), minv.y);
-        out_vs.storeOnce(uint2(g_idx, 2), min(max(minv.z, FLT_MIN), FLT_MAX));
+        // out_vs.storeOnce(uint2(g_idx, 0), minv.x);
+        // out_vs.storeOnce(uint2(g_idx, 1), minv.y);
+        // out_vs.storeOnce(uint2(g_idx, 2), min(max(minv.z, FLT_MIN), FLT_MAX));
 
-        out_vs.storeOnce(uint2(g_idx, 0), minv.x);
-        out_vs.storeOnce(uint2(g_idx, 1), minv.y);
-        out_vs.storeOnce(uint2(g_idx, 2), min(max(minv.z, FLT_MIN), FLT_MAX));
+        // out_vs.storeOnce(uint2(g_idx, 0), minv.x);
+        // out_vs.storeOnce(uint2(g_idx, 1), minv.y);
+        // out_vs.storeOnce(uint2(g_idx, 2), min(max(minv.z, FLT_MIN), FLT_MAX));
 
         if (maxv.z <= 0.0) {
             return;
@@ -128,8 +126,13 @@ void vertex_shader(TensorView<int32_t> indices,
     out_rect_tile_space[uint2(g_idx, 2)] = rect_tile_space.max_x;
     out_rect_tile_space[uint2(g_idx, 3)] = rect_tile_space.max_y;
 
-    out_vs.storeOnce(uint2(g_idx, 0), minv.x);
-    out_vs.storeOnce(uint2(g_idx, 1), minv.y);
+    // out_vs.storeOnce(uint2(g_idx, 0), minv.x);
+    // out_vs.storeOnce(uint2(g_idx, 1), minv.y);
     out_vs.storeOnce(uint2(g_idx, 2), min(max(minv.z, FLT_MIN), FLT_MAX));
+    // out_vs.storeOnce(uint2(g_idx, 2), min(max(maxv.z, FLT_MIN), FLT_MAX));
+
+    out_circumcenter.storeOnce(uint2(g_idx, 0), circumcenter.x);
+    out_circumcenter.storeOnce(uint2(g_idx, 1), circumcenter.y);
+    out_circumcenter.storeOnce(uint2(g_idx, 2), circumcenter.z);
 
 }

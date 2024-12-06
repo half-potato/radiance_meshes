@@ -25,7 +25,7 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
                                                                                  fovx,
                                                                                  render_grid)
    
-    print(vs_tetra)
+    # print(vs_tetra)
     # retain_grad fails if called with torch.no_grad() under evaluation
     try:
         vs_tetra.retain_grad()

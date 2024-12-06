@@ -10,6 +10,8 @@ from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from pyquaternion import Quaternion
 from icecream import ic
+from jax import jacrev
+import jax.numpy as jnp
 
 
 def get_projection_matrix(znear, zfar, fy, fx, height, width, device):
@@ -58,7 +60,8 @@ def setup_camera(height, width, fov_degrees, viewmat):
     
     return viewmat, K, cam_pos, fovy, fovx, fx, fy
 
-def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, height=3, width=3, tile_size=16, fov=90):
+def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000, height=3, width=3,
+                              tile_size=16, fov=90, check_gradients=True):
     """
     Test tetrahedra rendering by comparing JAX and PyTorch implementations.
     
@@ -80,6 +83,10 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, height=3, width=
     
     # Setup rendering grid
     render_grid = RenderGrid(height, width, tile_height=tile_size, tile_width=tile_size)
+    if check_gradients:
+        # Detach and enable gradients
+        vertices = vertices.detach().requires_grad_(True)
+        rgbs = rgbs.detach().requires_grad_(True)
     
     # Get sorted tetrahedra and other rendering parameters
     sorted_tetra_idx, tile_ranges, radii, vs_tetra, circumcenter, mask = vertex_and_tile_shader(
@@ -110,10 +117,10 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, height=3, width=
     )
     
     jax_image, extras = tetra_quad.render_camera(
-        vertices.cpu().numpy(), indices.cpu().numpy(),
-        rgbs.cpu().numpy(),
+        vertices.detach().cpu().numpy(), indices.cpu().numpy(),
+        rgbs.detach().cpu().numpy(),
         height, width, viewmat.cpu().numpy(),
-        fx.item(), fy.item())
+        fx.item(), fy.item(), np.linspace(0, 1, n_samples))
 
     # Compare results
     torch_image_np = torch_image[..., :3].cpu().detach().numpy()
@@ -121,14 +128,50 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, height=3, width=
     mean_error = np.abs(diff).mean()
     max_error = np.abs(diff).max()
     
-    return {
+    results = {
         'torch_image': torch_image_np,
-        'jax_image': jax_image,
+        'jax_image': jax_image[..., :3],
         'difference': diff,
         'mean_error': mean_error,
         'max_error': max_error,
-        'extras': extras  # Additional rendering information
+        'extras': extras
     }
+
+    if check_gradients:
+        # Compute gradients through both implementations
+        torch_loss = torch_image[..., :3].mean()
+        torch_loss.backward()
+        
+        # Store PyTorch gradients
+        results['torch_vertex_grad'] = vertices.grad.clone().cpu().numpy()
+        results['torch_rgbs_grad'] = rgbs.grad.clone().cpu().numpy()
+        
+        def render_fn(verts_and_rgbs):
+            verts, colors = verts_and_rgbs
+            img, _ = tetra_quad.render_camera(
+                verts,
+                indices.cpu().numpy(),
+                colors,
+                height, width, viewmat.cpu().numpy(),
+                fx.item(), fy.item(),
+                jnp.linspace(0, 1, n_samples)
+            )
+            return img[..., :3].mean()
+
+        # Compute JAX gradients using jacrev
+        jax_verts_grad, jax_rgbs_grad = jacrev(render_fn)((
+            vertices.detach().cpu().numpy(),
+            rgbs.detach().cpu().numpy()
+        ))
+            
+        # Compute JAX gradients (assuming tetra_quad.render_camera returns gradients)
+        results['jax_vertex_grad'] = np.array(jax_verts_grad)
+        results['jax_rgbs_grad'] = np.array(jax_rgbs_grad)
+
+        results['vertex_err'] = np.abs(results['torch_vertex_grad'] - results['jax_vertex_grad'])
+        results['rgbs_err'] = np.abs(results['torch_rgbs_grad'] - results['jax_rgbs_grad'])
+
+    return results
 
 def generate_face_view(vertices, indices):
     """
