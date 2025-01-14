@@ -207,10 +207,10 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 d_current_pixel_state = dp_current_pixel_state.getDifferential();
                 bwd_diff(evaluate_tetra)(dp_g, dp_ray_o, dp_ray_d, dp_tetra_rgba.d);
                 if (print) {
-                    printf("D V0: %f, %f, %f\n", dp_g.d.verts[0].x, dp_g.d.verts[0].y, dp_g.d.verts[0].z);
-                    printf("D V1: %f, %f, %f\n", dp_g.d.verts[1].x, dp_g.d.verts[1].y, dp_g.d.verts[1].z);
-                    printf("D V2: %f, %f, %f\n", dp_g.d.verts[2].x, dp_g.d.verts[2].y, dp_g.d.verts[2].z);
-                    printf("D V3: %f, %f, %f\n", dp_g.d.verts[3].x, dp_g.d.verts[3].y, dp_g.d.verts[3].z);
+                    printf("D V0: %f, %f, %f\n", dp_g.d.tet.verts[0].x, dp_g.d.tet.verts[0].y, dp_g.d.tet.verts[0].z);
+                    printf("D V1: %f, %f, %f\n", dp_g.d.tet.verts[1].x, dp_g.d.tet.verts[1].y, dp_g.d.tet.verts[1].z);
+                    printf("D V2: %f, %f, %f\n", dp_g.d.tet.verts[2].x, dp_g.d.tet.verts[2].y, dp_g.d.tet.verts[2].z);
+                    printf("D V3: %f, %f, %f\n", dp_g.d.tet.verts[3].x, dp_g.d.tet.verts[3].y, dp_g.d.tet.verts[3].z);
                 }
                 bwd_diff(load_tet_alphablend)(g_idx, vertices, indices, rgbs, dp_g.d);
             }

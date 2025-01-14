@@ -16,6 +16,8 @@ import spherical_harmonics;
 import intersect;
 import safe_math;
 
+static const float FLT_MAX = 1e20;
+static const float FLT_MIN = -1e20;
 static const float eps = 1e-7;
 
 struct Ray : IDifferentiable
@@ -37,7 +39,7 @@ struct Camera : IDifferentiable
 
 struct SplatTetrahedra : IDifferentiable
 {
-    float3[4] verts;
+    Tetrahedra tet;
     float4 rgbs;
 };
 
@@ -165,6 +167,19 @@ float3 geom_transform_points2(float3 point, float4x4 transf_matrix)
 // }
 
 [Differentiable]
+float3 point2camspace(float3 point, Camera cam) {
+    float4 cam_space_homo = mul(cam.world_view_transform, float4(point, 1.f));
+    float3 cam_space_nohomo = safe_div(cam_space_homo.xyz, cam_space_homo.w);
+    return cam_space_nohomo;
+}
+
+float3 camspace2image_w_depth(float3 cam_space_nohomo, Camera cam) {
+    float3 pix_space = mul(cam.K, float3(safe_div(cam_space_nohomo.xy, abs(cam_space_nohomo.z) + eps), 1.f));
+    pix_space.z = cam_space_nohomo.z;
+    return pix_space;
+}
+
+[Differentiable]
 float3 project_point_w_depth(float3 point, Camera cam) {
     float4 cam_space_homo = mul(cam.world_view_transform, float4(point, 1.f));
     float3 cam_space_nohomo = safe_div(cam_space_homo.xyz, cam_space_homo.w);
@@ -174,6 +189,7 @@ float3 project_point_w_depth(float3 point, Camera cam) {
     pix_space.z = cam_space_nohomo.z;
     return pix_space;
 }
+
 [Differentiable]
 float3x3 compute_jacobian(float3 xyz_ws, Camera cam) {
     float tan_half_fovx = tan(cam.fovx / 2.0);
@@ -235,61 +251,8 @@ Tetrahedra load_tetrahedra(DiffTensorView vertices,
 }
 
 [Differentiable]
-Gaussian_3D load_gaussian(int32_t g_idx,
-                          DiffTensorView xyz_ws,
-                          DiffTensorView sh_coeffs,
-                          DiffTensorView rotations,
-                          DiffTensorView scales,
-                          uint active_sh)
-{
-    float3 g_xyz_ws = read_t3_float3(g_idx, xyz_ws);
-    SpherHarmCoeffs g_sh_coeffs = read_spherical_harmonics_coeffs(g_idx, sh_coeffs, active_sh);
-    float4 g_rotations = read_t4_float4(g_idx, rotations);
-    float3 g_scales = read_t3_float3(g_idx, scales);
-
-    return { g_xyz_ws, g_sh_coeffs, g_rotations, g_scales };
-}
-
-
-float splat_radius(float2x2 cov_vs, float det) {
-    float mid = 0.5f * (cov_vs[0][0] + cov_vs[1][1]);
-    float eigen_val_1 = mid + sqrt(max(0.1f, mid * mid - det));
-    float eigen_val_2 = mid - sqrt(max(0.1f, mid * mid - det));
-    float radius = ceil(3.f * sqrt(max(eigen_val_1, eigen_val_2)));
-
-    return radius;
-}
-
-[Differentiable]
 float compute_det(float2x2 M) {
     return M[0][0] * M[1][1] - M[0][1] * M[1][0];
-}
-
-
-[Differentiable]
-Splat_2D_Vertex load_splat_vertex(int32_t g_idx,
-                                  DiffTensorView xyz_vs,
-                                  DiffTensorView cov_vs,
-                                  DiffTensorView rgb)
-{
-    float3 g_xyz_vs = read_t3_float3(g_idx, xyz_vs);
-    float3 g_rgb = read_t3_float3(g_idx, rgb);
-    float2x2 g_cov_vs = read_t2x2_float2x2(g_idx, cov_vs);
-
-    return { g_xyz_vs, g_rgb, g_cov_vs };
-}
-
-[Differentiable]
-Splat_2D_Vertex project_gaussian_to_camera(Gaussian_3D g, Camera cam, uint active_sh) {
-    float3 xyz_vs = project_point_w_depth(g.xyz_ws, cam);
-    if (xyz_vs.z <= 0.2) {
-        return {float3(0.0), float3(0.0), float2x2(0.0)};
-    }
-    float3 rgb = compute_color_from_sh_coeffs(g.sh_coeffs, g.xyz_ws, cam.position, active_sh);
-    float3x3 cov_ws = get_covariance_from_quat_scales(g.rotations, g.scales);
-    float2x2 cov_vs = covariance_3d_to_2d(cam, g.xyz_ws, cov_ws);
-
-    return { xyz_vs, rgb, cov_vs };
 }
 
 [Differentiable]
@@ -300,6 +263,18 @@ Tetrahedra project_tetrahedra(Tetrahedra tet, Camera cam) {
             project_point_w_depth(tet.verts[1], cam),
             project_point_w_depth(tet.verts[2], cam),
             project_point_w_depth(tet.verts[3], cam)
+        }
+    };
+}
+
+[Differentiable]
+Tetrahedra tet2camspace(Tetrahedra tet, Camera cam) {
+    return {
+        {
+            point2camspace(tet.verts[0], cam),
+            point2camspace(tet.verts[1], cam),
+            point2camspace(tet.verts[2], cam),
+            point2camspace(tet.verts[3], cam)
         }
     };
 }
@@ -330,17 +305,58 @@ Tetrahedra tet_ndc2pix(Tetrahedra tet, int image_height, int image_width) {
     }};
 }
 
-[Differentiable]
-void minmax_tet(Tetrahedra tet, out float3 minv, out float3 maxv) {
-    minv = {999999, 999999, 999999};
-    maxv = {-999999, -999999, -999999};
-    for (int i=0; i<4; i++) {
-        minv.x = min(tet.verts[i].x, minv.x);
-        maxv.x = max(tet.verts[i].x, maxv.x);
-        minv.y = min(tet.verts[i].y, minv.y);
-        maxv.y = max(tet.verts[i].y, maxv.y);
-        minv.z = min(tet.verts[i].z, minv.z);
-        maxv.z = max(tet.verts[i].z, maxv.z);
+// [Differentiable]
+// void minmax_tet(Tetrahedra tet, out float3 minv, out float3 maxv) {
+//     minv = {999999, 999999, 999999};
+//     maxv = {-999999, -999999, -999999};
+//     for (int i=0; i<4; i++) {
+//         minv.x = min(tet.verts[i].x, minv.x);
+//         maxv.x = max(tet.verts[i].x, maxv.x);
+//         minv.y = min(tet.verts[i].y, minv.y);
+//         maxv.y = max(tet.verts[i].y, maxv.y);
+//         minv.z = min(tet.verts[i].z, minv.z);
+//         maxv.z = max(tet.verts[i].z, maxv.z);
+//     }
+// }
+
+// [Differentiable]
+void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) {
+    minv = float3(FLT_MAX, FLT_MAX, FLT_MAX);
+    maxv = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    for (int i = 0; i < 4; i++) {
+        if (tet.verts[i].z < 0) continue;
+        float3 pixel_vert = camspace2image_w_depth(tet.verts[i], cam);
+        minv = min(minv, pixel_vert);
+        maxv = max(maxv, pixel_vert);
+    }
+
+    // Adjust bounds if tetrahedron straddles z=0
+    for (int i = 0; i < 4; i++) {
+        [MaxIters(4)]
+        for (int j = i + 1; j < 4; j++) {
+            float3 vb = tet.verts[i];
+            float3 vf = tet.verts[j];
+            float3 temp;
+            if (vb.z > vf.z) {
+                // swap(vb, vf);
+                temp = vf;
+                vf = vb;
+                vb = temp;
+            }
+            // vb = v back, vf = v front
+            if (vf.z > 0 && vb.z < 0) {
+
+                float t = (1e-3 - vb.z) / (vf.z - vb.z);
+                float3 v_clip = vb + t * (vf - vb);
+                float3 pixel_v_clip = camspace2image_w_depth(v_clip, cam);
+                // printf("pixel_v_clip: %f, %f, %f\n", v_clip.x, v_clip.y, v_clip.z);
+
+                // Adjust bounds to include the intersection point
+                minv = min(minv, pixel_v_clip);
+                maxv = max(maxv, pixel_v_clip);
+            }
+        }
     }
 }
 
@@ -433,38 +449,6 @@ float3 calculate_circumcenter(Tetrahedra tet)
     return tet.verts[0] + relative_circumcenter;
 }
 
-/*
-[Differentiable]
-float3 calculate_circumcenter(Tetrahedra tet) {
-    float3 p1 = tet.verts[0];
-    float3 p2 = tet.verts[1];
-    float3 p3 = tet.verts[2];
-    float3 p4 = tet.verts[3];
-
-    // Construct the matrix A
-    float3x3 A;
-    A[0] = p2 - p1;
-    A[1] = p3 - p1;
-    A[2] = p4 - p1;
-    
-    // Transpose A (HLSL matrices are row-major)
-    A = transpose(A);
-    
-    // Construct the vector b
-    float3 b = float3(
-        dot(p2, p2) - dot(p1, p1),
-        dot(p3, p3) - dot(p1, p1),
-        dot(p4, p4) - dot(p1, p1)
-    ) * 0.5;
-    
-    // Solve the system Ax = b
-    float3 x = SolveLinearSystem(A, b);
-    
-    // The solution x is the circumcenter
-    return x;
-}
-*/
-
 [Differentiable]
 SplatTetrahedra load_tet_alphablend(int32_t g_idx,
                                     DiffTensorView vertices,
@@ -474,24 +458,9 @@ SplatTetrahedra load_tet_alphablend(int32_t g_idx,
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet = load_tetrahedra(vertices, virtual_tet);
     return {
-        tet.verts,
+        tet,
         read_t4_float4(g_idx, rgbs)
     };
-}
-
-[Differentiable]
-Splat_2D_AlphaBlend load_splat_alphablend(int32_t g_idx,
-                                          DiffTensorView xyz_vs,
-                                          DiffTensorView inv_cov_vs,
-                                          DiffTensorView opacity,
-                                          DiffTensorView rgb)
-{
-    float3 g_xyz_vs = read_t3_float3(g_idx, xyz_vs);
-    float3 g_rgb = read_t3_float3(g_idx, rgb);
-    float g_opacity = read_t1_float(g_idx, opacity);
-    float2x2 g_inv_cov = read_t2x2_float2x2(g_idx, inv_cov_vs);
-
-    return { g_xyz_vs, g_rgb, g_opacity, g_inv_cov };
 }
 
 [Differentiable]
@@ -499,39 +468,15 @@ float4 evaluate_tetra(SplatTetrahedra g,
                       float3 ray_o,
                       float3 ray_d)
 {
-    float dist = ray_tetrahedron_intersect(ray_o, ray_d,
-        g.verts[0], g.verts[1], g.verts[2], g.verts[3]);
+    float dist = ray_tetrahedron_intersect(ray_o, ray_d, g.tet);
     if (dist <= 0) {
         return {0.f, 0.f, 0.f, 0.f};
     } else {
-        float alpha = min(max(1-safe_exp(-g.rgbs.w * dist), 0), 1);
+        float alpha = safe_clip(1-safe_exp(-g.rgbs.w * dist), 0, 1);
         return {
             alpha * g.rgbs.x, alpha * g.rgbs.y, alpha * g.rgbs.z, alpha};
     }
 }
-
-[Differentiable]
-float4 evaluate_splat(Splat_2D_AlphaBlend g, 
-                      float2 pix_coord,
-                      uint32_t H,
-                      uint32_t W)
-{
-
-    float3 g_xyz = g.xyz_vs;
-    float3 g_rgb = g.rgb;
-    float g_opacity = g.opacity;
-    float2x2 g_inv_cov_vs = g.inv_cov_vs;
-
-    float2 d = { pix_coord.x - ndc2pix(g_xyz.x, W),
-                 pix_coord.y - ndc2pix(g_xyz.y, H) };
-    float power = -0.5f * (g_inv_cov_vs[0][0] * d.x * d.x +
-                           g_inv_cov_vs[1][1] * d.y * d.y + (g_inv_cov_vs[0][1] + g_inv_cov_vs[1][0]) * d.x * d.y);
-    float alpha = min(0.99f, g_opacity * exp(power));
-    float3 premult_rgb = g_rgb * alpha;
-    
-    return float4(premult_rgb, alpha);
-}
-
 
 [Differentiable]
 float3x3 get_covariance_from_quat_scales(float4 q, float3 s) {
@@ -551,6 +496,7 @@ float3x3 get_covariance_from_quat_scales(float4 q, float3 s) {
     return mul(L, transpose(L));
 }
 
+[Differentiable]
 float3x3 construct_view_matrix(float4x4 viewmatrix)
 {
     return float3x3(
@@ -560,6 +506,7 @@ float3x3 construct_view_matrix(float4x4 viewmatrix)
     );
 }
 
+[Differentiable]
 Ray get_ray(Camera cam, float2 center_pix_coord) {
     float3x3 V = construct_view_matrix(cam.world_view_transform);
     Ray ray;

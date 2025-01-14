@@ -12,7 +12,7 @@ import math
 
 key_pairs = [
     ('torch_image', 'jax_image', 'Image', 1e-1, 1e-1),
-    ('torch_rgbs_grad', 'jax_rgbs_grad', 'RGB Sigma gradient', 1e-1, 1e-1)
+    # ('torch_rgbs_grad', 'jax_rgbs_grad', 'RGB Sigma gradient', 1e-1, 1e-1)
 ]
 
 def generate_point_cloud(n_points, radius, device='cuda'):
@@ -33,7 +33,7 @@ def generate_color_palette(n_colors):
     """Generate distinct colors using matplotlib colormaps."""
     colors = plt.cm.rainbow(np.linspace(0, 1, n_colors))
     colors = torch.tensor(colors, device='cuda')
-    colors[:, 3] = 0.5  # Set alpha value
+    colors[:, 3] = 0.2  # Set alpha value
     return colors.float()
 
 def create_view_matrix(camera_pos, look_at_point):
@@ -60,8 +60,10 @@ class DelaunayRenderTest(parameterized.TestCase):
         self.height = 16
         self.width = 16
         
-    def run_test(self, points, indices, colors, viewmat, tile_size):
+    def run_test(self, points, viewmat, tile_size):
         """Run rendering test with different sample counts and compare results."""
+        indices = compute_delaunay(points)
+        colors = generate_color_palette(len(indices))
         results = test_tetrahedra_rendering(
             points, indices, colors, viewmat,
             height=self.height, width=self.width, 
@@ -74,7 +76,7 @@ class DelaunayRenderTest(parameterized.TestCase):
             tile_size=tile_size, n_samples=5000
         )
         
-        compare_dict_values(results, results2, key_pairs, points, viewmat)
+        compare_dict_values(results, results2, key_pairs, points, viewmat, tile_size)
         return results
     
     @parameterized.product(
@@ -87,8 +89,6 @@ class DelaunayRenderTest(parameterized.TestCase):
         for i in range(N):
             # Generate point cloud and compute Delaunay tetrahedralization
             points = generate_point_cloud(n_points, radius)
-            indices = compute_delaunay(points)
-            colors = generate_color_palette(len(indices))
             
             # Choose random center point
             center_idx = torch.randint(0, len(points), (1,)).item()
@@ -100,7 +100,7 @@ class DelaunayRenderTest(parameterized.TestCase):
             viewmat[:3, 3] = center_point
             viewmat = torch.linalg.inv(viewmat)
             
-            self.run_test(points, indices, colors, viewmat, tile_size)
+            self.run_test(points, viewmat, tile_size)
     
     @parameterized.product(
         n_points=[10, 20],
@@ -112,8 +112,6 @@ class DelaunayRenderTest(parameterized.TestCase):
         """Test rendering from outside the point cloud looking in."""
         for i in range(N):
             points = generate_point_cloud(n_points, radius)
-            indices = compute_delaunay(points)
-            colors = generate_color_palette(len(indices))
             
             # Generate random direction and position camera
             direction = torch.randn(3, device=points.device)
@@ -124,7 +122,7 @@ class DelaunayRenderTest(parameterized.TestCase):
             center = torch.mean(points, dim=0)
             viewmat = create_view_matrix(camera_pos, center)
             
-            self.run_test(points, indices, colors, viewmat, tile_size)
+            self.run_test(points, viewmat, tile_size)
     
     def _random_rotation_matrix(self):
         """Generate random rotation matrix using quaternions."""

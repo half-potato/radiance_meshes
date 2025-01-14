@@ -48,8 +48,10 @@ def vertex_and_tile_shader(indices,
     # ic(tiles_touched, rect_tile_space)
     with torch.no_grad():
         mask = tiles_touched > 0
+        ic(tiles_touched.min(), tiles_touched.max())
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
         total_size_index_buffer = index_buffer_offset[-1]
+        ic(index_buffer_offset[-1])
         unsorted_keys = torch.zeros((total_size_index_buffer,), 
                                     device="cuda", 
                                     dtype=torch.int64)

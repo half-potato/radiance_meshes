@@ -99,7 +99,6 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
         fovx,
         render_grid
     )
-    # ic(vs_tetra)
     
     # Render using PyTorch implementation
     torch_image = AlphaBlendTiledRender.apply(
@@ -134,7 +133,9 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
         'difference': diff,
         'mean_error': mean_error,
         'max_error': max_error,
-        'extras': extras
+        'extras': extras,
+        'vs_tetra': vs_tetra,
+        'circumcenter': circumcenter
     }
 
     if check_gradients:

@@ -1,4 +1,6 @@
 import numpy as np
+import torch
+torch.set_printoptions(precision=10)
 
 class bcolors:
     HEADER = '\033[95m'
@@ -11,7 +13,7 @@ class bcolors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-def compare_dict_values(results1, results2, keys_to_compare, vertices=None, viewmat=None):
+def compare_dict_values(results1, results2, keys_to_compare, vertices=None, viewmat=None, tile_size=None):
     """
     Compare values from two dictionaries, checking for error magnitude and convergence.
     
@@ -53,5 +55,7 @@ def compare_dict_values(results1, results2, keys_to_compare, vertices=None, view
                 error_message += f"\nvertices = torch.{vertices}"
             if viewmat is not None:
                 error_message += f"\nviewmat = torch.{viewmat}"
+            if tile_size is not None:
+                error_message += f"\ntile_size = {tile_size}"
             error_message += f"\n{bcolors.FAIL}END MESSAGE{bcolors.ENDC}"
             raise AssertionError(error_message) from e

@@ -30,12 +30,12 @@ bool is_nan(float x) {
 }
 
 [Differentiable]
-float clip(float v, float minv, float maxv) {
+float safe_clip(float v, float minv, float maxv) {
   return max(min(v, maxv), minv);
 }
 
 [Differentiable]
-float3 clip(float3 v, float minv, float maxv) {
+float3 safe_clip(float3 v, float minv, float maxv) {
   return {
     max(min(v.x, maxv), minv),
     max(min(v.y, maxv), minv),
@@ -44,7 +44,7 @@ float3 clip(float3 v, float minv, float maxv) {
 }
 
 [Differentiable]
-float4 clip(float4 v, float minv, float maxv) {
+float4 safe_clip(float4 v, float minv, float maxv) {
   return {
     max(min(v.x, maxv), minv),
     max(min(v.y, maxv), minv),
@@ -55,15 +55,15 @@ float4 clip(float4 v, float minv, float maxv) {
 
 void bw_safe_div(inout DifferentialPair<float> a, inout DifferentialPair<float> b, float.Differential R) {
   if (abs(b.p) < TINY_VAL) {
-    a = DifferentialPair<float>(a.p, clip(R / TINY_VAL, MIN_VAL, MAX_VAL));
+    a = DifferentialPair<float>(a.p, safe_clip(R / TINY_VAL, MIN_VAL, MAX_VAL));
   } else {
-    a = DifferentialPair<float>(a.p, clip(R / b.p, MIN_VAL, MAX_VAL));
+    a = DifferentialPair<float>(a.p, safe_clip(R / b.p, MIN_VAL, MAX_VAL));
   }
   let b2 = b.p * b.p;
   if (b2 < TINY_VAL) {
-    b = DifferentialPair<float>(b.p, clip(- a.p / TINY_VAL * R, MIN_VAL, MAX_VAL));
+    b = DifferentialPair<float>(b.p, safe_clip(- a.p / TINY_VAL * R, MIN_VAL, MAX_VAL));
   } else {
-    b = DifferentialPair<float>(b.p, clip(- a.p / b2 * R, MIN_VAL, MAX_VAL));
+    b = DifferentialPair<float>(b.p, safe_clip(- a.p / b2 * R, MIN_VAL, MAX_VAL));
   }
 }
 
@@ -72,9 +72,9 @@ void bw_safe_div(inout DifferentialPair<float> a, inout DifferentialPair<float> 
 [BackwardDerivative(bw_safe_div)]
 float safe_div(in float a, in float b) {
   if (abs(b) < TINY_VAL) {
-    return clip(a / TINY_VAL, MIN_VAL, MAX_VAL);
+    return safe_clip(a / TINY_VAL, MIN_VAL, MAX_VAL);
   } else {
-    return clip(a / b, MIN_VAL, MAX_VAL);
+    return safe_clip(a / b, MIN_VAL, MAX_VAL);
   }
 }
 
@@ -136,7 +136,7 @@ float3 l2_normalize(float3 x) {
 
 [Differentiable]
 float safe_exp(float v) {
-  return exp(clip(v, MIN_VAL, log(MAX_VAL)));
+  return exp(safe_clip(v, MIN_VAL, log(MAX_VAL)));
 }
 
 void bw_log1p(inout DifferentialPair<float> v, float.Differential R) {
@@ -150,12 +150,12 @@ float _log1p(float v) {
 }
 
 void bw_log(inout DifferentialPair<float> v, float.Differential R) {
-  v = DifferentialPair<float>(v.p, R / clip(v.p, MIN_VAL, MAX_VAL));
+  v = DifferentialPair<float>(v.p, R / safe_clip(v.p, MIN_VAL, MAX_VAL));
 }
 
 [BackwardDerivative(bw_log)]
 float safe_log(float v) {
-  return log(clip(v, MIN_VAL, MAX_VAL));
+  return log(safe_clip(v, MIN_VAL, MAX_VAL));
 }
 
 void bw_expm1(inout DifferentialPair<float> v, float.Differential R) {

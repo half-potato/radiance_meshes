@@ -29,7 +29,6 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
                                                                                  fovx,
                                                                                  render_grid)
    
-    # print(vs_tetra)
     # retain_grad fails if called with torch.no_grad() under evaluation
     try:
         vs_tetra.retain_grad()
@@ -39,10 +38,11 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
     # torch.cuda.synchronize()
     # dt1 = (time.time() - st)
     if cell_values is None:
-        rgbs = torch.zeros((circumcenter.shape[0], 4), device=circumcenter.device)
+        rgbs = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
         rgbs[mask] = rgbs_fn(circumcenter[mask])
     else:
         rgbs = cell_values
+    rgbs = cell_values
 
     # torch.cuda.synchronize()
     # st = time.time()
