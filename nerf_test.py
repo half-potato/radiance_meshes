@@ -1,5 +1,3 @@
-# %%
-
 import os
 VERSION = 9
 if VERSION is not None:
@@ -11,9 +9,6 @@ sys.path.append(str(Path(os.path.abspath('')).parent))
 print(str(Path(os.path.abspath('')).parent))
 import math
 import torch
-from torch import Tensor
-from delaunay_rasterization.internal.alphablend_tiled_slang import render_alpha_blend_tiles_slang_raw
-from scipy.spatial import Voronoi, Delaunay
 from torch import nn
 import matplotlib.pyplot as plt
 import mediapy
@@ -22,204 +17,116 @@ from data import loader
 import random
 import time
 import tinycudann as tcnn
-from utils.contraction import contract_mean_std
-from utils import topo_utils
 from tqdm import tqdm
 import numpy as np
 # from dtet import DelaunayTriangulation
 # from dtet.build.dtet import DelaunayTriangulation
 from gDel3D.build.gdel3d import Del
-from scipy.spatial import KDTree
 from utils import cam_util
-from utils import train_util
+from utils.train_util import *
+from models.vertex_color import Model, TetOptimizer
 from utils import viz_util
+from plyfile import PlyData, PlyElement
+from utils.graphics_utils import l2_normalize_th
+from utils import topo_utils
+import imageio
+from fused_ssim import fused_ssim
+from utils.loss_utils import ssim
 
-K = 20
-
-def fov2focal(fov, pixels):
-    return pixels / (2 * math.tan(fov / 2))
-
-def focal2fov(focal, pixels):
-    return 2*math.atan(pixels/(2*focal))
-
-def get_slang_projection_matrix(znear, zfar, fy, fx, height, width, device):
-    tanHalfFovX = width/(2*fx)
-    tanHalfFovY = height/(2*fy)
-
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
-
-    z_sign = 1.0
-
-    P = torch.tensor([
-       [2.0 * znear / (right - left),     0.0,                          (right + left) / (right - left), 0.0 ],
-       [0.0,                              2.0 * znear / (top - bottom), (top + bottom) / (top - bottom), 0.0 ],
-       [0.0,                              0.0,                          z_sign * zfar / (zfar - znear),  -(zfar * znear) / (zfar - znear) ],
-       [0.0,                              0.0,                          z_sign,                          0.0 ]
-    ], device=device)
-
-    return P
-
-def common_camera_properties_from_gsplat(viewmats, Ks, height, width):
-  """ Fetches all the Camera properties from the inria defined object"""
-  zfar = 100.0
-  znear = 0.01
-  
-  world_view_transform = viewmats
-  fx = Ks[0,0]
-  fy = Ks[1,1]
-  projection_matrix = get_slang_projection_matrix(znear, zfar, fy, fx, height, width, Ks.device)
-  fovx = focal2fov(fx, width)
-  fovy = focal2fov(fy, height)
-
-  cam_pos = viewmats.inverse()[:, 3]
-
-  return world_view_transform, projection_matrix, cam_pos, fovy, fovx
-
-# %%
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    "/optane/nerf_datasets/360/bicycle", "images_8", data_device="cuda", eval=True)
+    "/optane/nerf_datasets/360/bicycle", "images_4", data_device="cuda", eval=True)
 
-# %%
+
+sh_deg = 3
+# dim = 8
+# vertex_rgbs_param[:, 4:] = 0
+
+# path = "/home/dronelab/gaussian-splatting-merge/eval/bicycle/point_cloud/iteration_7000/point_cloud.ply"
+# plydata = PlyData.read(path)
+
+# xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+#                 np.asarray(plydata.elements[0]["y"]),
+#                 np.asarray(plydata.elements[0]["z"])),  axis=1)
+# opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+# features_dc = np.zeros((xyz.shape[0], 3, 1))
+# features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+# features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+# features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+# # extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+# # extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+# # assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+# # features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+# # for idx, attr_name in enumerate(extra_f_names):
+# #     features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+# # # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+# # features_extra = features_extra.reshape((features_extra.shape[0], (self.max_sh_degree + 1) ** 2 - 1, 3))
+
+
+# vertices = torch.as_tensor(xyz)
+# N = 10000
+# vertices = torch.cat([
+#   vertices.reshape(-1, 3),
+#   (torch.rand((N, 3)) * (maxv - minv) + minv) * 2
+# ], dim=0)
+
+# vertices = nn.Parameter(vertices.cuda())
+# offset = torch.zeros((1, dim), device=device)
+# offset[0, 3] = math.log(0.1)
+# vertex_rgbs_param = (2*torch.rand((vertices.shape[0], dim), device=device)-1) + offset
+# # vertex_rgbs_param[:, 1:4] = inverse_sigmoid(torch.as_tensor(SH2RGB(features_dc)).cuda()).reshape(-1, 3)
+# vertex_rgbs_param = nn.Parameter(vertex_rgbs_param)
+
+camera = train_cameras[0]
+
+tile_size = 4
 
 device = torch.device('cuda')
-torch.manual_seed(2)
-N = scene_info.point_cloud.points.shape[0]
-# N = 1000
-vertices = torch.as_tensor(scene_info.point_cloud.points)[:N]
-minv = vertices.min(dim=0, keepdim=True).values
-maxv = vertices.max(dim=0, keepdim=True).values
-repeats = 20
-vertices = vertices.reshape(-1, 1, 3).expand(-1, repeats, 3)
-vertices = vertices + torch.randn(*vertices.shape) * 5e-1
-N = 10000
-vertices = torch.cat([
-  vertices.reshape(-1, 3),
-  (torch.rand((N, 3)) * (maxv - minv) + minv) * 2
-], dim=0)
-vertices = nn.Parameter(vertices.cuda())
-scaling = torch.tensor([[1, 1, 1, 1]], device=device)
-offset = torch.tensor([[0, 0, 0, math.log(0.01)]], device=device)
-vertex_rgbs_param = nn.Parameter(scaling * (2*torch.rand((vertices.shape[0], 4), device=device)-1) + offset)
+model = Model.init_from_pcd(scene_info.point_cloud, 2, device)
+tet_optim = TetOptimizer(model)
 
-encoding = tcnn.Encoding(3, dict(
-    otype="HashGrid",
-    n_levels=16,
-    n_features_per_level=2,
-    log2_hashmap_size=14,
-    base_resolution=16,
-    per_level_scale=2
-))
-network = tcnn.Network(encoding.n_output_dims, 4, dict(
-    # otype="CutlassMLP",
-    otype="FullyFusedMLP",
-    activation="ReLU",
-    output_activation="None",
-    n_neurons=64,
-    n_hidden_layers=2,
-))
-net = torch.nn.Sequential(
-    encoding, network
-).to(device)
-
-def rgbs_activation(rgbs_raw):
-  rgbs = torch.cat([torch.sigmoid(rgbs_raw[:, :3]), safe_exp(rgbs_raw[:, 3:])], dim=1)
-  return rgbs
-
-def safe_exp(x):
-  return x.clip(max=5).exp()
-
-def safe_trig_helper(x, fn, t=100 * torch.pi):
-  """Helper function used by safe_cos/safe_sin: mods x before sin()/cos()."""
-  return fn(torch.nan_to_num(torch.where(torch.abs(x) < t, x, x % t)))
-
-
-def safe_cos(x):
-  """jnp.cos() on a TPU may NaN out for large values."""
-  return safe_trig_helper(x, torch.cos)
-
-
-def safe_sin(x):
-  """jnp.sin() on a TPU may NaN out for large values."""
-  return safe_trig_helper(x, torch.sin)
-
-def rgbs_fn(xyz):
-  cxyz, _ = contract_mean_std(xyz, torch.ones_like(xyz[..., 0]))
-  rgbs_raw = net((cxyz/2 + 1)/2).float()
-  return rgbs_activation(rgbs_raw)
-
-# %%
-camera = train_cameras[0]
-print(camera.projection_matrix)
-
-# %%
-def render(camera, indices, vertices):
-    fy = fov2focal(camera.fovy, camera.image_height)
-    fx = fov2focal(camera.fovx, camera.image_width)
-    K = torch.tensor([
-    [fx, 0, camera.image_width/2],
-    [0, fy, camera.image_height/2],
-    [0, 0, 1],
-    ]).to(camera.world_view_transform.device)
-
-    # world_view_transform, projection_matrix, cam_pos, fovy, fovx = common_camera_properties_from_gsplat(
-    #     camera.world_view_transform.T, K, camera.image_height, camera.image_width)
-    cam_pos = camera.world_view_transform.T.inverse()[:, 3]
-    cell_values = rgbs_activation(vertex_rgbs_param[indices.reshape(-1)].reshape(-1, 4, 4).sum(dim=1) / 4)
-    # ic(vertex_rgbs_param[indices.reshape(-1)], vertex_rgbs_param)
-    # cell_values = torch.gather(vertex_rgbs_param, 0, indices.long()).sum(dim=1) / 4
-    # ic(torch.gather(vertex_rgbs_param, 0, indices.long()).shape)
-    # cell_values = rgbs_activation(cell_values)
-
-
-    render_pkg = render_alpha_blend_tiles_slang_raw(indices, vertices, rgbs_fn,
-                                                    camera.world_view_transform.T, K, cam_pos,
-                                                    camera.fovy, camera.fovx, camera.image_height,
-                                                    camera.image_width, cell_values=cell_values,
-                                                    tile_size=tile_size)
-    return render_pkg
-
-optim = torch.optim.Adam([
-    # {"params": net.parameters(), "lr": 1e-3},
-    {"params": [vertices], "lr": 1e-4},
-    {"params": [vertex_rgbs_param], "lr": 5e-2},
-])
-tile_size = 8
 images = []
-
-# v = DelaunayTriangulation()
-# v.init_from_points(vertices.detach().cpu().numpy())
-# indices_np = v.get_cells()
-v = Del(vertices.shape[0])
-indices_np, prev = v.compute(vertices.detach().cpu())
-indices_np = indices_np.numpy()
-del v
-
-# v = Delaunay(vertices.detach().cpu().numpy())
-# indices_np = v.simplices
-
-# indices_np = indices_np[np.lexsort(indices_np.T)].astype(np.int32)
-indices_np = indices_np[(indices_np < vertices.shape[0]).all(axis=1)]
-indices = torch.as_tensor(indices_np).cuda()
-ic(indices.shape, indices.max(), indices.min())
-
-old_vertices = vertices.detach().cpu().numpy()
-render_pkg = render(camera, indices, vertices)
-last_circumcenters = render_pkg['circumcenters']
-num_violations = []
-num_tets = []
 psnrs = [[]]
 inds = []
-training_images = []
-do_delaunay = False
 
-# progress_bar = tqdm(range(4*len(train_cameras)+2))
-progress_bar = tqdm(range(5000))
-for i in progress_bar:
-    do_delaunay = i % 1 == 0
-    optim.zero_grad()
+args = lambda x: x
+args.start_tracking = 000
+args.cloning_interval = 500
+args.budget = 1_000_000
+args.num_densification_samples = len(train_cameras)
+args.densify_start = 1500
+args.num_densify_iter = 16000 - args.densify_start
+args.num_iter = 30000
+args.sh_degree_interval = 2000
+
+# args = lambda x: x
+# args.start_tracking = 000
+# args.cloning_interval = 500
+# args.budget = 500_000
+# args.num_densification_samples = 50
+# args.num_densify_iter = 2500
+# args.densify_start = 1000
+# args.num_iter = args.densify_start + args.num_densify_iter + 1500
+# args.sh_degree_interval = 500
+
+def target_num(x):
+    S = model.vertices.shape[0]
+    N = args.num_densify_iter // args.cloning_interval
+    k = (args.budget - S) // N
+    return (args.budget - S - k * N) // N**2 * x**2 + k * x + S
+
+print([target_num(i+1) for i in range(args.num_densify_iter // args.cloning_interval)])
+
+progress_bar = tqdm(range(args.num_iter))
+for train_ind in progress_bar:
+    delaunay_interval = 10#1 if train_ind < args.densify_start else 10
+    do_delaunay = train_ind % delaunay_interval == 0 and train_ind > 0
+    do_cloning = max(train_ind - args.densify_start, 0) % args.cloning_interval == 0 and (args.num_densify_iter + args.densify_start) > train_ind > args.densify_start
+    do_tracking = False
+    do_sh = train_ind % args.sh_degree_interval == 0 and train_ind > 0
+    do_sh_step = train_ind % 16 == 0
+
 
     # ind = random.randint(0, len(train_cameras)-1)
     if len(inds) == 0:
@@ -231,89 +138,157 @@ for i in progress_bar:
     camera = train_cameras[ind]
     target = camera.original_image.cuda()
 
-    # if do_delaunay:
-    #     st = time.time()
-    #     with torch.no_grad():
-    #         sensitivity = topo_utils.compute_vertex_sensitivity(indices, vertices)
-    #         scaling = 1/(sensitivity.reshape(-1, 1)+1e-5)
-    # else:
-    #     scaling = torch.tensor(0.0, device=device)
-    # scale_vertices = train_util.ScaleGradients.apply(vertices, scaling)
-    # print(f'sensitivity: {1/(time.time()-st)}')
-
     st = time.time()
-    render_pkg = render(camera, indices, vertices)
-    # print(f'render: {1/(time.time()-st)}')
+    render_pkg = render(camera, model)
+    # torch.cuda.synchronize()
+    # print(f'render: {(time.time()-st)}')
     image = render_pkg['render']
-    loss = ((target - image)**2).mean()
+    l2_loss = ((target - image)**2).mean()
+    # ssim_loss = 1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))
+    # lambda_ssim = 0.2
+    # loss = (1-lambda_ssim)*l2_loss + lambda_ssim*ssim_loss
+    loss = l2_loss
  
+    st = time.time()
     loss.backward()
-    optim.step()
+    tet_optim.optim.step()
+    tet_optim.optim.zero_grad()
 
-    psnr = 20 * math.log10(1.0 / math.sqrt(loss.detach().cpu().item()))
+    if do_tracking:
+        tet_optim.track_gradients()
+
+    if do_sh_step:
+        tet_optim.sh_optim.step()
+        tet_optim.sh_optim.zero_grad()
+
+    if do_delaunay:
+        tet_optim.vertex_optim.step()
+        tet_optim.vertex_optim.zero_grad()
+    # print(f'bw: {(time.time()-st)}')
+
+    if do_sh:
+        model.sh_up()
+
+    if do_cloning:
+        # collect data
+        tet_optim.optim.zero_grad()
+        tet_optim.vertex_optim.zero_grad()
+        tet_optim.sh_optim.zero_grad()
+
+        full_inds = list(range(len(train_cameras)))
+        random.shuffle(full_inds)
+
+        tet_optim.reset_tracker()
+        sampled_cameras = [train_cameras[i] for i in full_inds[:args.num_densification_samples]]
+        tet_rgbs_grad = None
+        for camera in sampled_cameras:
+            render_pkg = render(camera, model, register_tet_hook=True)
+            # torch.cuda.synchronize()
+            # print(f'render: {(time.time()-st)}')
+            image = render_pkg['render']
+            l2_loss = ((target - image)**2).mean()
+            # ssim_loss = 1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))
+            # lambda_ssim = 0.2
+            # loss = (1-lambda_ssim)*l2_loss + lambda_ssim*ssim_loss
+            loss = l2_loss
+        
+            loss.backward()
+            tet_grad = render_pkg['tet_grad'][0]
+            scores = tet_grad.abs().sum(dim=-1)
+            if tet_rgbs_grad is None:
+                tet_rgbs_grad = scores
+            else:
+                tet_rgbs_grad = torch.maximum(scores, tet_rgbs_grad)
+
+        # tet_optim.track_gradients()
+
+        tet_optim.optim.step()
+        tet_optim.vertex_optim.step()
+        tet_optim.sh_optim.step()
+        tet_optim.sh_optim.zero_grad()
+        tet_optim.optim.zero_grad()
+        tet_optim.vertex_optim.zero_grad()
+
+        target_addition = target_num((train_ind - args.densify_start) // args.cloning_interval + 1) - model.vertices.shape[0]
+        ic(target_addition, (train_ind - args.densify_start) // args.cloning_interval + 1)
+        rgbs_threshold = torch.sort(tet_rgbs_grad).values[-min(int(target_addition), tet_rgbs_grad.shape[0])]
+
+        clone_mask = tet_rgbs_grad > rgbs_threshold
+
+        # rgbs_grad, vertex_grad = tet_optim.get_tracker_predicates() 
+        # reduce_type = "sum"
+        # # tet_std = torch.std(model.vertex_rgbs_param[model.indices], dim=1).max(dim=1).values
+        # tet_rgbs_grad = rgbs_grad[model.indices].sum(dim=1)
+        # tet_vertex_grad = vertex_grad[model.indices].sum(dim=1)
+        # clone_mask = (tet_rgbs_grad > rgbs_threshold) | (tet_vertex_grad > vertex_threshold)
+        clone_indices = model.indices[clone_mask]
+
+        barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device)
+        # barycentric = torch.ones((clone_indices.shape[0], clone_indices.shape[1], 1), device=device)
+        barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
+        tet_optim.split(clone_indices, barycentric_weights)
+
+        # new_vertex_location, radius = topo_utils.calculate_circumcenters_torch(model.vertices[clone_indices])
+        # new_feat = model.vertex_rgbs_param[clone_indices].mean(dim=1)
+        # perturb = sample_uniform_in_sphere(new_vertex_location.shape[0], 3).to(new_vertex_location.device)
+        # tet_optim.add_points(new_vertex_location + radius.reshape(-1, 1) * perturb, new_feat)
+
+        out = f"#RGBS Clone: {(tet_rgbs_grad > rgbs_threshold).sum()} "
+        # out += f"#Vertex Clone: {(tet_vertex_grad > vertex_threshold).sum()} "
+        out += f"∇RGBS: {tet_rgbs_grad.mean()} "
+        out += f"target_addition: {target_addition} "
+        # out += f"∇Vertex: {tet_vertex_grad.mean()} "
+        # out += f"σ: {tet_std.mean()}"
+        print(out)
+        tet_optim.reset_tracker()
+
+    psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
     psnrs[-1].append(psnr)
 
-    disp_im = torch.cat([target, image], dim=2)
-    disp_im = disp_im.permute(1, 2, 0)
-    disp_im = disp_im.detach().cpu().numpy()
-    training_images.append(disp_im)
-    
     disp_ind = max(len(psnrs)-2, 0)
     avg_psnr = sum(psnrs[disp_ind]) / max(len(psnrs[disp_ind]), 1)
-    progress_bar.set_postfix({"PSNR": f"{psnr:.02f} Mean: {avg_psnr}"})
+    # progress_bar.set_postfix({"PSNR": f"{psnr:>8.2f} Mean: {avg_psnr:>8.2f} #V: {len(model)} #T: {model.indices.shape[0]}"})
+    progress_bar.set_postfix({
+        "PSNR": repr(f"{psnr:>5.2f}"),
+        "Mean": repr(f"{avg_psnr:>5.2f}"),
+        "#V": len(model),
+        "#T": model.indices.shape[0]
+    })
 
+    st = time.time()
     with torch.no_grad():
-        if i % 1 == 0:
-            ind = 1
-            camera = train_cameras[ind]
-            render_pkg = render(camera, indices, vertices)
+        if train_ind % 1 == 0:
+            train_ind = 1
+            camera = train_cameras[train_ind]
+            render_pkg = render(camera, model)
             image = render_pkg['render']
             image = image.permute(1, 2, 0)
             image = image.detach().cpu().numpy()
             images.append(image)
+    # print(f'second: {(time.time()-st)}')
 
-    # st = time.time()
     if do_delaunay:
         st = time.time()
-        v = Del(vertices.shape[0])
-        indices_np, nprev = v.compute_from_prev(vertices.detach().cpu(), prev)
-        del prev
-        prev = nprev
-        ic(indices.shape, indices.max(), indices.min())
-        indices_np = indices_np.numpy()
-        indices_np = indices_np[(indices_np < vertices.shape[0]).all(axis=1)]
-        # print(f'del: {1/(time.time()-st)}')
-        indices = torch.as_tensor(indices_np.astype(np.int32)).cuda()
-        old_vertices = vertices.detach().cpu().numpy()
+        model.update_triangulation()
+        # print(f'update: {(time.time()-st)}')
 
-    if i % 500 == 0:
-        plt.imshow(image)
-        plt.show()
-        avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
-        plt.plot(range(len(avged_psnrs)), avged_psnrs)
-        plt.show()
-        mediapy.show_video(images)
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 plt.plot(range(len(avged_psnrs)), avged_psnrs)
 plt.show()
-mediapy.show_video(images)
-plt.plot(range(len(num_violations)), num_violations)
-plt.plot(range(len(num_tets)), num_tets)
-plt.show()
+mediapy.write_video("training.mp4", images)
 
-# %%
-viz_util.create_image_viewer(training_images, skip_value=20)
+torch.cuda.synchronize()
+torch.cuda.empty_cache()
 
-# %%
 epath = cam_util.generate_cam_path(train_cameras, 400)
 eimages = []
 for camera in tqdm(epath):
-    render_pkg = render(camera, indices, vertices)
+    render_pkg = render(camera, model)
     image = render_pkg['render']
     image = image.permute(1, 2, 0)
     image = image.detach().cpu().numpy()
     eimages.append(image)
 
-mediapy.show_video(eimages)
+mediapy.write_video("rotating.mp4", eimages)
 
 

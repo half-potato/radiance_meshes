@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import math
 torch.set_printoptions(precision=10)
 
 class bcolors:
@@ -59,3 +60,48 @@ def compare_dict_values(results1, results2, keys_to_compare, vertices=None, view
                 error_message += f"\ntile_size = {tile_size}"
             error_message += f"\n{bcolors.FAIL}END MESSAGE{bcolors.ENDC}"
             raise AssertionError(error_message) from e
+
+def check_tile_indices(him, wim, tile_size, rt):
+    """
+    Check if the calculated tile indices match the expected results.
+
+    Args:
+        him (np.ndarray): Array of height indices.
+        wim (np.ndarray): Array of width indices.
+        tile_size (int): Size of the tiles.
+        rt (list): Expected results [tminx, tminy, tmaxx, tmaxy].
+
+    Raises:
+        AssertionError: If any calculated value does not match the expected result.
+    """
+    tminx = math.floor(np.min(him) / tile_size)
+    tmaxx = math.ceil(np.max(him) / tile_size)
+    tminy = math.floor(np.min(wim) / tile_size)
+    tmaxy = math.ceil(np.max(wim) / tile_size)
+
+    # Print debug information
+    # print(f"{bcolors.HEADER}Debug Information{bcolors.ENDC}")
+    # print(f"{bcolors.OKCYAN}tminx: {tminx}, tmaxx: {tmaxx}{bcolors.ENDC}")
+    # print(f"{bcolors.OKCYAN}tminy: {tminy}, tmaxy: {tmaxy}{bcolors.ENDC}")
+    # print(f"{bcolors.OKCYAN}Expected (rt): {rt}{bcolors.ENDC}")
+
+    try:
+        assert tminx == rt[0], f"tminx mismatch: expected {rt[0]}, got {tminx}"
+        assert tminy == rt[1], f"tminy mismatch: expected {rt[1]}, got {tminy}"
+        assert tmaxx == rt[2], f"tmaxx mismatch: expected {rt[2]}, got {tmaxx}"
+        assert tmaxy == rt[3], f"tmaxy mismatch: expected {rt[3]}, got {tmaxy}"
+        # print(f"{bcolors.OKGREEN}All checks passed successfully!{bcolors.ENDC}")
+    except AssertionError as e:
+        error_message = (
+            f"{bcolors.FAIL}Tile index check failed!{bcolors.ENDC}\n"
+            f"Details: {e}\n"
+            f"{bcolors.WARNING}Hint: Check the inputs (him, wim, tile_size).{bcolors.ENDC}\n"
+            f"Inputs:\n"
+            f"- him: {him}\n"
+            f"- wim: {wim}\n"
+            f"- tile_size: {tile_size}\n"
+            f"- gt: [{tminx} - {tmaxx}], [{tminy} - {tmaxy}]\n"
+            f"- pred: [{rt[0]} - {rt[2]}], [{rt[1]} - {rt[3]}]\n"
+            f"{bcolors.FAIL}END MESSAGE{bcolors.ENDC}"
+        )
+        raise AssertionError(error_message)

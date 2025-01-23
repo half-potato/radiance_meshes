@@ -17,7 +17,7 @@ import os
 
 shaders_path = os.path.dirname(__file__)
 
-TILE_SIZES_HW = [(4,4), (8,8), (16,16)]
+TILE_SIZES_HW = [(2,2), (4,4), (8,8), (16,16)]
 
 vertex_shader = slangtorch.loadModule(os.path.join(shaders_path, "vertex_shader.slang"))
 tile_shader = slangtorch.loadModule(os.path.join(shaders_path, "tile_shader.slang"))

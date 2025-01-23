@@ -46,20 +46,21 @@ void generate_keys(TensorView<float> xyz_vs,
     int32_t rect_min_y = rect_tile_space[uint2(globalIdx, 1)];
     int32_t rect_max_x = rect_tile_space[uint2(globalIdx, 2)];
     int32_t rect_max_y = rect_tile_space[uint2(globalIdx, 3)];
-    
+
     for (int32_t y = rect_min_y; y < rect_max_y; y++)
     {
         for (int32_t x = rect_min_x; x < rect_max_x; x++)
         {
             uint64_t key = y * grid_width + x;
             key <<= 32;
-            key = key | reinterpret<int32_t>(ndc_xyz.z);
+            uint32_t fk = reinterpret<uint32_t>(abs(ndc_xyz.z));
+            key = key | fk;
+
             out_unsorted_keys[offset] = key;
             out_unsorted_gauss_idx[offset] = globalIdx;
             offset++;
         }
     }
-
 }
 
 [AutoPyBindCUDA]
@@ -79,12 +80,16 @@ void compute_tile_ranges(TensorView<int64_t> sorted_keys,
     else
     {
         uint32_t prevtile = uint32_t(uint64_t(sorted_keys[globalIdx - 1]) >> 32);
+        if (prevtile > currtile) {
+            printf("Strange things are about\n");
+        }
         if (currtile != prevtile)
         {
             out_tile_ranges[uint2(prevtile, 1)] = globalIdx;
             out_tile_ranges[uint2(currtile, 0)] = globalIdx;
         }
     }
-    if (globalIdx == sorted_keys.size(0) - 1)
+    if (globalIdx == sorted_keys.size(0) - 1) {
         out_tile_ranges[uint2(currtile, 1)] = sorted_keys.size(0);
+    }
 }

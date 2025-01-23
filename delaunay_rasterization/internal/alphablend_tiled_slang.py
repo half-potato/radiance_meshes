@@ -20,7 +20,8 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
                              width,
                              tile_height=tile_size,
                              tile_width=tile_size)
-    sorted_tetra_idx, tile_ranges, radii, vs_tetra, circumcenter, mask = vertex_and_tile_shader(indices,
+    st = time.time()
+    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _ = vertex_and_tile_shader(indices,
                                                                                  vertices,
                                                                                  world_view_transform,
                                                                                  K,
@@ -29,6 +30,8 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
                                                                                  fovx,
                                                                                  render_grid)
    
+    # torch.cuda.synchronize()
+    # ic("vt", time.time()-st)
     # retain_grad fails if called with torch.no_grad() under evaluation
     try:
         vs_tetra.retain_grad()
@@ -65,8 +68,7 @@ def render_alpha_blend_tiles_slang_raw(indices, vertices,
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
         'viewspace_points': vs_tetra,
-        'visibility_filter': radii > 0,
-        'radii': radii,
+        'visibility_filter': mask,
         'circumcenters': circumcenter,
         'rgbs': rgbs,
     }
@@ -95,6 +97,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         )
 
         alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+        st = time.time()
         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
             sorted_gauss_idx=sorted_tetra_idx,
             tile_ranges=tile_ranges,
@@ -121,11 +124,15 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             gridSize=(render_grid.grid_width, 
                       render_grid.grid_height, 1)
         )
+        # torch.cuda.synchronize()
+        # ic("ab", time.time()-st)
+        # ic(n_contributors.float().mean(), n_contributors.max())
 
         ctx.save_for_backward(sorted_tetra_idx, tile_ranges,
                               indices, vertices, rgbs, 
                               output_img, n_contributors,
                               world_view_transform, K, cam_pos)
+
         ctx.render_grid = render_grid
         ctx.fovy = fovy
         ctx.fovx = fovx
@@ -154,6 +161,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
         alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
 
+        st = time.time()
         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(
             sorted_gauss_idx=sorted_tetra_idx,
             tile_ranges=tile_ranges,
@@ -181,6 +189,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             gridSize=(render_grid.grid_width, 
                       render_grid.grid_height, 1)
         )
+        # torch.cuda.synchronize()
+        # ic("abb", time.time()-st)
         
         return (None, None, indices_grad, vertices_grad, rgbs_grad, 
                 None, None, None, None, None, None, None)

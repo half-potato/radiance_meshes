@@ -11,8 +11,8 @@ from scipy.spatial import Voronoi, Delaunay
 from icecream import ic
 
 # Generate random 3D points
-num_points = 100
-torch.manual_seed(189710236)
+num_points = 20
+torch.manual_seed(189710237)
 vertices = torch.rand((num_points, 3), device='cuda')
 
 # Initialize Delaunay triangulation
@@ -23,9 +23,10 @@ prev.check_correctness(vertices.detach().cpu())
 
 oindices_np = oindices_np.numpy()
 indices_np = oindices_np[(oindices_np < vertices.shape[0]).all(axis=1)]
+print(oindices_np.shape, indices_np.shape)
 indices = torch.as_tensor(indices_np.astype(np.int32)).cuda()
 print(f'Initial Delaunay computation time: {1 / (time.time() - st):.4f} Hz')
-ic(indices)
+# ic(indices)
 # d = Delaunay(vertices.cpu().numpy())
 # print(d.simplices.shape)
 d = torch.randn_like(vertices)
@@ -44,7 +45,7 @@ for i in range(1):
     indices_np = np.sort(indices_np, axis=1)
     indices_np = indices_np[np.lexsort(indices_np.T)].astype(np.int32)
     indices = torch.as_tensor(indices_np.astype(np.int32)).cuda()
-    ic(indices, indices.shape)
+    # ic(indices, indices.shape)
     prev.check_correctness(vertices.detach().cpu())
     print(f'Perturbed Delaunay computation time: {1 / (time.time() - st):.4f} Hz')
 

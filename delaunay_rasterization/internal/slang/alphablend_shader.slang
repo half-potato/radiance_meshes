@@ -65,17 +65,21 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool is_inside = (pix_coord.x < W && pix_coord.y < H);
     bool thread_active = is_inside;
 
-    const int shared_memory_rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
+    const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
+    if (shared_memory_rounds > 10000) {
+        printf("%i,", shared_memory_rounds);
+    }
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
     //bool print = thread_rank == 0;
     bool print = false;
 
     Ray ray = get_ray(cam, center_pix_coord);
-    if (print) {
-        printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
-    }
+    // if (print) {
+    //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
+    // }
 
     int32_t local_n_contrib = 0;
+    // int32_t low = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
@@ -84,7 +88,13 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
         int splat_pointer_offset = i * block_size + thread_rank;
         if (tile_idx_start + splat_pointer_offset < tile_idx_end)
         {
+            if (tile_idx_start + splat_pointer_offset >= sorted_gauss_idx.size(0)) {
+                printf("WTF2");
+            }
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
+            if (coll_id >= indices.size(0)) {
+                printf("WTF");
+            }
             collected_splats[thread_rank] = load_tet_alphablend(coll_id, vertices, indices, rgbs);
         }
         AllMemoryBarrierWithGroupSync();
@@ -94,9 +104,13 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 local_n_contrib++;
                 SplatTetrahedra g = collected_splats[j];
                 float4 tetra_rgba = evaluate_tetra(g, ray.o, ray.d);
-                if (print) {
-                    printf("tetra rgba: %f, %f, %f, %f\n", tetra_rgba.x, tetra_rgba.y, tetra_rgba.z, tetra_rgba.w);
-                }
+                // if (tetra_rgba.w < 1e-2) {
+                //     low++;
+                // }
+                if (tetra_rgba.w < 1/255.f) continue;
+                // if (print) {
+                //     printf("tetra rgba: %f, %f, %f, %f\n", tetra_rgba.x, tetra_rgba.y, tetra_rgba.z, tetra_rgba.w);
+                // }
 
                 float4 new_pixel_state = update_pixel_state(curr_pixel_state, tetra_rgba);
                 curr_pixel_state = new_pixel_state;
@@ -113,6 +127,7 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     if (is_inside)
         n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)] = local_n_contrib;
+    // printf("%i/%i,", low, local_n_contrib);
 
     return curr_pixel_state;
 }
@@ -159,7 +174,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
 
-
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
     for (int i = 0; i < rounds; i++)
     {
@@ -183,11 +197,12 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra g = collected_splats[j];
 
                 float4 tetra_rgba = evaluate_tetra(g, ray.o, ray.d);
+                if (tetra_rgba.w < 1/255.f) continue;
 
                 // Undo pixel state
-                if (print) {
-                    printf("1st Pixel State: %f, %f, %f, %f\n", current_pixel_state.x, current_pixel_state.y, current_pixel_state.z, current_pixel_state.w);
-                }
+                // if (print) {
+                //     printf("1st Pixel State: %f, %f, %f, %f\n", current_pixel_state.x, current_pixel_state.y, current_pixel_state.z, current_pixel_state.w);
+                // }
                 current_pixel_state = undo_pixel_state(current_pixel_state, tetra_rgba);
 
                 // Back-prop automatically through blending and gaussian evaluation.
@@ -198,20 +213,20 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 DifferentialPair<float4> dp_current_pixel_state = diffPair(current_pixel_state);
 
                 bwd_diff(update_pixel_state)(dp_current_pixel_state, dp_tetra_rgba, d_current_pixel_state);
-                if (print) {
-                    printf("Pixel State: %f, %f, %f, %f\n", dp_current_pixel_state.p.x, dp_current_pixel_state.p.y, dp_current_pixel_state.p.z, dp_current_pixel_state.p.w);
-                    printf("Tetra RGBA: %f, %f, %f, %f\n", tetra_rgba.x, tetra_rgba.y, tetra_rgba.z, tetra_rgba.w);
-                    printf("D Pixel State: %f, %f, %f, %f\n", dp_current_pixel_state.d.x, dp_current_pixel_state.d.y, dp_current_pixel_state.d.z, dp_current_pixel_state.d.w);
-                    printf("D RGBA: %f, %f, %f, %f\n", dp_tetra_rgba.d.x, dp_tetra_rgba.d.y, dp_tetra_rgba.d.z, dp_tetra_rgba.d.w);
-                }
+                // if (print) {
+                //     printf("Pixel State: %f, %f, %f, %f\n", dp_current_pixel_state.p.x, dp_current_pixel_state.p.y, dp_current_pixel_state.p.z, dp_current_pixel_state.p.w);
+                //     printf("Tetra RGBA: %f, %f, %f, %f\n", tetra_rgba.x, tetra_rgba.y, tetra_rgba.z, tetra_rgba.w);
+                //     printf("D Pixel State: %f, %f, %f, %f\n", dp_current_pixel_state.d.x, dp_current_pixel_state.d.y, dp_current_pixel_state.d.z, dp_current_pixel_state.d.w);
+                //     printf("D RGBA: %f, %f, %f, %f\n", dp_tetra_rgba.d.x, dp_tetra_rgba.d.y, dp_tetra_rgba.d.z, dp_tetra_rgba.d.w);
+                // }
                 d_current_pixel_state = dp_current_pixel_state.getDifferential();
                 bwd_diff(evaluate_tetra)(dp_g, dp_ray_o, dp_ray_d, dp_tetra_rgba.d);
-                if (print) {
-                    printf("D V0: %f, %f, %f\n", dp_g.d.tet.verts[0].x, dp_g.d.tet.verts[0].y, dp_g.d.tet.verts[0].z);
-                    printf("D V1: %f, %f, %f\n", dp_g.d.tet.verts[1].x, dp_g.d.tet.verts[1].y, dp_g.d.tet.verts[1].z);
-                    printf("D V2: %f, %f, %f\n", dp_g.d.tet.verts[2].x, dp_g.d.tet.verts[2].y, dp_g.d.tet.verts[2].z);
-                    printf("D V3: %f, %f, %f\n", dp_g.d.tet.verts[3].x, dp_g.d.tet.verts[3].y, dp_g.d.tet.verts[3].z);
-                }
+                // if (print) {
+                //     printf("D V0: %f, %f, %f\n", dp_g.d.tet.verts[0].x, dp_g.d.tet.verts[0].y, dp_g.d.tet.verts[0].z);
+                //     printf("D V1: %f, %f, %f\n", dp_g.d.tet.verts[1].x, dp_g.d.tet.verts[1].y, dp_g.d.tet.verts[1].z);
+                //     printf("D V2: %f, %f, %f\n", dp_g.d.tet.verts[2].x, dp_g.d.tet.verts[2].y, dp_g.d.tet.verts[2].z);
+                //     printf("D V3: %f, %f, %f\n", dp_g.d.tet.verts[3].x, dp_g.d.tet.verts[3].y, dp_g.d.tet.verts[3].z);
+                // }
                 bwd_diff(load_tet_alphablend)(g_idx, vertices, indices, rgbs, dp_g.d);
             }
         }

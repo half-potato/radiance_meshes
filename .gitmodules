@@ -7,3 +7,9 @@
 [submodule "dtet/NumCpp"]
 	path = dtet/NumCpp
 	url = https://github.com/dpilger26/NumCpp.git
+[submodule "gDel3D"]
+	path = gDel3D
+	url = https://github.com/half-potato/pyGDel3D
+[submodule "submodules/fused-ssim"]
+	path = submodules/fused-ssim
+	url = https://github.com/rahul-goel/fused-ssim

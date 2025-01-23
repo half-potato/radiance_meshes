@@ -231,7 +231,6 @@ def set_pose(camera, T):
 def generate_cam_path(cameras, N):
     flat_cameras, transform = transform_cameras_pca(cameras)
     data_device = cameras[0].world_view_transform.device
-    print(data_device)
     wT = np.eye(4)
     wT[:3] = transform[:3]
     wT = torch.tensor(wT).float()

@@ -89,9 +89,10 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
         rgbs = rgbs.detach().requires_grad_(True)
     
     # Get sorted tetrahedra and other rendering parameters
-    sorted_tetra_idx, tile_ranges, radii, vs_tetra, circumcenter, mask = vertex_and_tile_shader(
+    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, rect_tile_space = vertex_and_tile_shader(
         indices,
         vertices,
+        rgbs,
         viewmat.cuda(),
         projection_matrix.cuda(),
         cam_pos.cuda(),
@@ -135,7 +136,8 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
         'max_error': max_error,
         'extras': extras,
         'vs_tetra': vs_tetra,
-        'circumcenter': circumcenter
+        'circumcenter': circumcenter,
+        'rect_tile_space': rect_tile_space,
     }
 
     if check_gradients:

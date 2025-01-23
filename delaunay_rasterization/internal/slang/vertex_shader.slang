@@ -74,17 +74,24 @@ bool edge_intersects_frustum(float3 v0, float3 v1, float4 plane) {
     return (d0 * d1 < 0);
 }
 
+float get_max_alpha(float z, uint4 virtual_tet, TensorView<float> densities) {
+    float density = (
+        densities[virtual_tet.x] + densities[virtual_tet.y] + densities[virtual_tet.z] + densities[virtual_tet.w])/4;
+    float max_alpha = 1 - safe_exp(-z * density);
+    return max_alpha;
+}
+
 [AutoPyBindCUDA]
 [CUDAKernel]
 [Differentiable]
 void vertex_shader(TensorView<int32_t> indices,
                    DiffTensorView vertices,
+                   TensorView<float> densities,
                    TensorView<float> world_view_transform,
                    TensorView<float> K,
                    TensorView<float> cam_pos,
                    TensorView<int32_t> out_tiles_touched,
                    TensorView<int32_t> out_rect_tile_space,
-                   TensorView<int32_t> out_radii,
                    DiffTensorView out_vs,
                    DiffTensorView out_circumcenter,
                    no_diff float fovy,
@@ -104,88 +111,52 @@ void vertex_shader(TensorView<int32_t> indices,
     Camera cam = no_diff load_camera(world_view_transform, K, cam_pos, fovy, fovx, image_height, image_width);
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet = load_tetrahedra(vertices, virtual_tet);
-    Tetrahedra pixel_tet = project_tetrahedra(tet, cam);
-    // Tetrahedra pixel_tet = tet_ndc2pix(proj_tet, image_height, image_width);
-    float3 circumcenter = calculate_circumcenter(tet);
-    float radius = length(circumcenter - tet.verts[0]);
-    bool contains_ray_origin = point_in_tetrahedron(tet, cam.position);
 
     Tetrahedra camspace_tet = tet2camspace(tet, cam);
-
     no_diff float3 minv, maxv;
     no_diff find_extent(camspace_tet, minv, maxv, cam);
+    no_diff float max_alpha = get_max_alpha(maxv.z - minv.z, virtual_tet, densities);
 
     // Check if tetrahedron is completely outside any frustum plane
-    if (maxv.z <= 0.0) {
+    if (maxv.z <= 0.0) {// && max_alpha < 0.5/255.f) {
         return;
     }
+    // if (max_alpha < 1 / 255.f) {
+    //     return;
+    // }
 
     rectangle rect_tile_space;
-    // if ((minv.z <= 0.0 && maxv.z > 0.0) || contains_ray_origin) {
+    bool contains_ray_origin = point_in_tetrahedron(tet, cam.position);
+
     if (contains_ray_origin) {
         rect_tile_space.min_x = 0;
         rect_tile_space.max_x = grid_width;
         rect_tile_space.min_y = 0;
         rect_tile_space.max_y = grid_height;
         out_vs.storeOnce(uint2(g_idx, 1), 1);
-    // } else if (minv.z >= 0.0) {
     } else {
-
-        rect_tile_space.min_x = int32_t(clip(floor(minv.x / tile_width), 0, grid_width));
-        rect_tile_space.max_x = int32_t(ceil(clip((maxv.x) / tile_width, 0, grid_width)));
-        rect_tile_space.min_y = int32_t(floor(clip((minv.y) / tile_height, 0, grid_height)));
-        rect_tile_space.max_y = int32_t(ceil(clip((maxv.y) / tile_height, 0, grid_height)));
+        rect_tile_space.min_x = int32_t(floor(clip(minv.x / tile_width, 0, grid_width)));
+        rect_tile_space.min_y = int32_t(floor(clip(minv.y / tile_height, 0, grid_height)));
+        rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / tile_width, 0, grid_width)));
+        rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / tile_height, 0, grid_height)));
     }
-    // else {
-    //     // Need to clip the tetrahedra using the camera plane to get the stuff in front
-    //     Tetrahedra clipped_tet;
-    //     Tetrahedra camspace_tet = tet2camspace(tet, cam);
-    //     if (clip_tetrahedra_z0(camspace_tet, clipped_tet)) {
-    //         Tetrahedra proj_clipped_tet = tet_camspace2image_w_depth(clipped_tet, cam);
-    //         float3 clipped_minv, clipped_maxv;
-    //         minmax_tet(proj_clipped_tet, clipped_minv, clipped_maxv);
-
-    //         rect_tile_space.min_x = int32_t(clip(floor(clipped_minv.x / tile_width), 0, grid_width));
-    //         rect_tile_space.max_x = int32_t(ceil(clip(clipped_maxv.x / tile_width, 0, grid_width)));
-    //         rect_tile_space.min_y = int32_t(floor(clip(clipped_minv.y / tile_height, 0, grid_height)));
-    //         rect_tile_space.max_y = int32_t(ceil(clip(clipped_maxv.y / tile_height, 0, grid_height)));
-    //     } else {
-    //         return;
-    //     }
-    // }
     int32_t n_tiles = (rect_tile_space.max_x - rect_tile_space.min_x) * (rect_tile_space.max_y - rect_tile_space.min_y);
 
     if (n_tiles == 0) {
         return;
     }
 
-    // printf("[%f, %f], [%f, %f], (%f, %f, %f). (%f, %f, %f, %f)\n",
-    //     //    rect_tile_space.min_x, rect_tile_space.max_x, rect_tile_space.min_y, rect_tile_space.max_y,
-    //        minv.x, maxv.x, minv.y, maxv.y,
-    //     //    proj_tet.verts[0].x, proj_tet.verts[0].y, proj_tet.verts[0].z,
-    //     //    test_pt.x, test_pt.y, test_pt.z,
-    //     //    proj_point.x, proj_point.y, proj_point.z,
-    //        proj_point.x, proj_point.y, proj_point.z,
-    //        proj_test.x, proj_test.y, proj_test.z, proj_test.w);
-    // printf("%i,[%f, %f], [%f, %f], [%i, %i], [%i, %i]\n", n_tiles,
-    //        minv.x, maxv.x, minv.y, maxv.y,
-    //        rect_tile_space.min_x, rect_tile_space.max_x, rect_tile_space.min_y, rect_tile_space.max_y,
-    // );
-
-    // float3 circumcenter_camspace = project_point_w_depth(circumcenter, cam);
-
-    out_radii[g_idx] = (uint32_t)1;
     out_tiles_touched[g_idx] = n_tiles;
     out_rect_tile_space[uint2(g_idx, 0)] = rect_tile_space.min_x;
     out_rect_tile_space[uint2(g_idx, 1)] = rect_tile_space.min_y;
     out_rect_tile_space[uint2(g_idx, 2)] = rect_tile_space.max_x;
     out_rect_tile_space[uint2(g_idx, 3)] = rect_tile_space.max_y;
 
+    float3 circumcenter = calculate_circumcenter(tet);
+    float radius = length(circumcenter - tet.verts[0]);
     float circum_dist = length(circumcenter - cam.position);
     float sort_depth = circum_dist*circum_dist - radius*radius;
 
-    // out_vs.storeOnce(uint2(g_idx, 2), min(max(circumcenter_camspace.z, FLT_MIN), FLT_MAX));
-    // out_vs.storeOnce(uint2(g_idx, 2), min(max(sort_depth + min_dist, FLT_MIN), FLT_MAX));
     out_vs.storeOnce(uint2(g_idx, 2), min(max(sort_depth, FLT_MIN), FLT_MAX));
 
     out_circumcenter.storeOnce(uint2(g_idx, 0), circumcenter.x);

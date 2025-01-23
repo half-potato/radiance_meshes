@@ -1,0 +1,74 @@
+{
+    "cpp": {
+        "options": [],
+        "deps": [
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh_kernel.slang",
+                1737599292.3887262
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/safe-math.slang",
+                1737422887.729968
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/tensor-util.slang",
+                1737599351.9682455
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh.slang",
+                1737422880.8380153
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh-half.slang",
+                1737427844.5101328
+            ],
+            [
+                "/home/dronelab/miniconda3/envs/gaussian_splatting/lib/python3.11/site-packages/slangpy/bin/slangc",
+                1715288319.7765749
+            ],
+            [
+                "/home/dronelab/miniconda3/envs/gaussian_splatting/lib/python3.11/site-packages/slangpy/bin/libslang.so",
+                1715288319.7165756
+            ]
+        ],
+        "version": "1.2.0",
+        "includePaths": []
+    },
+    "cuda": {
+        "options": [],
+        "deps": [
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh_kernel.slang",
+                1737599292.3887262
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/safe-math.slang",
+                1737422887.729968
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/tensor-util.slang",
+                1737599351.9682455
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh.slang",
+                1737422880.8380153
+            ],
+            [
+                "/home/dronelab/delaunay_rasterization/sh_slang/slang/sh-half.slang",
+                1737427844.5101328
+            ],
+            [
+                "/home/dronelab/miniconda3/envs/gaussian_splatting/lib/python3.11/site-packages/slangpy/bin/slangc",
+                1715288319.7765749
+            ],
+            [
+                "/home/dronelab/miniconda3/envs/gaussian_splatting/lib/python3.11/site-packages/slangpy/bin/libslang.so",
+                1715288319.7165756
+            ]
+        ],
+        "version": "1.2.0",
+        "includePaths": []
+    },
+    "moduleName": "_slangpy_sh_kernel_44136fa355b3678a",
+    "moduleBinary": "/home/dronelab/delaunay_rasterization/sh_slang/slang/.slangpy_cache/sh_kernel/44136fa355b3678a/0/_slangpy_sh_kernel_44136fa355b3678a.pyd"
+}

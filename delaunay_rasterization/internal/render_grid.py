@@ -14,11 +14,14 @@
 
 import math
 
+def ceil_div(x, y):
+    return (x + y - 1) // y
+
 class RenderGrid():    
   def __init__(self, image_height, image_width, tile_width, tile_height):
     self.image_height = image_height
     self.image_width = image_width
     self.tile_height = tile_height
     self.tile_width = tile_width
-    self.grid_height = math.ceil(image_height / tile_height)
-    self.grid_width = math.ceil(image_width  / tile_width)
+    self.grid_height = ceil_div(image_height, tile_height)
+    self.grid_width = ceil_div(image_width, tile_width)

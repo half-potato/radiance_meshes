@@ -324,39 +324,66 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) {
     minv = float3(FLT_MAX, FLT_MAX, FLT_MAX);
     maxv = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 
+    float3 minv2 = float3(FLT_MAX, FLT_MAX, FLT_MAX);
+    float3 maxv2 = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    bool straddling = false;
     for (int i = 0; i < 4; i++) {
-        if (tet.verts[i].z < 0) continue;
+        minv2 = min(minv2, tet.verts[i]);
+        maxv2 = max(maxv2, tet.verts[i]);
+        if (tet.verts[i].z < 0) {
+            straddling = true;
+            continue;
+        }
         float3 pixel_vert = camspace2image_w_depth(tet.verts[i], cam);
         minv = min(minv, pixel_vert);
         maxv = max(maxv, pixel_vert);
     }
+    straddling = straddling && (maxv.z > 0); // must have an element lower than 0 and higher
 
-    // Adjust bounds if tetrahedron straddles z=0
-    for (int i = 0; i < 4; i++) {
-        [MaxIters(4)]
-        for (int j = i + 1; j < 4; j++) {
+    if (straddling) {
+        // Adjust bounds if tetrahedron straddles z=0
+        for (int i = 0; i < 4; i++) {
             float3 vb = tet.verts[i];
-            float3 vf = tet.verts[j];
-            float3 temp;
-            if (vb.z > vf.z) {
-                // swap(vb, vf);
-                temp = vf;
-                vf = vb;
-                vb = temp;
-            }
-            // vb = v back, vf = v front
-            if (vf.z > 0 && vb.z < 0) {
+            [MaxIters(4)]
+            for (int j = i + 1; j < 4; j++) {
+                float3 vf = tet.verts[j];
+                float3 temp;
+                if (vb.z > vf.z) {
+                    // swap(vb, vf);
+                    temp = vf;
+                    vf = vb;
+                    vb = temp;
+                }
+                // vb = v back, vf = v front
+                if (vf.z > 1e-3 && vb.z < 1e-3) {
 
-                float t = (1e-3 - vb.z) / (vf.z - vb.z);
-                float3 v_clip = vb + t * (vf - vb);
-                float3 pixel_v_clip = camspace2image_w_depth(v_clip, cam);
-                // printf("pixel_v_clip: %f, %f, %f\n", v_clip.x, v_clip.y, v_clip.z);
+                    float t = max((1e-3 - vb.z) / (vf.z - vb.z), 0);
+                    float3 v_clip = vb + t * (vf - vb);
+                    v_clip.z = 1e-3;
+                    float3 pixel_v_clip = camspace2image_w_depth(v_clip, cam);
+                    pixel_v_clip.z = vb.z;
+                    // printf("pixel_v_clip: %f, %f, %f\n", v_clip.x, v_clip.y, v_clip.z);
 
-                // Adjust bounds to include the intersection point
-                minv = min(minv, pixel_v_clip);
-                maxv = max(maxv, pixel_v_clip);
+                    // Adjust bounds to include the intersection point
+                    minv = min(minv, pixel_v_clip);
+                    maxv = max(maxv, pixel_v_clip);
+                }
             }
         }
+        // float tile_width = 8;
+        // float tile_height = 8;
+        // int32_t grid_width = 80;
+        // int32_t grid_height = 60;
+        // int32_t gw = int32_t(ceil(clip((maxv.x) / tile_width, 0, grid_width))) - int32_t(clip(floor(minv.x / tile_width), 0, grid_width));
+        // int32_t gh = int32_t(floor(clip((maxv.y) / tile_height, 0, grid_height))) - int32_t(ceil(clip((minv.y) / tile_height, 0, grid_height)));
+        // if (gw == 80 && gh == 60) {
+        //     // printf("new: (%f, %f, %f), (%f, %f, %f), full extent: (%f, %f, %f), (%f, %f, %f), (%i, %i)\n",
+        //     //        minv.x, minv.y, minv.z, maxv.x, maxv.y, maxv.z,
+        //     //        minv2.x, minv2.y, minv2.z, maxv2.x, maxv2.y, maxv2.z,
+        //     //        gw, gh);
+        //     printTetrahedra(tet);
+        // }
     }
 }
 
@@ -463,6 +490,29 @@ SplatTetrahedra load_tet_alphablend(int32_t g_idx,
     };
 }
 
+// [Differentiable]
+// SplatTetrahedra load_tet_alphablend(int32_t g_idx,
+//                                     DiffTensorView vertices,
+//                                     TensorView<int32_t> indices,
+//                                     DiffTensorView rgbs)
+// {
+//     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
+//     Tetrahedra tet = load_tetrahedra(vertices, virtual_tet);
+//     float4 rgbs1 = read_t4_float4(indices[uint2(g_idx, 0)], rgbs);
+//     float4 rgbs2 = read_t4_float4(indices[uint2(g_idx, 1)], rgbs);
+//     float4 rgbs3 = read_t4_float4(indices[uint2(g_idx, 2)], rgbs);
+//     float4 rgbs4 = read_t4_float4(indices[uint2(g_idx, 3)], rgbs);
+//     // float4 rgbs2 = read_t4_float4(virtual_tet.y, rgbs);
+//     // float4 rgbs3 = read_t4_float4(virtual_tet.z, rgbs);
+//     // float4 rgbs4 = read_t4_float4(virtual_tet.w, rgbs);
+//     float4 rgbs_tet = (rgbs1 + rgbs2 + rgbs3 + rgbs4) / 4;
+//     return {
+//         tet,
+//         rgbs_tet
+//         // rgbs1
+//     };
+// }
+
 [Differentiable]
 float4 evaluate_tetra(SplatTetrahedra g, 
                       float3 ray_o,
@@ -522,4 +572,18 @@ Ray get_ray(Camera cam, float2 center_pix_coord) {
     
     ray.o = cam.position;
     return ray;
+}
+
+void printTetrahedra(const Tetrahedra t) {
+    printf(
+        "tet = np.array([\n"
+        "  [%f, %f, %f],\n"
+        "  [%f, %f, %f],\n"
+        "  [%f, %f, %f],\n"
+        "  [%f, %f, %f]])\n",
+        t.verts[0].x, t.verts[0].y, t.verts[0].z,
+        t.verts[1].x, t.verts[1].y, t.verts[1].z,
+        t.verts[2].x, t.verts[2].y, t.verts[2].z,
+        t.verts[3].x, t.verts[3].y, t.verts[3].z
+    );
 }
