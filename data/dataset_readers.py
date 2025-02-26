@@ -130,9 +130,10 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
         image_path = image_path.replace(" ", "_")
-        temp = Image.open(image_path)
-        image = temp.copy()
-        temp.close()
+        image = None
+        # temp = Image.open(image_path)
+        # image = temp.copy()
+        # temp.close()
         if metadata is not None:
             data = metadata[os.path.basename(image_path)]
             exposure = convert_to_float(data['exposure'])

@@ -114,7 +114,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
     l2_err = ((render_img - gt_image)**2).mean(dim=0)
     ssim_err = 1-ssim(render_img, gt_image).mean(dim=0)
-    pixel_err = lambda_ssim * l2_err + (1-lambda_ssim) * ssim_err
+    pixel_err = ((1-lambda_ssim) * l2_err + lambda_ssim * ssim_err).contiguous()
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
     alpha_blend_tile_shader.calc_tet_err(
@@ -146,6 +146,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
                     render_grid.grid_height, 1)
     )
     torch.cuda.synchronize()
+    tet_err = tet_err.clip(max=pixel_err.max())
 
     return tet_err, dict(
         pixel_err = pixel_err,

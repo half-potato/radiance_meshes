@@ -1,6 +1,7 @@
 import os
 import torch
 import numpy as np
+from PIL import Image
 
 from data.dataset_readers import sceneLoadTypeCallbacks
 from data.camera import Camera
@@ -14,7 +15,8 @@ def PILtoTorch(pil_image, resolution):
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 def load_cam(data_device, resolution, id, cam_info, resolution_scale):
-    orig_w, orig_h = cam_info.image.size
+    image = Image.open(cam_info.image_path)
+    orig_w, orig_h = image.size
 
     if resolution in [1, 2, 4, 8]:
         resolution = round(orig_w/(resolution_scale * resolution)), round(orig_h/(resolution_scale * resolution))
@@ -35,7 +37,7 @@ def load_cam(data_device, resolution, id, cam_info, resolution_scale):
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
-    resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    resized_image_rgb = PILtoTorch(image, resolution)
 
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None

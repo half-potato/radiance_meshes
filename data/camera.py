@@ -17,8 +17,8 @@ from data.types import ProjectionType
 from icecream import ic
 
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R, T, fovx, fovy, image, gt_alpha_mask,
-                 image_name, uid, cx, cy,
+    def __init__(self, colmap_id, R, T, fovx, fovy, image, gt_alpha_mask=None,
+                 image_name=None, uid=0, cx=-1, cy=-1,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  model=ProjectionType.PERSPECTIVE, distortion_params=None,
                  exposure=1, iso=100, aperature=1):

@@ -121,77 +121,136 @@ void BoundingSphereFor4Points(
     radius = sqrt(bestDist) * 0.5;
 }
 
-// Main function that returns the power of the circumsphere w.r.t. point P
+// // Main function that returns the power of the circumsphere w.r.t. point P
+// double power_of_circumsphere(
+//     double3 A, double3 B, double3 C, double3 D,
+//     double3 P)
+// {
+//     // 1) Check for near-degeneracy via tetra volume
+//     double vol6 = TetraVolume6(A, B, C, D);
+//     double absVol6 = fabs(vol6);
+//     const double degenerateThreshold = 1e-12; // Adjust to your scale
+
+//     if (absVol6 < degenerateThreshold)
+//     {
+//         // Fallback: bounding sphere for (A,B,C,D)
+//         double3 center;
+//         double radius;
+//         BoundingSphereFor4Points(A, B, C, D, center, radius);
+
+//         double distSqP  = DistSq(P, center);
+//         double radSq    = radius * radius;
+//         return distSqP - radSq; 
+//     }
+//     else
+//     {
+//         // 2) Non-degenerate: Solve for circumsphere center O via
+//         //    (A-B)·O = (|A|^2 - |B|^2)/2
+//         //    (A-C)·O = (|A|^2 - |C|^2)/2
+//         //    (A-D)·O = (|A|^2 - |D|^2)/2
+
+//         double a2 = DotDouble(A, A);
+//         double b2 = DotDouble(B, B);
+//         double c2 = DotDouble(C, C);
+//         double d2 = DotDouble(D, D);
+
+//         double3 Row0 = A - B;
+//         double3 Row1 = A - C;
+//         double3 Row2 = A - D;
+
+//         double3 RHS;
+//         RHS.x = 0.5 * (a2 - b2);
+//         RHS.y = 0.5 * (a2 - c2);
+//         RHS.z = 0.5 * (a2 - d2);
+
+//         // Invert the 3x3
+//         double3 inv0, inv1, inv2;
+//         bool ok = Invert3x3(Row0, Row1, Row2, inv0, inv1, inv2);
+
+//         if (!ok)
+//         {
+//             // If the matrix is near-singular here (which is odd if we passed the volume check),
+//             // fall back to bounding sphere anyway:
+//             double3 center;
+//             double radius;
+//             BoundingSphereFor4Points(A, B, C, D, center, radius);
+//             return DistSq(P, center) - (radius * radius);
+//         }
+
+//         // Solve O = M^{-1} * RHS
+//         double3 O;
+//         O.x = DotDouble(inv0, RHS);
+//         O.y = DotDouble(inv1, RHS);
+//         O.z = DotDouble(inv2, RHS);
+
+//         // Radius = distance(A, O)
+//         // We can pick any of A,B,C,D; they should be the same ideally
+//         double r = sqrt(DistSq(O, A));
+
+//         // Finally, power = |P - O|^2 - r^2
+//         double distSqP = DistSq(P, O);
+//         double rSq      = r * r;
+//         double power    = distSqP - rSq;
+
+//         return power;
+//     }
+// }
+
+[Differentiable]
 double power_of_circumsphere(
     double3 A, double3 B, double3 C, double3 D,
-    double3 P)
+    double3 P, )
 {
-    // 1) Check for near-degeneracy via tetra volume
-    double vol6 = TetraVolume6(A, B, C, D);
-    double absVol6 = fabs(vol6);
-    const double degenerateThreshold = 1e-12; // Adjust to your scale
+    double3 center;
+    double radius;
+    // Compute vectors from A to other vertices
+    double3 a = B - A;
+    double3 b = C - A;
+    double3 c = D - A;
 
-    if (absVol6 < degenerateThreshold)
-    {
-        // Fallback: bounding sphere for (A,B,C,D)
-        double3 center;
-        double radius;
-        BoundingSphereFor4Points(A, B, C, D, center, radius);
+    // Compute squares of lengths
+    double aa = dot(a, a);
+    double bb = dot(b, b);
+    double cc = dot(c, c);
 
-        double distSqP  = DistSq(P, center);
-        double radSq    = radius * radius;
-        return distSqP - radSq; 
+    // Compute cross products
+    double3 cross_bc = cross(b, c);
+    double3 cross_ca = cross(c, a);
+    double3 cross_ab = cross(a, b);
+
+    // Compute denominator for the circumcenter calculation
+    double denominator = 2.0 * dot(a, cross_bc);
+
+    if (abs(denominator) < 1e-7) {
+        // Degenerate case: the points A, B, C, D are nearly coplanar
+        // Fit a plane to the first three vertices A, B, C
+        double3 plane_normal = cross(B - A, C - A);
+        plane_normal = normalize(plane_normal);
+
+        // Flip the normal so that the half-space contains the origin (0,0,0)
+        // Check the sign of the distance from 0 to the plane defined by A and plane_normal
+        if (dot(-A, plane_normal) < 0)
+            plane_normal = -plane_normal;
+
+        // Determine which side of the plane the point P lies on
+        double side = dot(P - A, plane_normal);
+        if (side > 0)
+            return 1e20;
+        else
+            return -1e20;
+    } else {
+        // Compute the relative circumcenter position
+        double3 relative_circumcenter = (
+            aa * cross_bc +
+                                         bb * cross_ca +
+                                         cc * cross_ab
+        ) / denominator;
+
+        // Get the absolute position of the circumcenter and compute its radius
+        center = A + relative_circumcenter;
+        radius = length(relative_circumcenter);
     }
-    else
-    {
-        // 2) Non-degenerate: Solve for circumsphere center O via
-        //    (A-B)·O = (|A|^2 - |B|^2)/2
-        //    (A-C)·O = (|A|^2 - |C|^2)/2
-        //    (A-D)·O = (|A|^2 - |D|^2)/2
 
-        double a2 = DotDouble(A, A);
-        double b2 = DotDouble(B, B);
-        double c2 = DotDouble(C, C);
-        double d2 = DotDouble(D, D);
-
-        double3 Row0 = A - B;
-        double3 Row1 = A - C;
-        double3 Row2 = A - D;
-
-        double3 RHS;
-        RHS.x = 0.5 * (a2 - b2);
-        RHS.y = 0.5 * (a2 - c2);
-        RHS.z = 0.5 * (a2 - d2);
-
-        // Invert the 3x3
-        double3 inv0, inv1, inv2;
-        bool ok = Invert3x3(Row0, Row1, Row2, inv0, inv1, inv2);
-
-        if (!ok)
-        {
-            // If the matrix is near-singular here (which is odd if we passed the volume check),
-            // fall back to bounding sphere anyway:
-            double3 center;
-            double radius;
-            BoundingSphereFor4Points(A, B, C, D, center, radius);
-            return DistSq(P, center) - (radius * radius);
-        }
-
-        // Solve O = M^{-1} * RHS
-        double3 O;
-        O.x = DotDouble(inv0, RHS);
-        O.y = DotDouble(inv1, RHS);
-        O.z = DotDouble(inv2, RHS);
-
-        // Radius = distance(A, O)
-        // We can pick any of A,B,C,D; they should be the same ideally
-        double r = sqrt(DistSq(O, A));
-
-        // Finally, power = |P - O|^2 - r^2
-        double distSqP = DistSq(P, O);
-        double rSq      = r * r;
-        double power    = distSqP - rSq;
-
-        return power;
-    }
+    double3 diff = center - P;
+    return dot(diff, diff) - radius * radius;
 }

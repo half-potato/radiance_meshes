@@ -217,7 +217,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool print = false;//pix_coord.x == 0 && pix_coord.y == 0;
 
     int splats_left_to_process = tile_idx_end - tile_idx_start;
-    uint32_t current_splat_offset = tile_idx_end - tile_idx_start;
+    int64_t current_splat_offset = tile_idx_end - tile_idx_start;
 
     float t, old_t;
     float4 current_pixel_state, curr_distortion_state;
@@ -256,7 +256,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             for (int j = 0; j < min(block_size, splats_left_to_process); j++)
             {
                 current_splat_offset--;
-                if (current_splat_offset >= n_contrib_fwd)
+                if (current_splat_offset >= n_contrib_fwd || current_splat_offset < 0)
                     continue;
                 uint32_t g_idx = collected_idx[j];
                 SplatTetrahedra g = collected_splats[j];
@@ -381,7 +381,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
 
     int splats_left_to_process = tile_idx_end - tile_idx_start;
-    uint32_t current_splat_offset = tile_idx_end - tile_idx_start;
+    int64_t current_splat_offset = tile_idx_end - tile_idx_start;
 
     float t, old_t;
     float4 current_pixel_state;
@@ -415,7 +415,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
             for (int j = 0; j < min(block_size, splats_left_to_process); j++)
             {
                 current_splat_offset--;
-                if (current_splat_offset >= n_contrib_fwd)
+                if (current_splat_offset >= n_contrib_fwd || current_splat_offset < 0)
                     continue;
                 uint32_t g_idx = collected_idx[j];
                 SplatTetrahedra g = collected_splats[j];
@@ -475,6 +475,11 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
     Camera cam = load_camera(world_view_transform, K, cam_pos, fovy, fovx, image_height, image_width);
 
+    float this_pixel_err = 0;
+    if (is_inside) {
+        this_pixel_err = pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
+    }
+
     kern_calc_tet_err(
         sorted_gauss_idx,
         indices,
@@ -492,5 +497,5 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         tile_width,
         output_img.size(0),
         output_img.size(1), 
-        pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))]);
+        this_pixel_err);
 }

@@ -264,6 +264,7 @@ def render_camera(vertices, indices, rgbs, height, width, viewmat, fx, fy, tmin,
     
     start = jnp.clip(point_dist[2].min(), tmin, None)
     end = point_dist[2].max()*1.2
+    # jax.debug.print("start: {} - {}", start, end)
     tdist = (end - start) * linspace + start
     
     # Generate rays for all pixels

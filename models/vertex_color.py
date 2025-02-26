@@ -49,24 +49,48 @@ class Model:
     def vertices(self):
         return self.inv_contract(self.contracted_vertices)
 
-    def save2ply(self, path: Path):
+    def save2ply(self, path: Path, sample_camera: Camera):
         path.parent.mkdir(exist_ok=True, parents=True)
         
         xyz = self.vertices.detach().cpu().numpy()
-        s_param = self.vertex_s_param.detach().cpu().numpy()
-        rgb_param = self.vertex_rgb_param.detach().cpu().numpy()
-        sh_param = self.vertex_sh_param.detach().cpu().numpy()
 
         dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
-        dtype_full += [(f's_param_{i}', 'f4') for i in range(s_param.shape[1])]
-        dtype_full += [(f'rgb_{i}', 'f4') for i in range(rgb_param.shape[1])]
-        dtype_full += [(f'sh_{i}', 'f4') for i in range(sh_param.shape[1])]
         
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, s_param, rgb_param, sh_param), axis=1)
-        elements[:] = list(map(tuple, attributes))
+        elements['x'] = xyz[:, 0]
+        elements['y'] = xyz[:, 1]
+        elements['z'] = xyz[:, 2]
         el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(str(path))
+
+        print(self.indices_np, xyz)
+        dtype_tets = np.dtype([
+            ('vertex_indices', 'i4', (4,)),
+            # ('vertex_indices', 'O'),
+            ('r', 'f4'),
+            ('g', 'f4'),
+            ('b', 'f4'),
+            ('s', 'f4')
+        ])
+
+        # Get the color/scalar values (each element should be a tuple: (r, g, b, s))
+        rgbs = self.get_cell_values(sample_camera).detach().cpu().numpy()
+
+        tet_elements = np.empty(self.indices_np.shape[0], dtype=dtype_tets)
+
+        # tet_elements['vertex_indices'] = list(self.indices_np)
+        tet_elements['vertex_indices'] = self.indices_np
+        tet_elements['r'] = rgbs[:, 0]
+        tet_elements['g'] = rgbs[:, 1]
+        tet_elements['b'] = rgbs[:, 2]
+        tet_elements['s'] = rgbs[:, 3]
+
+        # Create the PlyElement description for tetrahedra
+        inds = PlyElement.describe(tet_elements, 'tetrahedron')
+        # tets = np.array([ (features_np[i][0], features_np[i][1], features_np[i][2], features_np[i][3], self.indices_np[i].tolist()) for i in range(self.indices_np.shape[0]) ],
+        #         dtype=[ ('red', 'f4'), ('green', 'f4'), ('blue', 'f4'), ('density', 'f4'), ('vertex_indices', 'i4', (4,)) ])
+        # tets = PlyElement.describe(tets, 'tetrahedron')
+
+        PlyData([el, inds]).write(str(path))
 
     @staticmethod
     def load_ply(path, device):

@@ -24,6 +24,10 @@ from typing import List
 from utils import hashgrid
 from torch.utils.checkpoint import checkpoint
 from torch.cuda.amp import autocast
+from plyfile import PlyData, PlyElement
+from pathlib import Path
+import numpy as np
+from utils.args import Args
 
 def forward_in_chunks(forward, x, chunk_size=548576):
 # def forward_in_chunks(self, x, chunk_size=65536):
@@ -119,13 +123,6 @@ def compute_grid_offsets(cfg, N_POS_DIMS=3):
     # offset now points past the last level’s parameters
     return offset_table, offset
 
-# def exponential_decay_scheduler(optimizer, decay_start, decay_interval, decay_base):
-#     def lr_lambda(step):
-#         if step < decay_start:
-#             return 1.0
-#         else:
-#             return decay_base ** ((step - decay_start) // decay_interval)
-#     return LambdaLR(optimizer, lr_lambda)
 def init_weights(m, gain):
     if isinstance(m, nn.Linear):
         nn.init.xavier_uniform_(m.weight, gain)
@@ -133,18 +130,20 @@ def init_weights(m, gain):
             nn.init.zeros_(m.bias)
 
 @torch.jit.script
-def pre_calc_cell_values(vertices, indices, center, scene_scaling: float, per_level_scale: float, L: int, scale_multi: float):
+def pre_calc_cell_values(vertices, indices, center, scene_scaling: float, per_level_scale: float, L: int, scale_multi: float, base_resolution: float):
     device = vertices.device
-    circumcenter, radius = calculate_circumcenters_torch(vertices[indices])
+    circumcenter, radius = calculate_circumcenters_torch(vertices[indices].double())
     normalized = (circumcenter - center) / scene_scaling
     cv, cr = contract_mean_std(normalized, radius / scene_scaling)
-    cr = cr * scale_multi
+    cr = cr.float() * scale_multi
     n = torch.arange(L, device=device).reshape(1, 1, -1)
     erf_x = safe_div(torch.tensor(1.0, device=device), safe_sqrt(per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
     scaling = torch.erf(erf_x)
-    return cv, scaling
+    # sphere_area = 4/3*math.pi*cr**3
+    # scaling = safe_div(base_resolution * per_level_scale**n, sphere_area.reshape(-1, 1, 1)).clip(max=1)
+    return cv.float(), scaling
 
-class Model:
+class Model(nn.Module):
     def __init__(self,
                  vertices: torch.Tensor,
                  center: torch.Tensor,
@@ -154,8 +153,10 @@ class Model:
                  base_resolution=16,
                  per_level_scale=2,
                  L=10,
+                 contract_vertices=True,
                  density_offset=-1,
                  **kwargs):
+        super().__init__()
         self.scale_multi = scale_multi
         self.L = L
         self.dim = 4
@@ -171,27 +172,37 @@ class Model:
             per_level_scale=per_level_scale
         )
         self.per_level_scale = per_level_scale
-        self.encoding = tcnn.Encoding(3, config).to(self.device)
+        # self.encoding = tcnn.Encoding(3, config).to(self.device)
+        self.base_resolution = base_resolution
 
-        # self.encoding = torch.compile(hashgrid.HashEmbedderOptimized(
-        #     [torch.zeros((3), device=self.device), torch.ones((3), device=self.device)],
-        #     self.L, n_features_per_level=self.dim,
-        #     log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
-        #     finest_resolution=base_resolution*per_level_scale**self.L)).to(self.device)
+        self.encoding = torch.compile(hashgrid.HashEmbedderOptimized(
+            [torch.zeros((3), device=self.device), torch.ones((3), device=self.device)],
+            self.L, n_features_per_level=self.dim,
+            log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
+            finest_resolution=base_resolution*per_level_scale**self.L)).to(self.device)
 
 
-        self.network = tcnn.Network(self.encoding.n_output_dims, 4, dict(
-            # otype="CutlassMLP",
-            otype="FullyFusedMLP",
-            # activation="Swish",
-            activation="ReLU",
-            output_activation="None",
-            n_neurons=64,
-            n_hidden_layers=1,
-        ))
+        # self.network = tcnn.Network(self.encoding.n_output_dims, 4, dict(
+        #     # otype="CutlassMLP",
+        #     otype="FullyFusedMLP",
+        #     # activation="Swish",
+        #     activation="ReLU",
+        #     output_activation="None",
+        #     n_neurons=64,
+        #     n_hidden_layers=1,
+        # ))
+        self.network = torch.compile(nn.Sequential(
+            nn.Linear(self.encoding.n_output_dims, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 4)
+        )).to(self.device)
+        gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
+        self.network.apply(lambda m: init_weights(m, gain))
+
         offsets, pred_total = compute_grid_offsets(config, 3)
         total = list(self.encoding.parameters())[0].shape[0]
-        # ic(offsets, pred_total, total)
         # assert total == pred_total, f"Pred #params: {pred_total} vs {total}"
         resolution = grid_scale(L-1, per_level_scale, base_resolution)
         self.different_size = 0
@@ -203,11 +214,77 @@ class Model:
                 self.different_size += 1
         self.offsets = offsets
 
-        self.center = center.reshape(1, 3)
-        self.scene_scaling = scene_scaling
-        self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
+        self.register_buffer('center', center.reshape(1, 3))
+        self.register_buffer('scene_scaling', torch.tensor(scene_scaling, device=self.device))
+        self.contract_vertices = contract_vertices
+        if self.contract_vertices:
+            self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
+        else:
+            self.contracted_vertices = nn.Parameter(vertices.detach())
         self.update_triangulation()
 
+    def load_ckpt(path: Path, device):
+        ckpt_path = path / "ckpt.pth"
+        config_path = path / "alldata.json"
+        config = Args.load_from_json(str(config_path))
+        ckpt = torch.load(ckpt_path)
+        vertices = ckpt['contracted_vertices']
+        temp = config.contract_vertices
+        config.contract_vertices = False
+        model = Model(vertices.to(device), torch.tensor([0, 0, 0], device=device), 1, **config.as_dict())
+        model.load_state_dict(ckpt)
+        model.contract_vertices = temp
+        return model
+
+    def save2ply(self, path: Path, sample_camera: Camera):
+        path.parent.mkdir(exist_ok=True, parents=True)
+        
+        xyz = self.vertices.detach().cpu().numpy()
+
+        dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+        
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        elements['x'] = xyz[:, 0]
+        elements['y'] = xyz[:, 1]
+        elements['z'] = xyz[:, 2]
+        el = PlyElement.describe(elements, 'vertex')
+
+        dtype_tets = np.dtype([
+            ('vertex_indices', 'i4', (4,)),
+            # ('vertex_indices', 'O'),
+            ('r', 'f4'),
+            ('g', 'f4'),
+            ('b', 'f4'),
+            ('s', 'f4')
+        ])
+
+        # Get the color/scalar values (each element should be a tuple: (r, g, b, s))
+        # need to batch this saving process
+        N = self.indices.shape[0]
+        B = 1_000_000
+        rgbs = np.zeros((N, 4))
+        for i in range(0, N, B):
+            mask = torch.zeros((N), dtype=bool, device=self.device)
+            mask[i:i+B] = True
+            rgbs[i:i+B] = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
+        # rgbs = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
+
+
+        tet_elements = np.empty(self.indices.shape[0], dtype=dtype_tets)
+        # tet_elements['vertex_indices'] = list(self.indices_np)
+        tet_elements['vertex_indices'] = self.indices.cpu().numpy()
+        tet_elements['r'] = rgbs[:, 0]
+        tet_elements['g'] = rgbs[:, 1]
+        tet_elements['b'] = rgbs[:, 2]
+        tet_elements['s'] = rgbs[:, 3]
+
+        # Create the PlyElement description for tetrahedra
+        inds = PlyElement.describe(tet_elements, 'tetrahedron')
+        # tets = np.array([ (features_np[i][0], features_np[i][1], features_np[i][2], features_np[i][3], self.indices_np[i].tolist()) for i in range(self.indices_np.shape[0]) ],
+        #         dtype=[ ('red', 'f4'), ('green', 'f4'), ('blue', 'f4'), ('density', 'f4'), ('vertex_indices', 'i4', (4,)) ])
+        # tets = PlyElement.describe(tets, 'tetrahedron')
+
+        PlyData([el, inds]).write(str(path))
 
     def inv_contract(self, points):
         return inv_contract_points(points) * self.scene_scaling + self.center
@@ -217,7 +294,10 @@ class Model:
 
     @property
     def vertices(self):
-        return self.inv_contract(self.contracted_vertices)
+        if self.contract_vertices:
+            return self.inv_contract(self.contracted_vertices)
+        else:
+            return self.contracted_vertices
 
     @staticmethod
     def init_from_pcd(point_cloud, cameras, device, **kwargs):
@@ -262,8 +342,10 @@ class Model:
         indices_np = indices_np.numpy()
         indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
         self.indices = torch.as_tensor(indices_np).cuda()
+        del indices_np, prev
         
-    def get_cell_values(self, camera: Camera, mask=None):
+    def get_cell_values(self, camera: Camera, mask=None,
+                        circumcenters=None, radii=None):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
         # circumcenter, radius = calculate_circumcenters_torch(vertices[indices])
@@ -273,19 +355,51 @@ class Model:
         # n = torch.arange(self.L, device=self.device).reshape(1, 1, -1)
         # erf_x = safe_div(torch.tensor(1.0, device=self.device), safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
         # scaling = torch.erf(erf_x)
-        cv, scaling =  pre_calc_cell_values(
-            vertices, indices, self.center, self.scene_scaling, self.per_level_scale, self.L, self.scale_multi)
 
-        # output = checkpoint(self.encoding.forward_in_chunks, (cv/2 + 1)/2, use_reentrant=True).float()
-        # output = self.encoding((cv/2 + 1)/2).float()
-        output = forward_in_chunks(self.encoding, (cv/2 + 1)/2).float()
-        # output = self.encoding((cv/2 + 1)/2).float()
-        output = output.reshape(-1, self.dim, self.L)
-        output = output * scaling
-        output = self.network(output.reshape(-1, self.L * self.dim)).float()
+        chunk_size=508576
+        outputs = []
+        start = 0
+        # x = (cv/2 + 1)/2
+        # with autocast(dtype=torch.float16):
+        while start < indices.shape[0]:
+            end = min(start + chunk_size, indices.shape[0])
+            cv, scaling =  pre_calc_cell_values(
+                vertices, indices[start:end], self.center, self.scene_scaling,
+                self.per_level_scale, self.L, self.scale_multi, self.base_resolution)
+            x = (cv/2 + 1)/2
+            # x_chunk = x[start:end]
+            # output = checkpoint(self.encoding, x_chunk, use_reentrant=True).float()
+            output = checkpoint(self.encoding, x, use_reentrant=True).float()
+            # output = self.encoding((cv/2 + 1)/2).float()
+            # output = forward_in_chunks(self.encoding, (cv/2 + 1)/2).float()
+            # output = self.encoding((cv/2 + 1)/2).float()
+            output = output.reshape(-1, self.dim, self.L)
 
-        features = torch.cat([
-            torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
+            output = output * scaling#[start:end]
+            # output = self.network(output.reshape(-1, self.L * self.dim)).float()
+            output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
+
+            features = torch.cat([
+                torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
+            outputs.append(features)
+            start = end
+        features = torch.cat(outputs, dim=0)
+        # ic(features)
+        # cv, scaling =  pre_calc_cell_values(
+        #     vertices, indices, self.center, self.scene_scaling, self.per_level_scale, self.L, self.scale_multi)
+        # with autocast(dtype=torch.float16):
+        #     output = checkpoint(self.encoding.forward_in_chunks, (cv/2 + 1)/2, use_reentrant=True).float()
+        #     # output = self.encoding((cv/2 + 1)/2).float()
+        #     # output = forward_in_chunks(self.encoding, (cv/2 + 1)/2).float()
+        #     # output = self.encoding((cv/2 + 1)/2).float()
+        #     output = output.reshape(-1, self.dim, self.L)
+        #     output = output * scaling
+        #     # output = self.network(output.reshape(-1, self.L * self.dim)).float()
+        #     output = checkpoint(self.network, output.reshape(-1, self.L * self.dim))
+
+        #     features = torch.cat([
+        #         torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
+        # ic(features)
         return features
 
     def __len__(self):
@@ -305,8 +419,9 @@ class TetOptimizer:
                  vertices_lr_max_steps: int=5000,
                  weight_decay=1e-10,
                  net_weight_decay=1e-3,
-                 split_std: float = 0.1,
+                 split_std: float = 0.5,
                  vertices_beta: List[float] = [0.9, 0.99],
+                 vertices_lr_delay: int = 500,
                  **kwargs):
         self.weight_decay = weight_decay
         self.optim = optim.CustomAdam([
@@ -315,8 +430,9 @@ class TetOptimizer:
         self.net_optim = optim.CustomAdam([
             {"params": model.network.parameters(), "lr": network_lr, "name": "network"},
         ], ignore_param_list=["encoding", "network"], weight_decay=net_weight_decay)
+        self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
-            {"params": [model.contracted_vertices], "lr": vertices_lr, "name": "contracted_vertices"},
+            {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
         ])
         self.ema = ExponentialMovingAverage(list(model.network.parameters()) + list(model.encoding.parameters()), decay=0.99)
         self.model = model
@@ -327,16 +443,17 @@ class TetOptimizer:
 
         self.net_scheduler_args = get_expon_lr_func(lr_init=network_lr,
                                                 lr_final=final_network_lr,
-                                                lr_delay_mult=vertices_lr_delay_mult,
+                                                lr_delay_mult=1,
                                                 max_steps=vertices_lr_max_steps)
         self.encoder_scheduler_args = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
-                                                lr_delay_mult=vertices_lr_delay_mult,
+                                                lr_delay_mult=1,
                                                 max_steps=vertices_lr_max_steps)
-        self.vertex_scheduler_args = get_expon_lr_func(lr_init=vertices_lr,
-                                                lr_final=final_vertices_lr,
+        self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vert_lr_multi*vertices_lr,
+                                                lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_mult,
-                                                max_steps=vertices_lr_max_steps)
+                                                max_steps=vertices_lr_max_steps,
+                                                lr_delay_steps=vertices_lr_delay)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -357,8 +474,10 @@ class TetOptimizer:
         self.ema.update()
 
     def add_points(self, new_verts: torch.Tensor):
+        if self.model.contract_vertices:
+            new_verts = self.model.contract(new_verts)
         self.model.contracted_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
-            contracted_vertices = self.model.contract(new_verts)
+            contracted_vertices = new_verts
         ))['contracted_vertices']
         self.model.update_triangulation()
 
@@ -405,7 +524,7 @@ class TetOptimizer:
         return optim
 
     def regularizer(self):
-        # return self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.encoding.embeddings])
+        return self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.encoding.embeddings])
         # l2_reg = 1e-6 * torch.linalg.norm(list(self.model.encoding.parameters())[0], ord=2)
         # return l2_reg
         # split params

@@ -1,5 +1,6 @@
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+import json
 
 class Args:
     def __init__(self):
@@ -37,6 +38,20 @@ class Args:
         obj = cls()
         for key, value in vars(namespace).items():
             obj._data[key] = value
+        return obj
+
+    @classmethod
+    def load_from_json(cls, json_path: str):
+        """Load arguments from a JSON file."""
+        path = Path(json_path)
+        if not path.exists():
+            raise FileNotFoundError(f"JSON file not found: {json_path}")
+        
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        obj = cls()
+        obj._data = data
         return obj
 
     def __add__(self, other):

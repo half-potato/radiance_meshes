@@ -102,7 +102,7 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
     )
     verts_trans = point2image(vertices, viewmat.cuda(), projection_matrix.cuda(), cam_pos.cuda())
     
-    tmin = 0.05
+    tmin = 0.00
     # Render using PyTorch implementation
     torch_image, _ = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
