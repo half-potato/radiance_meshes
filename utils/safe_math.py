@@ -103,11 +103,13 @@ def safe_trig_helper(x, fn, t=100 * math.pi):
     x_mod = torch.where(torch.abs(x) < t, x, x % t)
     return fn(x_mod)
 
-def safe_sin(x):
-    return safe_trig_helper(x, torch.sin)
+def safe_sin(x, t:float =100 * math.pi):
+    x_mod = torch.where(torch.abs(x) < t, x, x % t)
+    return x_mod.sin()
 
-def safe_cos(x):
-    return safe_trig_helper(x, torch.cos)
+def safe_cos(x, t:float =100 * math.pi):
+    x_mod = torch.where(torch.abs(x) < t, x, x % t)
+    return x_mod.cos()
 
 # -------------------------------------------------------------------
 # safe_arctan2 with a custom backward

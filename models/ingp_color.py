@@ -13,7 +13,7 @@ from icecream import ic
 from utils.train_util import RGB2SH
 import tinycudann as tcnn
 from utils.topo_utils import calculate_circumcenters_torch
-from utils.safe_math import safe_exp, safe_div, safe_sqrt
+from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin
 from utils.contraction import contract_mean_std
 from torch_ema import ExponentialMovingAverage
 from utils.contraction import contract_points, inv_contract_points
@@ -143,6 +143,31 @@ def pre_calc_cell_values(vertices, indices, center, scene_scaling: float, per_le
     # scaling = safe_div(base_resolution * per_level_scale**n, sphere_area.reshape(-1, 1, 1)).clip(max=1)
     return cv.float(), scaling
 
+@torch.jit.script
+def to_sphere(coordinates):
+    return torch.stack([
+        safe_cos(coordinates[..., 0]) * safe_sin(coordinates[..., 1]),
+        safe_sin(coordinates[..., 0]) * safe_sin(coordinates[..., 1]),
+        safe_cos(coordinates[..., 1]),
+    ], dim=-1)
+                        
+    
+
+@torch.jit.script
+def light_function(base_color, reflection_dirs, light_colors, light_roughness, view_dirs, eps:float=torch.finfo(torch.float32).eps):
+    similarity = (reflection_dirs * view_dirs).sum(dim=-1, keepdim=True).abs().clip(min=eps)
+    return base_color + (light_colors * (similarity ** light_roughness)).sum(dim=1)
+
+@torch.jit.script
+def compute_light_color(base_color_raw, lights, vertices, indices, camera_center, light_offset:float):
+    base_color = torch.nn.functional.softplus(base_color_raw)
+    light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
+    light_roughness = 4*safe_exp(lights[:, :, 3:4]).clip(max=20)
+    reflection_dirs = to_sphere(lights[:, :, 4:6])
+    barycenters = vertices[indices].mean(dim=1)
+    view_dirs = l2_normalize_th(barycenters - camera_center).reshape(-1, 1, 3)
+    return light_function(base_color, reflection_dirs, light_colors, light_roughness, view_dirs)
+
 class Model(nn.Module):
     def __init__(self,
                  vertices: torch.Tensor,
@@ -155,6 +180,8 @@ class Model(nn.Module):
                  L=10,
                  contract_vertices=True,
                  density_offset=-1,
+                 num_lights=2,
+                 light_offset=-1,
                  **kwargs):
         super().__init__()
         self.scale_multi = scale_multi
@@ -162,6 +189,8 @@ class Model(nn.Module):
         self.dim = 4
         self.device = vertices.device
         self.density_offset = density_offset
+        self.num_lights = num_lights
+        self.light_offset = light_offset
         config = dict(
             otype="HashGrid",
             n_levels=self.L,
@@ -196,7 +225,7 @@ class Model(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(64, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 4)
+            nn.Linear(64, 4 + self.num_lights * 6)
         )).to(self.device)
         gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
         self.network.apply(lambda m: init_weights(m, gain))
@@ -215,7 +244,7 @@ class Model(nn.Module):
         self.offsets = offsets
 
         self.register_buffer('center', center.reshape(1, 3))
-        self.register_buffer('scene_scaling', torch.tensor(scene_scaling, device=self.device))
+        self.register_buffer('scene_scaling', torch.tensor(scene_scaling.item(), device=self.device))
         self.contract_vertices = contract_vertices
         if self.contract_vertices:
             self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
@@ -335,71 +364,87 @@ class Model(nn.Module):
     def sh_up(self):
         pass
 
-    def update_triangulation(self):
+    def compute_batch_features(self, vertices, indices, start, end):
+        cv, scaling =  pre_calc_cell_values(
+            vertices, indices[start:end], self.center, self.scene_scaling,
+            self.per_level_scale, self.L, self.scale_multi, self.base_resolution)
+        x = (cv/2 + 1)/2
+        output = checkpoint(self.encoding, x, use_reentrant=True).float()
+        output = output.reshape(-1, self.dim, self.L)
+
+        output = output * scaling
+        output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
+        return output
+
+    def update_triangulation(self, alpha_threshold=1.0/255):
         verts = self.vertices
         v = Del(verts.shape[0])
         indices_np, prev = v.compute(verts.detach().cpu())
         indices_np = indices_np.numpy()
         indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
+        
+        # Convert to tensor and move to CUDA
         self.indices = torch.as_tensor(indices_np).cuda()
-        del indices_np, prev
+        
+        if alpha_threshold > 0:
+            # Compute the density mask in chunks
+            chunk_size = 508576
+            mask_list = []
+            start = 0
+            
+            vertices = self.vertices
+            while start < self.indices.shape[0]:
+                end = min(start + chunk_size, self.indices.shape[0])
+                
+                output = self.compute_batch_features(vertices, self.indices, start, end)
+
+                density = safe_exp(output[:, 3]+self.density_offset)
+                indices_chunk = self.indices[start:end]
+                v0, v1, v2, v3 = verts[indices_chunk[:, 0]], verts[indices_chunk[:, 1]], verts[indices_chunk[:, 2]], verts[indices_chunk[:, 3]]
+                
+                edge_lengths = torch.stack([
+                    torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
+                    torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
+                ], dim=0).max(dim=0)[0]
+                
+                # Compute the maximum possible alpha using the largest edge length
+                alpha = 1 - torch.exp(-density * edge_lengths)
+                # mask_list.append(density > density_threshold)
+                mask_list.append(alpha > alpha_threshold)
+                
+                start = end
+            
+            # Concatenate mask and apply it
+            mask = torch.cat(mask_list, dim=0)
+            self.indices = self.indices[mask]
+            
+            del indices_np, prev, mask_list, mask
+        else:
+            del indices_np, prev
         
     def get_cell_values(self, camera: Camera, mask=None,
                         circumcenters=None, radii=None):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-        # circumcenter, radius = calculate_circumcenters_torch(vertices[indices])
-        # normalized = (circumcenter - self.center) / self.scene_scaling
-        # cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
-        # cr = cr * self.scale_multi
-        # n = torch.arange(self.L, device=self.device).reshape(1, 1, -1)
-        # erf_x = safe_div(torch.tensor(1.0, device=self.device), safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
-        # scaling = torch.erf(erf_x)
 
         chunk_size=508576
         outputs = []
         start = 0
-        # x = (cv/2 + 1)/2
         # with autocast(dtype=torch.float16):
         while start < indices.shape[0]:
             end = min(start + chunk_size, indices.shape[0])
-            cv, scaling =  pre_calc_cell_values(
-                vertices, indices[start:end], self.center, self.scene_scaling,
-                self.per_level_scale, self.L, self.scale_multi, self.base_resolution)
-            x = (cv/2 + 1)/2
-            # x_chunk = x[start:end]
-            # output = checkpoint(self.encoding, x_chunk, use_reentrant=True).float()
-            output = checkpoint(self.encoding, x, use_reentrant=True).float()
-            # output = self.encoding((cv/2 + 1)/2).float()
-            # output = forward_in_chunks(self.encoding, (cv/2 + 1)/2).float()
-            # output = self.encoding((cv/2 + 1)/2).float()
-            output = output.reshape(-1, self.dim, self.L)
-
-            output = output * scaling#[start:end]
-            # output = self.network(output.reshape(-1, self.L * self.dim)).float()
-            output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
-
+            output = self.compute_batch_features(vertices, indices, start, end)
+            # base_color = torch.nn.functional.softplus(output[:, :3])
+            base_color_raw = output[:, :3]
+            lights = output[:, 4:].reshape(-1, self.num_lights, 6)
+            color = compute_light_color(base_color_raw, lights, vertices, indices[start:end], camera.camera_center, self.light_offset)
+            # features = torch.cat([
+            #     torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
             features = torch.cat([
-                torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
+                color, safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
             outputs.append(features)
             start = end
         features = torch.cat(outputs, dim=0)
-        # ic(features)
-        # cv, scaling =  pre_calc_cell_values(
-        #     vertices, indices, self.center, self.scene_scaling, self.per_level_scale, self.L, self.scale_multi)
-        # with autocast(dtype=torch.float16):
-        #     output = checkpoint(self.encoding.forward_in_chunks, (cv/2 + 1)/2, use_reentrant=True).float()
-        #     # output = self.encoding((cv/2 + 1)/2).float()
-        #     # output = forward_in_chunks(self.encoding, (cv/2 + 1)/2).float()
-        #     # output = self.encoding((cv/2 + 1)/2).float()
-        #     output = output.reshape(-1, self.dim, self.L)
-        #     output = output * scaling
-        #     # output = self.network(output.reshape(-1, self.L * self.dim)).float()
-        #     output = checkpoint(self.network, output.reshape(-1, self.L * self.dim))
-
-        #     features = torch.cat([
-        #         torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
-        # ic(features)
         return features
 
     def __len__(self):

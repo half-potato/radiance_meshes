@@ -66,6 +66,7 @@ args.budget = 1_000_000
 args.num_densification_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
+args.freeze_start = 100000
 args.num_iter = 7000
 args.sh_degree_interval = 500
 args.image_folder = "images_4"
@@ -86,7 +87,7 @@ args.scale_multi = 1.0
 
 args.vertices_lr = 1e-4
 args.vertices_lr_delay = 500
-args.final_vertices_lr = 1e-4
+args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_mult = 0.01
 args.vertices_lr_max_steps = args.num_iter
 
@@ -159,7 +160,7 @@ print([target_num(i+1) for i in range(num_densify_iter // args.cloning_interval)
 # epath = cam_util.generate_cam_path(train_cameras, 400)
 # sample_camera = epath[175]
 # sample_camera = train_cameras[60]
-sample_camera = test_cameras[10]
+sample_camera = test_cameras[8]
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_densification_samples)
 
@@ -175,7 +176,7 @@ for train_ind in progress_bar:
     do_tracking = False
     do_sh = train_ind % args.sh_degree_interval == 0 and train_ind > 0
     do_sh_step = train_ind % 16 == 0
-    do_vertices_warmup = train_ind < args.vertices_warmup
+    do_vertices_warmup = train_ind < args.vertices_warmup or train_ind > args.freeze_start
 
     # ind = random.randint(0, len(train_cameras)-1)
     if len(inds) == 0:
@@ -216,11 +217,11 @@ for train_ind in progress_bar:
         tet_optim.sh_optim.step()
         tet_optim.sh_optim.zero_grad()
 
-    if do_delaunay:
-        tet_optim.vertex_optim.step()
+    if do_vertices_warmup:
         tet_optim.vertex_optim.zero_grad()
 
-    if do_vertices_warmup:
+    if do_delaunay:
+        tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
     tet_optim.update_learning_rate(train_ind)

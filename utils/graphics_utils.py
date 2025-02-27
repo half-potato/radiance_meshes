@@ -56,7 +56,7 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     ])
     return P
 
-def l2_normalize_th(x, eps=torch.finfo(torch.float32).eps, dim=-1):
+def l2_normalize_th(x, eps:float=torch.finfo(torch.float32).eps, dim:int=-1):
     """Normalize x to unit length along last axis."""
     return x / torch.sqrt(
         torch.clip(torch.sum(x**2, dim=dim, keepdim=True), eps, None)
