@@ -628,14 +628,19 @@ CtrlPt evaluate_tetra(in SplatTetrahedra g,
 {
     // float2 dist = ray_tetrahedron_intersect(ray_o, ray_d, g.tet);
     // float2 dist = ray_tetrahedron_intersect(ray_o, ray_d, g.tet);
-    float2 dist = ray_tetrahedron_intersect_fused(ray_o, ray_d, g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3]);
-    if (dist.x <= 0) {
-        return {{0.f, 0.f, 0.f, 0.f}, dist.y};
+    float2 dist;
+    bool hit = ray_tetrahedron_intersect_fused(
+        ray_o, ray_d, g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3], dist);
+    float intersection_t = (dist.x + dist.y)/2.f;
+    float dt = max(abs(dist.y - dist.x), 0.0f);
+    // float2 dist = cyrusBeckTetrahedronShearScale(ray_o, ray_d, g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3]);
+    if (!hit) {
+        return {{0.f, 0.f, 0.f, 0.f}, intersection_t};
     } else {
-        float alpha = safe_clip(1-safe_exp(-g.rgbs.w * dist.x), 0, 1);
+        float alpha = safe_clip(1-safe_exp(-g.rgbs.w * dt), 0, 1);
         float4 rgba = {
             alpha * g.rgbs.x, alpha * g.rgbs.y, alpha * g.rgbs.z, alpha};
-        return {rgba, dist.y};
+        return {rgba, intersection_t};
     }
 }
 
@@ -667,7 +672,7 @@ float3x3 construct_view_matrix(float4x4 viewmatrix)
     );
 }
 
-[Differentiable]
+// [Differentiable]
 Ray get_ray(Camera cam, float2 center_pix_coord, float min_t) {
     float3x3 V = construct_view_matrix(cam.world_view_transform);
     Ray ray;
@@ -675,7 +680,6 @@ Ray get_ray(Camera cam, float2 center_pix_coord, float min_t) {
     float fx = cam.K[0][0];
     float fy = cam.K[1][1];
     ray.d = mul(V, normalize(float3(
-    // ray.d = normalize(float3(
         (center_pix_coord.x - cam.K[0][2]) / fx,
         (center_pix_coord.y - cam.K[1][2]) / fy,
         1.0

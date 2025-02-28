@@ -61,7 +61,7 @@ def setup_camera(height, width, fov_degrees, viewmat):
     return viewmat, K, cam_pos, fovy, fovx, fx, fy
 
 def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000, height=3, width=3,
-                              tile_size=16, fov=90, check_gradients=True):
+                              tile_size=16, fov=90, check_gradients=True, tmin=0.01):
     """
     Test tetrahedra rendering by comparing JAX and PyTorch implementations.
     
@@ -102,7 +102,6 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
     )
     verts_trans = point2image(vertices, viewmat.cuda(), projection_matrix.cuda(), cam_pos.cuda())
     
-    tmin = 0.00
     # Render using PyTorch implementation
     torch_image, _ = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
@@ -116,9 +115,9 @@ def test_tetrahedra_rendering(vertices, indices, rgbs, viewmat, n_samples=10000,
         viewmat.cuda(),
         projection_matrix.cuda(),
         cam_pos.cuda(),
-        tmin,
         1000,
         -0.1,
+        tmin,
         fovy,
         fovx
     )

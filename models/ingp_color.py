@@ -178,6 +178,7 @@ class Model(nn.Module):
                  base_resolution=16,
                  per_level_scale=2,
                  L=10,
+                 hashmap_dim=4,
                  contract_vertices=True,
                  density_offset=-1,
                  num_lights=2,
@@ -186,7 +187,7 @@ class Model(nn.Module):
         super().__init__()
         self.scale_multi = scale_multi
         self.L = L
-        self.dim = 4
+        self.dim = hashmap_dim
         self.device = vertices.device
         self.density_offset = density_offset
         self.num_lights = num_lights
@@ -210,16 +211,6 @@ class Model(nn.Module):
             log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
             finest_resolution=base_resolution*per_level_scale**self.L)).to(self.device)
 
-
-        # self.network = tcnn.Network(self.encoding.n_output_dims, 4, dict(
-        #     # otype="CutlassMLP",
-        #     otype="FullyFusedMLP",
-        #     # activation="Swish",
-        #     activation="ReLU",
-        #     output_activation="None",
-        #     n_neurons=64,
-        #     n_hidden_layers=1,
-        # ))
         self.network = torch.compile(nn.Sequential(
             nn.Linear(self.encoding.n_output_dims, 64),
             nn.ReLU(inplace=True),
@@ -230,21 +221,8 @@ class Model(nn.Module):
         gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
         self.network.apply(lambda m: init_weights(m, gain))
 
-        offsets, pred_total = compute_grid_offsets(config, 3)
-        total = list(self.encoding.parameters())[0].shape[0]
-        # assert total == pred_total, f"Pred #params: {pred_total} vs {total}"
-        resolution = grid_scale(L-1, per_level_scale, base_resolution)
-        self.different_size = 0
-        self.nominal_offset_size = offsets[-1] - offsets[-2]
-        for o1, o2 in zip(offsets[:-1], offsets[1:]):
-            if o2 - o1 == self.nominal_offset_size:
-                break
-            else:
-                self.different_size += 1
-        self.offsets = offsets
-
         self.register_buffer('center', center.reshape(1, 3))
-        self.register_buffer('scene_scaling', torch.tensor(scene_scaling.item(), device=self.device))
+        self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
         self.contract_vertices = contract_vertices
         if self.contract_vertices:
             self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
@@ -258,6 +236,7 @@ class Model(nn.Module):
         config = Args.load_from_json(str(config_path))
         ckpt = torch.load(ckpt_path)
         vertices = ckpt['contracted_vertices']
+        print(f"Loaded {vertices.shape[0]} vertices")
         temp = config.contract_vertices
         config.contract_vertices = False
         model = Model(vertices.to(device), torch.tensor([0, 0, 0], device=device), 1, **config.as_dict())

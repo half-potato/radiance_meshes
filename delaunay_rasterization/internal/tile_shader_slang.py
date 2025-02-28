@@ -114,11 +114,12 @@ def vertex_and_tile_shader(indices,
         tile_ranges = torch.zeros((render_grid.grid_height*render_grid.grid_width, 2), 
                                   device="cuda",
                                   dtype=torch.int32)
-        slang_modules.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
-                                                      out_tile_ranges=tile_ranges).launchRaw(
-                blockSize=(256, 1, 1),
-                gridSize=(ceil_div(total_size_index_buffer, 256).item(), 1, 1)
-        )
+        if total_size_index_buffer > 0:
+            slang_modules.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
+                                                        out_tile_ranges=tile_ranges).launchRaw(
+                    blockSize=(256, 1, 1),
+                    gridSize=(ceil_div(total_size_index_buffer, 256).item(), 1, 1)
+            )
 
     mask = tiles_touched > 0
     return sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, rect_tile_space, tet_area

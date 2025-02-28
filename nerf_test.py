@@ -67,7 +67,7 @@ args.num_densification_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
 args.freeze_start = 100000
-args.num_iter = 7000
+args.iterations = 7000
 args.sh_degree_interval = 500
 args.image_folder = "images_4"
 args.eval = True
@@ -78,7 +78,7 @@ args.rgb_param_lr = 0.025
 args.sh_param_lr = 0.0025
 args.delaunay_start = 0
 
-args.log2_hashmap_size = 22
+args.log2_hashmap_size = 21
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -1
@@ -89,7 +89,7 @@ args.vertices_lr = 1e-4
 args.vertices_lr_delay = 500
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_mult = 0.01
-args.vertices_lr_max_steps = args.num_iter
+args.vertices_lr_max_steps = args.iterations
 
 args.network_lr = 1e-3
 args.final_network_lr = 1e-5
@@ -106,6 +106,7 @@ args.lambda_dist = 1e-3
 args.net_weight_decay = 0.0
 args.contract_vertices = False
 args.vertices_warmup = 0
+args.hashmap_dim = 4
 
 # args.ladder_p = -0.5
 # args.pre_multi = 4000.0
@@ -167,7 +168,7 @@ densification_sampler = SimpleSampler(len(train_cameras), args.num_densification
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
                                (sample_camera.image_width, sample_camera.image_height))
 
-progress_bar = tqdm(range(args.num_iter))
+progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for train_ind in progress_bar:
     delaunay_interval = 1 if train_ind < args.delaunay_start else 10

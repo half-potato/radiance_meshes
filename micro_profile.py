@@ -1,7 +1,7 @@
 from utils.train_util import render
 # from models.vertex_color import Model
-# from models.tet_color import Model
-from models.ingp_color import Model
+from models.tet_color import Model
+# from models.ingp_color import Model
 import pickle
 import torch
 from tqdm import tqdm
@@ -17,8 +17,8 @@ with open('camera.pkl', 'rb') as f:
 device = torch.device('cuda')
 print("Loading")
 # model = Model.load_ply("ckpt.ply", device)
-# model = Model.load_ply("output/vld500_vldm0.0001_vl1.00E-04_fvl1.00E-05_b2000000/ckpt.ply", device)
-model = Model.load_ckpt(Path("output/ld0"), device)
+model = Model.load_ply("output/vld500_vldm0.0001_vl1.00E-04_fvl1.00E-05_b2000000/ckpt.ply", device)
+# model = Model.load_ckpt(Path("output/ld0"), device)
 
 print(model.indices.shape)
 print("Starting")

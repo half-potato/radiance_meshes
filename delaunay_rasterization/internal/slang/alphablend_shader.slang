@@ -121,7 +121,6 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = {
         curr_pixel_state, curr_distortion_state
     };
-    float t = min_t;
     uint32_t block_size = tile_height * tile_width;
     bool is_inside = (pix_coord.x < W && pix_coord.y < H);
     bool thread_active = is_inside;
@@ -219,7 +218,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
 
-    float t, old_t;
     float4 current_pixel_state, curr_distortion_state;
     int32_t n_contrib_fwd;
     if (is_inside) {
@@ -383,7 +381,6 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
 
-    float t, old_t;
     float4 current_pixel_state;
     int32_t n_contrib_fwd;
     if (is_inside) {

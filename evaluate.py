@@ -1,0 +1,32 @@
+from utils.train_util import render
+# from models.vertex_color import Model
+import pickle
+import torch
+from tqdm import tqdm
+from pathlib import Path
+import imageio
+import numpy as np
+from data import loader
+from utils import test_util
+from utils.args import Args
+
+args = Args()
+args.tile_size = 16
+args.image_folder = "images_4"
+args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
+args.output_path = Path("output/test/")
+args.eval = True
+args.use_ply = False
+args = Args.from_namespace(args.get_parser().parse_args())
+
+device = torch.device('cuda')
+if args.use_ply:
+    from models.tet_color import Model
+    model = Model.load_ply(args.output_path / "ckpt.ply", device)
+else:
+    from models.ingp_color import Model
+    model = Model.load_ckpt(args.output_path, device)
+
+train_cameras, test_cameras, scene_info = loader.load_dataset(
+    args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
+test_util.evaluate_and_save(model, test_cameras, args.output_path, args.tile_size)
