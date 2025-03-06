@@ -40,7 +40,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         indices,
         vertices,
-        vertices,
         world_view_transform,
         K,
         cam_pos,
@@ -147,6 +146,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     )
     torch.cuda.synchronize()
     tet_err = tet_err.clip(max=pixel_err.max())
+    # ic((tet_area > 2).float().mean(), tet_area.mean())
+    tet_err = torch.where(tet_area > 2, tet_err, 0)
 
     return tet_err, dict(
         pixel_err = pixel_err,

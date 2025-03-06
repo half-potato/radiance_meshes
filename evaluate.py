@@ -29,6 +29,7 @@ else:
     from models.ingp_color import Model
     model = Model.load_ckpt(args.output_path, device)
 
+# model.light_offset = -1
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
 

@@ -12,7 +12,7 @@ max_val = torch.finfo(torch.float32).max       #  3.4028e+38
 # Helper: remove_zero
 # Shifts `x` away from 0 by tiny_val if abs(x) < tiny_val
 # -------------------------------------------------------------------
-def remove_zero(x):
+def remove_zero(x, tiny_val:float = torch.finfo(torch.float32).tiny):
     return torch.where(torch.abs(x) < tiny_val, 
                        torch.tensor(tiny_val, device=x.device, dtype=x.dtype), 
                        x)

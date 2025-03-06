@@ -62,14 +62,14 @@ args = Args()
 args.tile_size = 16
 args.sh_deg = 3
 args.output_path = Path("output")
-args.cloning_interval = 500
+args.densify_interval = 500
 args.budget = 1_000_000
 args.num_densification_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
 args.freeze_start = 100000
 args.iterations = 7000
-args.sh_degree_interval = 500
+args.sh_interval = 500
 args.image_folder = "images_4"
 args.eval = True
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
@@ -83,19 +83,21 @@ args.log2_hashmap_size = 21
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -1
+args.light_offset = -3
 
+args.hidden_dim = 64
 args.scale_multi = 1.0
 
 args.vertices_lr = 1e-4
 args.vertices_lr_delay = 500
 args.final_vertices_lr = 1e-6
-args.vertices_lr_delay_mult = 0.01
+args.vertices_lr_delay_multi = 1e-8
 args.vertices_lr_max_steps = args.iterations
 
-args.network_lr = 1e-3
-args.final_network_lr = 1e-5
-args.encoding_lr = 1e-2
-args.final_encoding_lr = 1e-3
+args.network_lr = 0.00125
+args.final_network_lr = 0.000125
+args.encoding_lr = 0.00125
+args.final_encoding_lr = 0.000125
 
 args.lambda_ssim = 0.1
 args.clone_lambda_ssim = 0.1
@@ -103,7 +105,7 @@ args.clone_lambda_ssim = 0.1
 args.weight_decay = 0.01
 args.render_size_min = 0
 args.vertices_beta = [0.9, 0.99]
-args.lambda_dist = 1e-3
+args.lambda_dist = 1e-2
 args.net_weight_decay = 0.0
 args.contract_vertices = False
 args.vertices_warmup = 0
@@ -112,8 +114,8 @@ args.min_clone_size = 1e-3
 
 # args.ladder_p = -0.5
 # args.pre_multi = 4000.0
-args.ladder_p = -0.1
-args.pre_multi = 500
+args.ladder_p = -0.25
+args.pre_multi = 10000
 
 args.split_std = 0.1
 args.split_mode = "barycentric"
@@ -142,23 +144,22 @@ inds = []
 # def target_num(x):
 
 num_densify_iter = args.densify_end - args.densify_start
+N = num_densify_iter // args.densify_interval + 1
 
 def target_num(x):
     if args.clone_schedule == "linear":
         S = model.vertices.shape[0]
-        N = num_densify_iter // args.cloning_interval
         k = (args.budget - S) // N
         return k * x + S
     elif args.clone_schedule == "quadratic":
         S = model.vertices.shape[0]
-        N = num_densify_iter // args.cloning_interval
         k = 2 * (args.budget - S) // N
         a = (args.budget - S - k * N) // N**2
         return a * x**2 + k * x + S
     else:
         raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
 
-print([target_num(i+1) for i in range(num_densify_iter // args.cloning_interval)])
+print([target_num(i+1) for i in range(N)])
 
 # epath = cam_util.generate_cam_path(train_cameras, 400)
 # sample_camera = epath[175]
@@ -175,9 +176,9 @@ torch.cuda.empty_cache()
 for train_ind in progress_bar:
     delaunay_interval = 1 if train_ind < args.delaunay_start else 10
     do_delaunay = train_ind % delaunay_interval == 0 and train_ind > args.vertices_warmup
-    do_cloning = max(train_ind - args.densify_start, 0) % args.cloning_interval == 0 and args.densify_end > train_ind >= args.densify_start
+    do_cloning = max(train_ind - args.densify_start, 0) % args.densify_interval == 0 and args.densify_end > train_ind >= args.densify_start
     do_tracking = False
-    do_sh = train_ind % args.sh_degree_interval == 0 and train_ind > 0
+    do_sh = train_ind % args.sh_interval == 0 and train_ind > 0
     do_sh_step = train_ind % 16 == 0
     do_vertices_warmup = train_ind < args.vertices_warmup or train_ind > args.freeze_start
 
@@ -192,7 +193,10 @@ for train_ind in progress_bar:
     target = camera.original_image.cuda()
 
     st = time.time()
-    render_pkg = render(camera, model, min_t=model.scene_scaling * 0.3, **args.as_dict())
+    bg_scale = min(max(train_ind/2000, 0), 1)
+    bg = bg_scale * np.random.randn()
+    bg = 0
+    render_pkg = render(camera, model, bg=bg, min_t=model.scene_scaling * 0.3, **args.as_dict())
     # render_pkg = render(camera, model, min_t=model.scene_scaling * 0.1, **args.as_dict())
     # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
     #          profile_memory=True, with_stack=True) as prof:
@@ -266,11 +270,11 @@ for train_ind in progress_bar:
             del render_pkg, tet_grad_color, image, render_tensor
 
         with torch.no_grad():
-            tet_volume = tetra_volume(model.vertices, model.indices)
-            large_enough = tet_volume > args.min_clone_size
-            tet_rgbs_grad = torch.where(large_enough, tet_rgbs_grad, 0)
-            target_addition = target_num((train_ind - args.densify_start) // args.cloning_interval + 1) - model.vertices.shape[0]
-            ic(target_addition, (train_ind - args.densify_start) // args.cloning_interval + 1)
+            # tet_volume = tetra_volume(model.vertices, model.indices)
+            # large_enough = tet_volume > args.min_clone_size
+            # tet_rgbs_grad = torch.where(large_enough, tet_rgbs_grad, 0)
+            target_addition = target_num((train_ind - args.densify_start) // args.densify_interval + 1) - model.vertices.shape[0]
+            ic(target_addition, (train_ind - args.densify_start) // args.densify_interval + 1)
             if target_addition > 0:
                 rgbs_threshold = torch.sort(tet_rgbs_grad).values[-min(int(target_addition), tet_rgbs_grad.shape[0])]
                 clone_mask = (tet_rgbs_grad > rgbs_threshold)

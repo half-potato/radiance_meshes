@@ -5,7 +5,7 @@ import os
 import numpy as np
 import imageio
 from tqdm import tqdm
-from lpipsPyTorch import LPIPSEval
+from submodules.lpipsPyTorch import LPIPSEval
 from fused_ssim import fused_ssim
 from utils.train_util import render
 

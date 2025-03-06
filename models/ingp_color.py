@@ -13,7 +13,7 @@ from icecream import ic
 from utils.train_util import RGB2SH
 import tinycudann as tcnn
 from utils.topo_utils import calculate_circumcenters_torch
-from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin
+from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin, remove_zero
 from utils.contraction import contract_mean_std
 from torch_ema import ExponentialMovingAverage
 from utils.contraction import contract_points, inv_contract_points
@@ -42,86 +42,6 @@ def forward_in_chunks(forward, x, chunk_size=548576):
         outputs.append(forward(x_chunk))
         start = end
     return torch.cat(outputs, dim=0)
-
-def next_multiple(value, multiple):
-    """Round `value` up to the nearest multiple of `multiple`."""
-    return ((value + multiple - 1) // multiple) * multiple
-
-def grid_scale(level, per_level_scale, base_resolution):
-    return math.ceil(math.exp2(level * math.log2(per_level_scale)) * base_resolution - 1) + 1
-
-def compute_grid_offsets(cfg, N_POS_DIMS=3):
-    """
-    Translates the C++ snippet's logic into Python, returning:
-      - offset_table: list of offsets per level
-      - total_params: sum of all params_in_level
-
-    cfg is a dictionary containing:
-      - otype: "HashGrid" / "DenseGrid" / "TiledGrid" etc.
-      - n_levels
-      - n_features_per_level
-      - log2_hashmap_size
-      - base_resolution
-      - per_level_scale
-    """
-
-    # Unpack configuration
-    otype               = cfg["otype"]  # e.g. "HashGrid"
-    n_levels            = cfg["n_levels"]
-    n_features_per_level = cfg["n_features_per_level"]
-    log2_hashmap_size   = cfg["log2_hashmap_size"]
-    base_resolution     = cfg["base_resolution"]
-    per_level_scale     = cfg["per_level_scale"]
-
-    # (Optional checks, similar to C++ throws)
-    # e.g., check if n_levels <= some MAX_N_LEVELS
-    # if n_levels > 16:
-    #     raise ValueError(f"n_levels={n_levels} exceeds maximum allowed")
-
-    offset_table = []
-    offset = 0
-
-    # Simulate the "max_params" check for 32-bit safety
-    # C++ used std::numeric_limits<uint32_t>::max() / 2
-    max_params_32 = (1 << 31) - 1
-
-    for level in range(n_levels):
-        # 1) Compute resolution for this level
-        resolution = grid_scale(level, per_level_scale, base_resolution)
-
-        # 2) params_in_level = resolution^N_POS_DIMS (capped by max_params_32)
-        grid_size = resolution ** N_POS_DIMS
-        # params_in_level = grid_size if grid_size <= max_params_32 else max_params_32
-        params_in_level = min(grid_size, max_params_32)
-
-        # 3) Align to multiple of 8
-        # ic(params_in_level, next_multiple(params_in_level, 8), resolution, max_params_32)
-        params_in_level = next_multiple(params_in_level, 8)
-
-        # 4) Adjust based on grid type
-        if otype == "DenseGrid":
-            # No-op
-            pass
-        elif otype == "TiledGrid":
-            # Tiled can’t exceed base_resolution^N_POS_DIMS
-            tiled_max = (base_resolution ** N_POS_DIMS)
-            params_in_level = min(params_in_level, tiled_max)
-        elif otype == "HashGrid":
-            # Hash grid can't exceed 2^log2_hashmap_size
-            params_in_level = min(params_in_level, (1 << log2_hashmap_size))
-        else:
-            raise RuntimeError(f"Invalid grid type '{otype}'")
-
-        params_in_level = params_in_level * n_features_per_level
-        # 5) Store offset for this level and increment
-        offset_table.append(offset)
-        offset += params_in_level
-
-        # (Optional debug print)
-        # print(f"Level={level}, resolution={resolution}, params_in_level={params_in_level}, offset={offset}")
-
-    # offset now points past the last level’s parameters
-    return offset_table, offset
 
 def init_weights(m, gain):
     if isinstance(m, nn.Linear):
@@ -155,17 +75,29 @@ def to_sphere(coordinates):
 
 @torch.jit.script
 def light_function(base_color, reflection_dirs, light_colors, light_roughness, view_dirs, eps:float=torch.finfo(torch.float32).eps):
-    similarity = (reflection_dirs * view_dirs).sum(dim=-1, keepdim=True).abs().clip(min=eps)
-    return base_color + (light_colors * (similarity ** light_roughness)).sum(dim=1)
+    similarity = (reflection_dirs * view_dirs).sum(dim=-1, keepdim=True)
+    mask = similarity > 0
+    spec_intensity = torch.where(mask, (similarity.clip(min=eps) ** light_roughness), 0)
+    spec_color = (light_colors * spec_intensity).sum(dim=1)
+    return base_color + 0*spec_color
+
+@torch.jit.script
+def activate_lights(base_color_raw, lights, light_offset: float):
+    base_color = torch.nn.functional.softplus(base_color_raw)
+    light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
+    light_roughness = 4*safe_exp(lights[:, :, 3:4]-4).clip(max=100)
+    reflection_dirs = 10*lights[:, :, 4:6]
+    return base_color, light_colors, light_roughness, reflection_dirs
 
 @torch.jit.script
 def compute_light_color(base_color_raw, lights, vertices, indices, camera_center, light_offset:float):
-    base_color = torch.nn.functional.softplus(base_color_raw)
-    light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
-    light_roughness = 4*safe_exp(lights[:, :, 3:4]).clip(max=20)
-    reflection_dirs = to_sphere(lights[:, :, 4:6])
+    base_color, light_colors, light_roughness, reflection_dirs = activate_lights(base_color_raw, lights, light_offset)
+    # base_color = torch.nn.functional.softplus(base_color_raw)
+    # light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
+    # light_roughness = 4*safe_exp(lights[:, :, 3:4]-4).clip(max=100)
+    reflection_dirs = to_sphere(reflection_dirs)
     barycenters = vertices[indices].mean(dim=1)
-    view_dirs = l2_normalize_th(barycenters - camera_center).reshape(-1, 1, 3)
+    view_dirs = l2_normalize_th(camera_center - barycenters).reshape(-1, 1, 3)
     return light_function(base_color, reflection_dirs, light_colors, light_roughness, view_dirs)
 
 class Model(nn.Module):
@@ -179,10 +111,11 @@ class Model(nn.Module):
                  per_level_scale=2,
                  L=10,
                  hashmap_dim=4,
+                 hidden_dim=64,
                  contract_vertices=True,
                  density_offset=-1,
                  num_lights=2,
-                 light_offset=-1,
+                 light_offset=-3,
                  **kwargs):
         super().__init__()
         self.scale_multi = scale_multi
@@ -191,6 +124,7 @@ class Model(nn.Module):
         self.device = vertices.device
         self.density_offset = density_offset
         self.num_lights = num_lights
+        self.max_lights = 2
         self.light_offset = light_offset
         config = dict(
             otype="HashGrid",
@@ -204,6 +138,7 @@ class Model(nn.Module):
         self.per_level_scale = per_level_scale
         # self.encoding = tcnn.Encoding(3, config).to(self.device)
         self.base_resolution = base_resolution
+        self.chunk_size = 508576
 
         self.encoding = torch.compile(hashgrid.HashEmbedderOptimized(
             [torch.zeros((3), device=self.device), torch.ones((3), device=self.device)],
@@ -212,11 +147,11 @@ class Model(nn.Module):
             finest_resolution=base_resolution*per_level_scale**self.L)).to(self.device)
 
         self.network = torch.compile(nn.Sequential(
-            nn.Linear(self.encoding.n_output_dims, 64),
+            nn.Linear(self.encoding.n_output_dims, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 4 + self.num_lights * 6)
+            nn.Linear(hidden_dim, 4 + self.num_lights * 6)
         )).to(self.device)
         gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
         self.network.apply(lambda m: init_weights(m, gain))
@@ -239,11 +174,12 @@ class Model(nn.Module):
         print(f"Loaded {vertices.shape[0]} vertices")
         temp = config.contract_vertices
         config.contract_vertices = False
-        model = Model(vertices.to(device), torch.tensor([0, 0, 0], device=device), 1, **config.as_dict())
+        model = Model(vertices.to(device), ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
         model.contract_vertices = temp
         return model
 
+    @torch.no_grad
     def save2ply(self, path: Path, sample_camera: Camera):
         path.parent.mkdir(exist_ok=True, parents=True)
         
@@ -257,25 +193,49 @@ class Model(nn.Module):
         elements['z'] = xyz[:, 2]
         el = PlyElement.describe(elements, 'vertex')
 
-        dtype_tets = np.dtype([
+        dtype_tets = [
             ('vertex_indices', 'i4', (4,)),
             # ('vertex_indices', 'O'),
             ('r', 'f4'),
             ('g', 'f4'),
             ('b', 'f4'),
-            ('s', 'f4')
-        ])
+            ('s', 'f4'),
+        ]
+        for i in range(self.num_lights):
+            dtype_tets.extend([
+                (f'l{i}_r', 'f4'),
+                (f'l{i}_g', 'f4'),
+                (f'l{i}_b', 'f4'),
+                (f'l{i}_roughness', 'f4'),
+                (f'l{i}_phi', 'f4'),
+                (f'l{i}_theta', 'f4')])
+        dtype_tets = np.dtype(dtype_tets)
 
         # Get the color/scalar values (each element should be a tuple: (r, g, b, s))
         # need to batch this saving process
         N = self.indices.shape[0]
         B = 1_000_000
-        rgbs = np.zeros((N, 4))
-        for i in range(0, N, B):
-            mask = torch.zeros((N), dtype=bool, device=self.device)
-            mask[i:i+B] = True
-            rgbs[i:i+B] = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
+        rgbs = np.zeros((N, 4 + self.num_lights * 6))
         # rgbs = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
+        start = 0
+        
+        vertices = self.vertices
+        indices = self.indices
+        for start in range(0, indices.shape[0], self.chunk_size):
+            end = min(start + self.chunk_size, indices.shape[0])
+            
+            output = self.compute_batch_features(vertices, indices, start, end)
+            base_color_raw = output[:, :3]
+            density = safe_exp(output[:, 3:4]+self.density_offset)
+            lights = output[:, 4:].reshape(-1, self.num_lights, 6)[:, :self.max_lights]
+            base_color, light_colors, light_roughness, reflection_dirs = activate_lights(base_color_raw, lights, self.light_offset)
+            rgbs[start:end] = torch.cat([
+                base_color,
+                density,
+                light_colors.reshape(-1, self.num_lights * 3),
+                light_roughness.reshape(-1, self.num_lights),
+                reflection_dirs.reshape(-1, self.num_lights * 2),
+            ], dim=1).cpu().numpy()
 
 
         tet_elements = np.empty(self.indices.shape[0], dtype=dtype_tets)
@@ -285,12 +245,16 @@ class Model(nn.Module):
         tet_elements['g'] = rgbs[:, 1]
         tet_elements['b'] = rgbs[:, 2]
         tet_elements['s'] = rgbs[:, 3]
+        for i in range(self.num_lights):
+            tet_elements[f'l{i}_r'] = rgbs[:, 3 + i*6 + 0]
+            tet_elements[f'l{i}_g'] = rgbs[:, 3 + i*6 + 1]
+            tet_elements[f'l{i}_b'] = rgbs[:, 3 + i*6 + 2]
+            tet_elements[f'l{i}_roughness'] = rgbs[:, 3 + i*6 + 3]
+            tet_elements[f'l{i}_phi'] = rgbs[:, 3 + i*6 + 4]
+            tet_elements[f'l{i}_theta'] = rgbs[:, 3 + i*6 + 5]
 
         # Create the PlyElement description for tetrahedra
         inds = PlyElement.describe(tet_elements, 'tetrahedron')
-        # tets = np.array([ (features_np[i][0], features_np[i][1], features_np[i][2], features_np[i][3], self.indices_np[i].tolist()) for i in range(self.indices_np.shape[0]) ],
-        #         dtype=[ ('red', 'f4'), ('green', 'f4'), ('blue', 'f4'), ('density', 'f4'), ('vertex_indices', 'i4', (4,)) ])
-        # tets = PlyElement.describe(tets, 'tetrahedron')
 
         PlyData([el, inds]).write(str(path))
 
@@ -341,7 +305,7 @@ class Model(nn.Module):
         return model
 
     def sh_up(self):
-        pass
+        self.max_lights = min(self.num_lights, self.max_lights+1)
 
     def compute_batch_features(self, vertices, indices, start, end):
         cv, scaling =  pre_calc_cell_values(
@@ -367,13 +331,13 @@ class Model(nn.Module):
         
         if alpha_threshold > 0:
             # Compute the density mask in chunks
-            chunk_size = 508576
             mask_list = []
             start = 0
             
             vertices = self.vertices
-            while start < self.indices.shape[0]:
-                end = min(start + chunk_size, self.indices.shape[0])
+            # while start < self.indices.shape[0]:
+            for start in range(0, self.indices.shape[0], self.chunk_size):
+                end = min(start + self.chunk_size, self.indices.shape[0])
                 
                 output = self.compute_batch_features(vertices, self.indices, start, end)
 
@@ -391,7 +355,7 @@ class Model(nn.Module):
                 # mask_list.append(density > density_threshold)
                 mask_list.append(alpha > alpha_threshold)
                 
-                start = end
+                # start = end
             
             # Concatenate mask and apply it
             mask = torch.cat(mask_list, dim=0)
@@ -406,23 +370,24 @@ class Model(nn.Module):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
 
-        chunk_size=508576
         outputs = []
         start = 0
         # with autocast(dtype=torch.float16):
-        while start < indices.shape[0]:
-            end = min(start + chunk_size, indices.shape[0])
+        for start in range(0, indices.shape[0], self.chunk_size):
+        # while start < indices.shape[0]:
+            end = min(start + self.chunk_size, indices.shape[0])
             output = self.compute_batch_features(vertices, indices, start, end)
             # base_color = torch.nn.functional.softplus(output[:, :3])
             base_color_raw = output[:, :3]
-            lights = output[:, 4:].reshape(-1, self.num_lights, 6)
+            density = safe_exp(output[:, 3:4]+self.density_offset)
+            lights = output[:, 4:].reshape(-1, self.num_lights, 6)[:, :self.max_lights]
             color = compute_light_color(base_color_raw, lights, vertices, indices[start:end], camera.camera_center, self.light_offset)
             # features = torch.cat([
             #     torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
             features = torch.cat([
-                color, safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
+                color, density], dim=1)
             outputs.append(features)
-            start = end
+            # start = end
         features = torch.cat(outputs, dim=0)
         return features
 
@@ -439,7 +404,7 @@ class TetOptimizer:
                  final_network_lr: float=1e-3,
                  vertices_lr: float=4e-4,
                  final_vertices_lr: float=4e-7,
-                 vertices_lr_delay_mult: float=0.01,
+                 vertices_lr_delay_multi: float=0.01,
                  vertices_lr_max_steps: int=5000,
                  weight_decay=1e-10,
                  net_weight_decay=1e-3,
@@ -450,10 +415,10 @@ class TetOptimizer:
         self.weight_decay = weight_decay
         self.optim = optim.CustomAdam([
             {"params": model.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
-        ], ignore_param_list=["encoding", "network"], eps=1e-15, betas=vertices_beta)
+        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], eps=1e-15)
         self.net_optim = optim.CustomAdam([
             {"params": model.network.parameters(), "lr": network_lr, "name": "network"},
-        ], ignore_param_list=["encoding", "network"], weight_decay=net_weight_decay)
+        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], weight_decay=net_weight_decay)
         self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
@@ -467,16 +432,18 @@ class TetOptimizer:
 
         self.net_scheduler_args = get_expon_lr_func(lr_init=network_lr,
                                                 lr_final=final_network_lr,
-                                                lr_delay_mult=1,
-                                                max_steps=vertices_lr_max_steps)
+                                                lr_delay_mult=1e-8,
+                                                lr_delay_steps=500,
+                                                max_steps=10000)
         self.encoder_scheduler_args = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
-                                                lr_delay_mult=1,
-                                                max_steps=vertices_lr_max_steps)
+                                                lr_delay_mult=1e-8,
+                                                lr_delay_steps=500,
+                                                max_steps=10000)
         self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vert_lr_multi*vertices_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
-                                                lr_delay_mult=vertices_lr_delay_mult,
-                                                max_steps=vertices_lr_max_steps,
+                                                lr_delay_mult=vertices_lr_delay_multi,
+                                                max_steps=10000,
                                                 lr_delay_steps=vertices_lr_delay)
 
     def update_learning_rate(self, iteration):

@@ -139,7 +139,7 @@ def safe_sin(x):
     return safe_trig_helper(x, torch.sin)
 
 
-def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1, pre_multi=500, ladder_p=-0.1, **kwargs):
+def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.1, pre_multi=500, ladder_p=-0.1, **kwargs):
     fy = fov2focal(camera.fovy, camera.image_height)
     fx = fov2focal(camera.fovx, camera.image_width)
     K = torch.tensor([
@@ -169,7 +169,6 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1, pre
         model.indices,
         # scale_vertices,
         # scale_vertices,
-        vertices,
         vertices,
         world_view_transform,
         K,
@@ -214,6 +213,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1, pre
     # torch.cuda.synchronize()
     # dt2 = (time.time() - st)
     # print(dt1, dt2, 1/(dt1+dt2))
+    image_rgb = image_rgb + (1-image_rgb[..., 3:4]) * bg
     
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],

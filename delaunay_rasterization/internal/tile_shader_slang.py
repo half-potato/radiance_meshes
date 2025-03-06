@@ -25,7 +25,6 @@ def ceil_div(x, y):
 
 def vertex_and_tile_shader(indices,
                            vertices,
-                           densitites,
                            world_view_transform,
                            K,
                            cam_pos,
@@ -56,7 +55,6 @@ def vertex_and_tile_shader(indices,
     tiles_touched, rect_tile_space, vs_tetra, circumcenter, tet_area = VertexShader.apply(
         indices, 
         vertices,
-        densitites,
         world_view_transform,
         K,
         cam_pos,
@@ -128,7 +126,7 @@ def vertex_and_tile_shader(indices,
 class VertexShader(torch.autograd.Function):
     @staticmethod
     def forward(ctx, 
-                indices, vertices, densitites,
+                indices, vertices,
                 world_view_transform, K, cam_pos,
                 fovy, fovx,
                 render_grid, device="cuda"):
@@ -140,10 +138,9 @@ class VertexShader(torch.autograd.Function):
         rect_tile_space = torch.zeros((n_tetra, 4), 
                                       device="cuda", 
                                       dtype=torch.int32)
-        tet_area = None
-        # tet_area = torch.ones((n_tetra), 
-        #                         device="cuda", 
-        #                         dtype=torch.float)
+        tet_area = torch.ones((n_tetra), 
+                                device="cuda", 
+                                dtype=torch.float)
         
         vs_tetra = torch.zeros((n_tetra, 3),
                                device="cuda",
@@ -154,10 +151,10 @@ class VertexShader(torch.autograd.Function):
         
         slang_modules.vertex_shader.vertex_shader(indices=indices,
                                                   vertices=vertices,
-                                                  densities=densitites,
                                                   world_view_transform=world_view_transform,
                                                   K=K,
                                                   cam_pos=cam_pos,
+                                                  out_tet_area=tet_area,
                                                   out_tiles_touched=tiles_touched,
                                                   out_rect_tile_space=rect_tile_space,
                                                   out_vs=vs_tetra,
@@ -175,7 +172,7 @@ class VertexShader(torch.autograd.Function):
         )
 
         ctx.save_for_backward(indices, vertices, world_view_transform, K, cam_pos,
-                              tiles_touched, rect_tile_space, vs_tetra, circumcenter, densitites)
+                              tiles_touched, rect_tile_space, vs_tetra, circumcenter, tet_area)
         ctx.render_grid = render_grid
         ctx.fovy = fovy
         ctx.fovx = fovx
@@ -185,7 +182,7 @@ class VertexShader(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_tiles_touched, grad_rect_tile_space, grad_vs_tetra, grad_circumcenter):
         (indices, vertices, world_view_transform, K, cam_pos,
-         tiles_touched, rect_tile_space, vs_tetra, circumcenter, densitites) = ctx.saved_tensors
+         tiles_touched, rect_tile_space, vs_tetra, circumcenter, tet_area) = ctx.saved_tensors
         render_grid = ctx.render_grid
         fovy = ctx.fovy
         fovx = ctx.fovx
@@ -197,10 +194,10 @@ class VertexShader(torch.autograd.Function):
 
         slang_modules.vertex_shader.vertex_shader.bwd(indices=indices,
                                                       vertices=(vertices, grad_vertices),
-                                                      densities=densitites,
                                                       world_view_transform=world_view_transform,
                                                       K=K,
                                                       cam_pos=cam_pos,
+                                                      out_tet_area=tet_area,
                                                       out_tiles_touched=tiles_touched,
                                                       out_rect_tile_space=rect_tile_space,
                                                       out_vs=(vs_tetra, grad_vs_tetra),
@@ -216,4 +213,4 @@ class VertexShader(torch.autograd.Function):
                 blockSize=(256, 1, 1),
                 gridSize=(ceil_div(n_tetra, 256), 1, 1)
         )
-        return grad_indices, grad_vertices, None, None, None, None, None
+        return grad_indices, grad_vertices, None, None, None, None

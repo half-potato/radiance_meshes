@@ -136,10 +136,10 @@ int32_t count_tiles(Tetrahedra tet, Camera cam, rectangle rect_tile_space, int32
 [Differentiable]
 void vertex_shader(TensorView<int32_t> indices,
                    DiffTensorView vertices,
-                   TensorView<float> densities,
                    TensorView<float> world_view_transform,
                    TensorView<float> K,
                    TensorView<float> cam_pos,
+                   TensorView<float> out_tet_area,
                    TensorView<int32_t> out_tiles_touched,
                    TensorView<int32_t> out_rect_tile_space,
                    DiffTensorView out_vs,
@@ -165,7 +165,7 @@ void vertex_shader(TensorView<int32_t> indices,
     Tetrahedra camspace_tet = tet2camspace(tet, cam);
     no_diff float3 minv, maxv;
     no_diff find_extent(camspace_tet, minv, maxv, cam);
-    no_diff float max_alpha = get_max_alpha(maxv.z - minv.z, virtual_tet, densities);
+    // no_diff float max_alpha = get_max_alpha(maxv.z - minv.z, virtual_tet, densities);
 
     // Check if tetrahedron is completely outside any frustum plane
     if (maxv.z <= 0.0) {// && max_alpha < 0.5/255.f) {
@@ -201,6 +201,11 @@ void vertex_shader(TensorView<int32_t> indices,
     // } else {
     //     out_tiles_touched[g_idx] = count_tiles(tet, cam, rect_tile_space, tile_width, tile_height);
     // }
+    Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 }, 0);
+    Tetrahedra image_tet = camspace_tet2image_w_depth(camspace_tet, cam);
+    float area = tet_area(image_tet, center_ray.d, cam);
+    out_tet_area[g_idx] = area;
+
     out_tiles_touched[g_idx] = n_tiles;
     out_rect_tile_space[uint2(g_idx, 0)] = rect_tile_space.min_x;
     out_rect_tile_space[uint2(g_idx, 1)] = rect_tile_space.min_y;
