@@ -54,8 +54,9 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         vs_tetra.retain_grad()
     except:
         pass
-    cell_values = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
-    cell_values[mask] = model.get_cell_values(camera, mask)
+    # cell_values = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
+    # cell_values[mask] = model.get_cell_values(camera, mask)
+    cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
     # st = time.time()
@@ -147,9 +148,12 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     torch.cuda.synchronize()
     tet_err = tet_err.clip(max=pixel_err.max())
     # ic((tet_area > 2).float().mean(), tet_area.mean())
-    tet_err = torch.where(tet_area > 2, tet_err, 0)
+    mask = tet_area > 1
+    # tet_err = torch.where(mask, tet_err, 0)
 
     return tet_err, dict(
+        mask = mask,
+        tet_area = tet_area,
         pixel_err = pixel_err,
         ssim_err = ssim_err,
         l2_err = l2_err,

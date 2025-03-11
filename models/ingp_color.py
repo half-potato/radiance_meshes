@@ -28,9 +28,10 @@ from plyfile import PlyData, PlyElement
 from pathlib import Path
 import numpy as np
 from utils.args import Args
+import tinyplypy
+
 
 def forward_in_chunks(forward, x, chunk_size=548576):
-# def forward_in_chunks(self, x, chunk_size=65536):
     """
     Same as forward(), but processes 'x' in chunks to reduce memory usage.
     """
@@ -79,19 +80,20 @@ def light_function(base_color, reflection_dirs, light_colors, light_roughness, v
     mask = similarity > 0
     spec_intensity = torch.where(mask, (similarity.clip(min=eps) ** light_roughness), 0)
     spec_color = (light_colors * spec_intensity).sum(dim=1)
-    return base_color + 0*spec_color
+    return base_color + spec_color
 
 @torch.jit.script
-def activate_lights(base_color_raw, lights, light_offset: float):
+def activate_lights(base_color_raw, lights, light_offset: float, dir_offset):
     base_color = torch.nn.functional.softplus(base_color_raw)
     light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
-    light_roughness = 4*safe_exp(lights[:, :, 3:4]-4).clip(max=100)
-    reflection_dirs = 10*lights[:, :, 4:6]
+    light_roughness = 4*safe_exp(lights[:, :, 3:4]-1).clip(max=100)
+    reflection_dirs = lights[:, :, 4:6] + dir_offset.reshape(1, -1, 2)
     return base_color, light_colors, light_roughness, reflection_dirs
 
 @torch.jit.script
-def compute_light_color(base_color_raw, lights, vertices, indices, camera_center, light_offset:float):
-    base_color, light_colors, light_roughness, reflection_dirs = activate_lights(base_color_raw, lights, light_offset)
+def compute_light_color(base_color_raw, lights, vertices, indices, camera_center, light_offset: float, dir_offset):
+    base_color, light_colors, light_roughness, reflection_dirs = activate_lights(
+        base_color_raw, lights, light_offset, dir_offset)
     # base_color = torch.nn.functional.softplus(base_color_raw)
     # light_colors = torch.nn.functional.softplus(lights[:, :, :3]+light_offset)
     # light_roughness = 4*safe_exp(lights[:, :, 3:4]-4).clip(max=100)
@@ -124,8 +126,12 @@ class Model(nn.Module):
         self.device = vertices.device
         self.density_offset = density_offset
         self.num_lights = num_lights
-        self.max_lights = 2
+        self.max_lights = 0
         self.light_offset = light_offset
+        self.dir_offset = torch.tensor([
+            [0, 0],
+            [math.pi, 0],
+        ], device=self.device)
         config = dict(
             otype="HashGrid",
             n_levels=self.L,
@@ -148,9 +154,11 @@ class Model(nn.Module):
 
         self.network = torch.compile(nn.Sequential(
             nn.Linear(self.encoding.n_output_dims, hidden_dim),
-            nn.ReLU(inplace=True),
+            # nn.ReLU(inplace=True),
+            nn.SELU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True),
+            # nn.ReLU(inplace=True),
+            nn.SELU(inplace=True),
             nn.Linear(hidden_dim, 4 + self.num_lights * 6)
         )).to(self.device)
         gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
@@ -180,83 +188,175 @@ class Model(nn.Module):
         return model
 
     @torch.no_grad
-    def save2ply(self, path: Path, sample_camera: Camera):
+    def save2ply(self, path, sample_camera):
+        """
+        Convert the old save2ply function (which used 'plyfile'),
+        so it uses our new tinyply-based library via pybind11.
+        """
+
+        # Ensure the output directory exists
         path.parent.mkdir(exist_ok=True, parents=True)
-        
-        xyz = self.vertices.detach().cpu().numpy()
 
-        dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
-        
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        elements['x'] = xyz[:, 0]
-        elements['y'] = xyz[:, 1]
-        elements['z'] = xyz[:, 2]
-        el = PlyElement.describe(elements, 'vertex')
+        # 1. Gather vertex positions
+        xyz = self.vertices.detach().cpu().numpy().astype(np.float32)  # shape (num_vertices, 3)
 
-        dtype_tets = [
-            ('vertex_indices', 'i4', (4,)),
-            # ('vertex_indices', 'O'),
-            ('r', 'f4'),
-            ('g', 'f4'),
-            ('b', 'f4'),
-            ('s', 'f4'),
-        ]
-        for i in range(self.num_lights):
-            dtype_tets.extend([
-                (f'l{i}_r', 'f4'),
-                (f'l{i}_g', 'f4'),
-                (f'l{i}_b', 'f4'),
-                (f'l{i}_roughness', 'f4'),
-                (f'l{i}_phi', 'f4'),
-                (f'l{i}_theta', 'f4')])
-        dtype_tets = np.dtype(dtype_tets)
+        # For tinyply, we store them as one dictionary for the "vertex" element:
+        #   { "x": array([...]), "y": ..., "z": ... }
+        # Make sure to cast to a concrete dtype (e.g. float32).
+        vertex_dict = {
+            "x": xyz[:, 0],
+            "y": xyz[:, 1],
+            "z": xyz[:, 2],
+        }
 
-        # Get the color/scalar values (each element should be a tuple: (r, g, b, s))
-        # need to batch this saving process
+        # 2. Compute your RGBA / lighting data per tetrahedron
+        #    (same logic as in your code: iterative chunking, gather, etc.)
         N = self.indices.shape[0]
-        B = 1_000_000
-        rgbs = np.zeros((N, 4 + self.num_lights * 6))
-        # rgbs = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
-        start = 0
-        
+        rgbs = np.zeros((N, 4 + self.num_lights * 6), dtype=np.float32)
+
         vertices = self.vertices
         indices = self.indices
+        # e.g., chunk-based processing (adapt as you did in your original code)
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
-            
+
             output = self.compute_batch_features(vertices, indices, start, end)
             base_color_raw = output[:, :3]
-            density = safe_exp(output[:, 3:4]+self.density_offset)
-            lights = output[:, 4:].reshape(-1, self.num_lights, 6)[:, :self.max_lights]
-            base_color, light_colors, light_roughness, reflection_dirs = activate_lights(base_color_raw, lights, self.light_offset)
+            density = torch.exp(output[:, 3:4] + self.density_offset)
+            lights = output[:, 4:].reshape(-1, self.num_lights, 6)
+            base_color, light_colors, light_roughness, reflection_dirs = activate_lights(
+                base_color_raw, lights, self.light_offset, self.dir_offset
+            )
             rgbs[start:end] = torch.cat([
                 base_color,
                 density,
                 light_colors.reshape(-1, self.num_lights * 3),
                 light_roughness.reshape(-1, self.num_lights),
                 reflection_dirs.reshape(-1, self.num_lights * 2),
-            ], dim=1).cpu().numpy()
+            ], dim=1).cpu().numpy().astype(np.float32)
 
+        # 3. Build the dictionary for your "tetrahedron" element
+        #    'vertex_indices' is a 2D array (N,4) for the tetra indices
+        #    plus 'r', 'g', 'b', 's', and the per-light properties
+        tetra_dict = {}
 
-        tet_elements = np.empty(self.indices.shape[0], dtype=dtype_tets)
-        # tet_elements['vertex_indices'] = list(self.indices_np)
-        tet_elements['vertex_indices'] = self.indices.cpu().numpy()
-        tet_elements['r'] = rgbs[:, 0]
-        tet_elements['g'] = rgbs[:, 1]
-        tet_elements['b'] = rgbs[:, 2]
-        tet_elements['s'] = rgbs[:, 3]
+        # Indices: shape (N, 4). Must be stored as an unsigned int (common for face/tet indices).
+        tetra_dict["vertex_indices"] = self.indices.cpu().numpy().astype(np.int32)
+
+        # The first 4 columns in rgbs are [r, g, b, s].
+        tetra_dict["r"] = np.ascontiguousarray(rgbs[:, 0])
+        tetra_dict["g"] = np.ascontiguousarray(rgbs[:, 1])
+        tetra_dict["b"] = np.ascontiguousarray(rgbs[:, 2])
+        tetra_dict["s"] = np.ascontiguousarray(rgbs[:, 3])
+
+        # Then the remainder are the per-light columns:
+        # Each light has 6 columns: [l_r, l_g, l_b, l_roughness, l_phi, l_theta].
+        # They occupy columns: rgbs[:, 4 + i*6 : 4 + (i+1)*6].
         for i in range(self.num_lights):
-            tet_elements[f'l{i}_r'] = rgbs[:, 3 + i*6 + 0]
-            tet_elements[f'l{i}_g'] = rgbs[:, 3 + i*6 + 1]
-            tet_elements[f'l{i}_b'] = rgbs[:, 3 + i*6 + 2]
-            tet_elements[f'l{i}_roughness'] = rgbs[:, 3 + i*6 + 3]
-            tet_elements[f'l{i}_phi'] = rgbs[:, 3 + i*6 + 4]
-            tet_elements[f'l{i}_theta'] = rgbs[:, 3 + i*6 + 5]
+            offset = 4 + i*6
+            tetra_dict[f"l{i}_r"]         = np.ascontiguousarray(rgbs[:, offset + 0])
+            tetra_dict[f"l{i}_g"]         = np.ascontiguousarray(rgbs[:, offset + 1])
+            tetra_dict[f"l{i}_b"]         = np.ascontiguousarray(rgbs[:, offset + 2])
+            tetra_dict[f"l{i}_roughness"] = np.ascontiguousarray(rgbs[:, offset + 3])
+            tetra_dict[f"l{i}_phi"]       = np.ascontiguousarray(rgbs[:, offset + 4])
+            tetra_dict[f"l{i}_theta"]     = np.ascontiguousarray(rgbs[:, offset + 5])
 
-        # Create the PlyElement description for tetrahedra
-        inds = PlyElement.describe(tet_elements, 'tetrahedron')
+        # 4. Final data structure:
+        # data_dict[element_name][property_name] = numpy_array
+        data_dict = {
+            "vertex": vertex_dict,
+            "tetrahedron": tetra_dict,
+        }
 
-        PlyData([el, inds]).write(str(path))
+        tinyplypy.write_ply(str(path), data_dict, is_binary=True)
+        # data_dict = tinyplypy.read_ply(str(path))
+        # ic(data_dict['vertex']['x'], xyz[:, 0],
+        #    data_dict['tetrahedron']['r'], rgbs[:, 0], tetra_dict['r'],
+        #    data_dict['tetrahedron']['g'], rgbs[:, 1],
+        #    data_dict['tetrahedron']['b'], rgbs[:, 2],
+        #    rgbs.shape, data_dict['tetrahedron']['r'].shape,
+        #    vertex_dict['x'].shape, data_dict['vertex']['x'].shape)
+        # ic(self.indices, data_dict['tetrahedron']['vertex_indices'])
+
+    # @torch.no_grad
+    # def save2ply(self, path: Path, sample_camera: Camera):
+    #     path.parent.mkdir(exist_ok=True, parents=True)
+        
+    #     xyz = self.vertices.detach().cpu().numpy()
+
+    #     dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+        
+    #     elements = np.empty(xyz.shape[0], dtype=dtype_full)
+    #     elements['x'] = xyz[:, 0]
+    #     elements['y'] = xyz[:, 1]
+    #     elements['z'] = xyz[:, 2]
+    #     el = PlyElement.describe(elements, 'vertex')
+
+    #     dtype_tets = [
+    #         ('vertex_indices', 'i4', (4,)),
+    #         # ('vertex_indices', 'O'),
+    #         ('r', 'f4'),
+    #         ('g', 'f4'),
+    #         ('b', 'f4'),
+    #         ('s', 'f4'),
+    #     ]
+    #     for i in range(self.num_lights):
+    #         dtype_tets.extend([
+    #             (f'l{i}_r', 'f4'),
+    #             (f'l{i}_g', 'f4'),
+    #             (f'l{i}_b', 'f4'),
+    #             (f'l{i}_roughness', 'f4'),
+    #             (f'l{i}_phi', 'f4'),
+    #             (f'l{i}_theta', 'f4')])
+    #     dtype_tets = np.dtype(dtype_tets)
+
+    #     # Get the color/scalar values (each element should be a tuple: (r, g, b, s))
+    #     # need to batch this saving process
+    #     N = self.indices.shape[0]
+    #     B = 1_000_000
+    #     rgbs = np.zeros((N, 4 + self.num_lights * 6))
+    #     # rgbs = self.get_cell_values(sample_camera, mask).detach().cpu().numpy()
+    #     start = 0
+        
+    #     vertices = self.vertices
+    #     indices = self.indices
+    #     for start in range(0, indices.shape[0], self.chunk_size):
+    #         end = min(start + self.chunk_size, indices.shape[0])
+            
+    #         output = self.compute_batch_features(vertices, indices, start, end)
+    #         base_color_raw = output[:, :3]
+    #         density = safe_exp(output[:, 3:4]+self.density_offset)
+    #         lights = output[:, 4:].reshape(-1, self.num_lights, 6)
+    #         base_color, light_colors, light_roughness, reflection_dirs = activate_lights(
+    #             base_color_raw, lights, self.light_offset, self.dir_offset)
+    #         rgbs[start:end] = torch.cat([
+    #             base_color,
+    #             density,
+    #             light_colors.reshape(-1, self.num_lights * 3),
+    #             light_roughness.reshape(-1, self.num_lights),
+    #             reflection_dirs.reshape(-1, self.num_lights * 2),
+    #         ], dim=1).cpu().numpy()
+
+
+    #     tet_elements = np.empty(self.indices.shape[0], dtype=dtype_tets)
+    #     # tet_elements['vertex_indices'] = list(self.indices_np)
+    #     tet_elements['vertex_indices'] = self.indices.cpu().numpy()
+    #     tet_elements['r'] = rgbs[:, 0]
+    #     tet_elements['g'] = rgbs[:, 1]
+    #     tet_elements['b'] = rgbs[:, 2]
+    #     tet_elements['s'] = rgbs[:, 3]
+    #     for i in range(self.num_lights):
+    #         tet_elements[f'l{i}_r'] = rgbs[:, 3 + i*6 + 0]
+    #         tet_elements[f'l{i}_g'] = rgbs[:, 3 + i*6 + 1]
+    #         tet_elements[f'l{i}_b'] = rgbs[:, 3 + i*6 + 2]
+    #         tet_elements[f'l{i}_roughness'] = rgbs[:, 3 + i*6 + 3]
+    #         tet_elements[f'l{i}_phi'] = rgbs[:, 3 + i*6 + 4]
+    #         tet_elements[f'l{i}_theta'] = rgbs[:, 3 + i*6 + 5]
+
+    #     # Create the PlyElement description for tetrahedra
+    #     inds = PlyElement.describe(tet_elements, 'tetrahedron')
+
+    #     PlyData([el, inds]).write(str(path))
 
     def inv_contract(self, points):
         return inv_contract_points(points) * self.scene_scaling + self.center
@@ -381,7 +481,9 @@ class Model(nn.Module):
             base_color_raw = output[:, :3]
             density = safe_exp(output[:, 3:4]+self.density_offset)
             lights = output[:, 4:].reshape(-1, self.num_lights, 6)[:, :self.max_lights]
-            color = compute_light_color(base_color_raw, lights, vertices, indices[start:end], camera.camera_center, self.light_offset)
+            color = compute_light_color(
+                base_color_raw, lights, vertices, indices[start:end],
+                camera.camera_center, self.light_offset, self.dir_offset[:self.max_lights])
             # features = torch.cat([
             #     torch.nn.functional.softplus(output[:, :3]), safe_exp(output[:, 3:4]+self.density_offset)], dim=1)
             features = torch.cat([
@@ -410,7 +512,7 @@ class TetOptimizer:
                  net_weight_decay=1e-3,
                  split_std: float = 0.5,
                  vertices_beta: List[float] = [0.9, 0.99],
-                 vertices_lr_delay: int = 500,
+                 lr_delay: int = 500,
                  **kwargs):
         self.weight_decay = weight_decay
         self.optim = optim.CustomAdam([
@@ -433,18 +535,18 @@ class TetOptimizer:
         self.net_scheduler_args = get_expon_lr_func(lr_init=network_lr,
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
-                                                lr_delay_steps=500,
+                                                lr_delay_steps=lr_delay,
                                                 max_steps=10000)
         self.encoder_scheduler_args = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
-                                                lr_delay_steps=500,
+                                                lr_delay_steps=lr_delay,
                                                 max_steps=10000)
         self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vert_lr_multi*vertices_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
                                                 max_steps=10000,
-                                                lr_delay_steps=vertices_lr_delay)
+                                                lr_delay_steps=lr_delay)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''

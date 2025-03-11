@@ -64,7 +64,7 @@ args.sh_deg = 3
 args.output_path = Path("output")
 args.densify_interval = 500
 args.budget = 1_000_000
-args.num_densification_samples = 200
+args.num_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
 args.freeze_start = 100000
@@ -79,7 +79,7 @@ args.rgb_param_lr = 0.025
 args.sh_param_lr = 0.0025
 args.delaunay_start = 0
 
-args.log2_hashmap_size = 21
+args.log2_hashmap_size = 22
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -1
@@ -89,31 +89,42 @@ args.hidden_dim = 64
 args.scale_multi = 1.0
 
 args.vertices_lr = 1e-4
-args.vertices_lr_delay = 500
+args.lr_delay = 50
 args.final_vertices_lr = 1e-6
-args.vertices_lr_delay_multi = 1e-8
 args.vertices_lr_max_steps = args.iterations
 
-args.network_lr = 0.00125
-args.final_network_lr = 0.000125
+args.vertices_lr_delay_multi = 1e-8
+# args.network_lr = 0.00125
+# args.final_network_lr = 0.000125
 args.encoding_lr = 0.00125
 args.final_encoding_lr = 0.000125
+# args.lambda_dist = 1e-2
+
+# args.vertices_lr_delay_mult = 0.01
+# args.network_lr = 1e-3
+# args.final_network_lr = 1e-5
+args.network_lr = 0.00125
+args.final_network_lr = 0.000125
+# args.encoding_lr = 1e-2
+# args.final_encoding_lr = 1e-3
 
 args.lambda_ssim = 0.1
 args.clone_lambda_ssim = 0.1
 
+args.clip_multi = 1e-4
 args.weight_decay = 0.01
 args.render_size_min = 0
 args.vertices_beta = [0.9, 0.99]
-args.lambda_dist = 1e-2
 args.net_weight_decay = 0.0
 args.contract_vertices = False
 args.vertices_warmup = 0
 args.hashmap_dim = 4
 args.min_clone_size = 1e-3
 
+# args.lambda_dist = 1e-3
 # args.ladder_p = -0.5
 # args.pre_multi = 4000.0
+args.lambda_dist = 1e-2
 args.ladder_p = -0.25
 args.pre_multi = 10000
 
@@ -128,7 +139,7 @@ args.output_path.mkdir(exist_ok=True, parents=True)
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
 
-args.num_densification_samples = min(len(train_cameras), args.num_densification_samples)
+args.num_samples = min(len(train_cameras), args.num_samples)
 
 camera = train_cameras[0]
 with open('camera.pkl', 'wb') as f:
@@ -137,6 +148,7 @@ with open('camera.pkl', 'wb') as f:
 device = torch.device('cuda')
 model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device, **args.as_dict())
 tet_optim = TetOptimizer(model, **args.as_dict())
+sample_camera = test_cameras[4]
 
 images = []
 psnrs = [[]]
@@ -164,23 +176,23 @@ print([target_num(i+1) for i in range(N)])
 # epath = cam_util.generate_cam_path(train_cameras, 400)
 # sample_camera = epath[175]
 # sample_camera = train_cameras[60]
-sample_camera = test_cameras[8]
 
-densification_sampler = SimpleSampler(len(train_cameras), args.num_densification_samples)
+densification_sampler = SimpleSampler(len(train_cameras), args.num_samples)
 
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
                                (sample_camera.image_width, sample_camera.image_height))
 
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
-for train_ind in progress_bar:
-    delaunay_interval = 1 if train_ind < args.delaunay_start else 10
-    do_delaunay = train_ind % delaunay_interval == 0 and train_ind > args.vertices_warmup
-    do_cloning = max(train_ind - args.densify_start, 0) % args.densify_interval == 0 and args.densify_end > train_ind >= args.densify_start
+last_densify = 1000
+for iteration in progress_bar:
+    delaunay_interval = 1 if iteration < args.delaunay_start else 10
+    do_delaunay = iteration % delaunay_interval == 0 and iteration > args.vertices_warmup
+    do_cloning = max(iteration - args.densify_start, 0) % args.densify_interval == 0 and args.densify_end > iteration >= args.densify_start
     do_tracking = False
-    do_sh = train_ind % args.sh_interval == 0 and train_ind > 0
-    do_sh_step = train_ind % 16 == 0
-    do_vertices_warmup = train_ind < args.vertices_warmup or train_ind > args.freeze_start
+    do_sh = iteration % args.sh_interval == 0 and iteration > 0
+    do_sh_step = iteration % 16 == 0
+    do_vertices_warmup = iteration < args.vertices_warmup# or iteration > args.freeze_start
 
     # ind = random.randint(0, len(train_cameras)-1)
     if len(inds) == 0:
@@ -193,9 +205,12 @@ for train_ind in progress_bar:
     target = camera.original_image.cuda()
 
     st = time.time()
-    bg_scale = min(max(train_ind/2000, 0), 1)
-    bg = bg_scale * np.random.randn()
-    bg = 0
+    L = 2000
+    x = np.clip(iteration-last_densify, 0, L)
+    bg_scale = np.clip(np.exp(x-L) - np.exp(-L), 0, 1)
+    # bg_scale = min(max((iteration-1000)/2000, 0), 1)
+    bg = bg_scale if iteration < args.densify_end + L//2 else 0
+    # bg = 0
     render_pkg = render(camera, model, bg=bg, min_t=model.scene_scaling * 0.3, **args.as_dict())
     # render_pkg = render(camera, model, min_t=model.scene_scaling * 0.1, **args.as_dict())
     # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -231,10 +246,22 @@ for train_ind in progress_bar:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
-    tet_optim.update_learning_rate(train_ind)
+    tet_optim.update_learning_rate(iteration)
 
     if do_sh:
         model.sh_up()
+
+    # st = time.time()
+    with torch.no_grad():
+        if iteration % 1 == 0:
+            render_pkg = render(sample_camera, model, tile_size=args.tile_size, bg=bg_scale)
+            sample_image = render_pkg['render']
+            sample_image = sample_image.permute(1, 2, 0)
+            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+            video_writer.write(sample_image)
+            # images.append(image)
+    # print(f'second: {(time.time()-st)}')
 
     if do_cloning:
         # collect data
@@ -246,12 +273,23 @@ for train_ind in progress_bar:
         cmap = plt.get_cmap("jet")
         sampled_cameras = [train_cameras[i] for i in densification_sampler.nextids()]
         tet_rgbs_grad = torch.zeros((model.indices.shape[0]), device=device)
+        tet_count = torch.zeros((model.indices.shape[0]), device=device)
         for camera in sampled_cameras:
             with torch.no_grad():
                 target = camera.original_image.cuda()
-                tet_grad, _ = render_err(target, camera, model, tile_size=args.tile_size, lambda_ssim=args.clone_lambda_ssim)
+                tet_grad, extras = render_err(target, camera, model, tile_size=args.tile_size, lambda_ssim=args.clone_lambda_ssim)
+                # tet_rgbs_grad = torch.maximum(tet_grad, tet_rgbs_grad)
+                tet_grad = tet_grad * extras['tet_area'].clip(min=1, max=50)
+                # tet_rgbs_grad = tet_grad + tet_rgbs_grad
+                # tet_count += extras['mask']
                 tet_rgbs_grad = torch.maximum(tet_grad, tet_rgbs_grad)
         torch.cuda.empty_cache()
+        # tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
+        #         tet_rgbs_grad = tet_grad + tet_rgbs_grad
+        #         tet_count += extras['mask']
+        # torch.cuda.empty_cache()
+        # tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
+
 
         with torch.no_grad():
             render_tensor = tet_rgbs_grad
@@ -266,18 +304,31 @@ for train_ind in progress_bar:
             image = render_pkg['render']
             image = image.permute(1, 2, 0)
             image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
-            imageio.imwrite(args.output_path / f'grad{train_ind}.png', image)
-            del render_pkg, tet_grad_color, image, render_tensor
+            imageio.imwrite(args.output_path / f'grad{iteration}.png', image)
+            imageio.imwrite(args.output_path / f'im{iteration}.png', cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+
+            del render_pkg, image, render_tensor
 
         with torch.no_grad():
             # tet_volume = tetra_volume(model.vertices, model.indices)
             # large_enough = tet_volume > args.min_clone_size
             # tet_rgbs_grad = torch.where(large_enough, tet_rgbs_grad, 0)
-            target_addition = target_num((train_ind - args.densify_start) // args.densify_interval + 1) - model.vertices.shape[0]
-            ic(target_addition, (train_ind - args.densify_start) // args.densify_interval + 1)
+            target_addition = target_num((iteration - args.densify_start) // args.densify_interval + 1) - model.vertices.shape[0]
+            ic(target_addition, (iteration - args.densify_start) // args.densify_interval + 1)
             if target_addition > 0:
                 rgbs_threshold = torch.sort(tet_rgbs_grad).values[-min(int(target_addition), tet_rgbs_grad.shape[0])]
                 clone_mask = (tet_rgbs_grad > rgbs_threshold)
+
+                # binary_color = clone_mask.float().reshape(-1, 1).expand(-1, 3).contiguous()
+                binary_color = torch.zeros_like(tet_grad_color)
+                binary_color[clone_mask, 0] = normalized_tensor[clone_mask]
+                binary_color[~clone_mask, 1] = normalized_tensor[~clone_mask]
+                binary_color[:, 3] = tet_grad_color[:, 3]
+                render_pkg = render(sample_camera, model, cell_values=binary_color, tile_size=args.tile_size)
+                image = render_pkg['render']
+                binary_im = (image.permute(1, 2, 0)*255).clip(min=0, max=255).cpu().numpy().astype(np.uint8)
+
+                imageio.imwrite(args.output_path / f'densify{iteration}.png', binary_im)
 
                 # rgbs_grad, vertex_grad = tet_optim.get_tracker_predicates() 
                 # reduce_type = "sum"
@@ -302,6 +353,7 @@ for train_ind in progress_bar:
                 # out += f"σ: {tet_std.mean()}"
                 print(out)
                 torch.cuda.empty_cache()
+                last_densify = iteration
 
     psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
     psnrs[-1].append(psnr)
@@ -315,18 +367,6 @@ for train_ind in progress_bar:
         "#V": len(model),
         "#T": model.indices.shape[0]
     })
-
-    # st = time.time()
-    with torch.no_grad():
-        if train_ind % 1 == 0:
-            render_pkg = render(sample_camera, model, tile_size=args.tile_size)
-            image = render_pkg['render']
-            image = image.permute(1, 2, 0)
-            image = (image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            video_writer.write(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-            del image
-            # images.append(image)
-    # print(f'second: {(time.time()-st)}')
 
     if do_delaunay:
         st = time.time()

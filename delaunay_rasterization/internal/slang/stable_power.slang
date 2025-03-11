@@ -62,6 +62,7 @@ double power_of_circumsphere(
         }
         else
         {
+            return -1e20;
             // Degenerate case: the points are nearly coplanar but not tiny
             // Fit a plane to the first three vertices A, B, C
             double3 plane_normal = cross(B - A, C - A);

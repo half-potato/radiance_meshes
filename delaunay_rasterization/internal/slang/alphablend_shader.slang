@@ -428,6 +428,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
                 float old_val;
                 tet_err.InterlockedAdd(g_idx, err, old_val);
+                // tet_err.InterlockedMax(g_idx, err, old_val);
 
             }
         }

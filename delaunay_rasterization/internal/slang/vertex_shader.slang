@@ -204,13 +204,6 @@ void vertex_shader(TensorView<int32_t> indices,
     Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 }, 0);
     Tetrahedra image_tet = camspace_tet2image_w_depth(camspace_tet, cam);
     float area = tet_area(image_tet, center_ray.d, cam);
-    out_tet_area[g_idx] = area;
-
-    out_tiles_touched[g_idx] = n_tiles;
-    out_rect_tile_space[uint2(g_idx, 0)] = rect_tile_space.min_x;
-    out_rect_tile_space[uint2(g_idx, 1)] = rect_tile_space.min_y;
-    out_rect_tile_space[uint2(g_idx, 2)] = rect_tile_space.max_x;
-    out_rect_tile_space[uint2(g_idx, 3)] = rect_tile_space.max_y;
 
     float3 circumcenter = calculate_circumcenter(tet);
     // float radius = length(circumcenter - tet.verts[0]);
@@ -223,6 +216,15 @@ void vertex_shader(TensorView<int32_t> indices,
     double3 D = { double(tet.verts[3].x), double(tet.verts[3].y), double(tet.verts[3].z) };
     double3 P = { double(cam.position.x), double(cam.position.y), double(cam.position.z) };
     float sort_depth = float(power_of_circumsphere(A, B, C, D, P));
+    if (sort_depth < -1e19) return;
+
+    out_tet_area[g_idx] = area;
+
+    out_tiles_touched[g_idx] = n_tiles;
+    out_rect_tile_space[uint2(g_idx, 0)] = rect_tile_space.min_x;
+    out_rect_tile_space[uint2(g_idx, 1)] = rect_tile_space.min_y;
+    out_rect_tile_space[uint2(g_idx, 2)] = rect_tile_space.max_x;
+    out_rect_tile_space[uint2(g_idx, 3)] = rect_tile_space.max_y;
 
     out_vs.storeOnce(uint2(g_idx, 2), min(max(sort_depth, FLT_MIN), FLT_MAX));
 
