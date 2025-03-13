@@ -162,6 +162,7 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
+    ic(fx, fy, world_view_transform, cam_pos)
     # with torch.no_grad():
     #     sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
     #     scaling = clip_multi/(sensitivity.reshape(-1, 1)+1e-5)

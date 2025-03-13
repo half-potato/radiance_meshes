@@ -79,8 +79,10 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
     viewmat, projection_matrix, cam_pos, fovy, fovx, fx, fy = setup_camera(height, width, fov, viewmat)
     # Now extract R,T from viewmat
     # If viewmat is truly "World->View", then R is top-left 3x3, T is top-right 3x1
-    R = viewmat[:3, :3]#.T
-    T = viewmat[:3, 3]
+    # V = torch.inverse(viewmat)
+    V = viewmat
+    R = V[:3, :3].T
+    T = V[:3, 3]
 
     # Create a blank image for the camera
     blank_image = torch.zeros((3, height, width), device="cuda")
@@ -130,6 +132,7 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
         tet_density.detach().cpu().numpy(),
         height, width, viewmat.cpu().numpy(),
         fx.item(), fy.item(), tmin, np.linspace(0, 1, n_samples))
+    ic(fovy, fovx, fx, fy, viewmat)
 
     # Compare results
     torch_image_np = torch_image[..., :3].cpu().detach().numpy()

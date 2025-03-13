@@ -266,6 +266,7 @@ def render_camera(vertices, indices, vertex_color, tet_density, height, width, v
     """Vectorized camera renderer using JAX."""
     # Extract camera position and convert inputs
     cam_pos = jnp.linalg.inv(viewmat)[:3, 3]
+    jax.debug.print("Cam pos: {}", cam_pos)
     
     # Generate sample points
     # point_dist = jnp.linalg.norm(cam_pos.reshape(1, 3) - vertices, axis=1)
