@@ -175,9 +175,10 @@ def query_tetrahedra_kernel(t_samples, ray_origins, ray_directions,
         tet_density = densities[i]
         
         is_inside = jax.vmap(lambda p: point_in_tetrahedron(vertices, tet_indices, p))(sample_points.reshape(-1, 3)).reshape(batch_shape)
-        coords = jax.vmap(lambda p: barycentric_coordinates_matrix(p, *[vertices[i] for i in tet_indices]))(sample_points.reshape(-1, 3)).reshape(*batch_shape, 4)
+        coords = jax.vmap(
+            lambda p: barycentric_coordinates_matrix(p, *[vertices[i] for i in tet_indices]))(
+                sample_points.reshape(-1, 3)).reshape(*batch_shape, 4)
         padding = [1]*(len(coords.shape)-1)
-        tet_color = sum([u * vertex_color[i] for u, i in zip(coords.T, tet_indices)])
         tet_color = vertex_color[tet_indices[0]].reshape(*padding, 3) * coords[..., 0].reshape(-1, 1) + \
                     vertex_color[tet_indices[1]].reshape(*padding, 3) * coords[..., 1].reshape(-1, 1) + \
                     vertex_color[tet_indices[2]].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
@@ -266,7 +267,6 @@ def render_camera(vertices, indices, vertex_color, tet_density, height, width, v
     """Vectorized camera renderer using JAX."""
     # Extract camera position and convert inputs
     cam_pos = jnp.linalg.inv(viewmat)[:3, 3]
-    jax.debug.print("Cam pos: {}", cam_pos)
     
     # Generate sample points
     # point_dist = jnp.linalg.norm(cam_pos.reshape(1, 3) - vertices, axis=1)

@@ -162,7 +162,6 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
-    ic(fx, fy, world_view_transform, cam_pos)
     # with torch.no_grad():
     #     sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
     #     scaling = clip_multi/(sensitivity.reshape(-1, 1)+1e-5)
@@ -178,8 +177,11 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         camera.fovx,
         render_grid)
     if cell_values is None:
-        cell_values = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
-        vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+        cell_values = torch.zeros((mask.shape[0]), device=circumcenter.device)
+        if mask.sum() > 0:
+            vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+        else:
+            vertex_color, cell_values = model.get_cell_values(camera)
     # cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
@@ -189,7 +191,6 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         vs_tetra.retain_grad()
     except:
         pass
-
     # tet_vertices = vertices[model.indices]
     # verts_trans = point2image(model.vertices, world_view_transform, K, cam_pos)
     # st = time.time()

@@ -276,9 +276,9 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                 bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, pre_multi, ladder_p, d_ao);
                 d_ao = dp_ao.getDifferential();
-                // bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, dp_tetra_ctrl.d);
+                bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, dp_tetra_ctrl.d);
                 // bwd_diff(evaluate_tetra_2D)(dp_g, cam, min_t, dp_center_pix_coord, dp_tetra_ctrl.d);
-                // bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, vertex_color, dp_g.d);
+                bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, vertex_color, dp_g.d);
             }
         }
         splats_left_to_process -= block_size;
@@ -410,7 +410,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         {
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_end - progress - 1]);
             collected_idx[thread_rank] = coll_id;
-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density, vertex_color);
+            // collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density, vertex_color);
         }
         AllMemoryBarrierWithGroupSync();
         if (is_inside) {
@@ -449,7 +449,6 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                  TensorView<int32_t> tile_ranges,
                  TensorView<int32_t> indices,
                  TensorView<float> vertices,
-                 TensorView<float> vert_color,
                  TensorView<float> vertex_color,
                  TensorView<float> tet_density,
                  TensorView<float> output_img,

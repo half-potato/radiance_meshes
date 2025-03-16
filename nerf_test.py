@@ -20,7 +20,7 @@ import numpy as np
 from utils import cam_util
 from utils.train_util import *
 # from models.vertex_color import Model, TetOptimizer
-from models.ingp_color import Model, TetOptimizer
+from models.ingp_density import Model, TetOptimizer
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -84,6 +84,10 @@ args.per_level_scale = 2
 args.L = 10
 args.density_offset = -1
 args.light_offset = -3
+args.lights_lr = 1e-4
+args.final_lights_lr = 1e-4
+args.color_lr = 1e-2
+args.final_color_lr = 1e-2
 
 args.hidden_dim = 64
 args.scale_multi = 1.0
@@ -92,6 +96,7 @@ args.vertices_lr = 1e-4
 args.lr_delay = 50
 args.final_vertices_lr = 1e-6
 args.vertices_lr_max_steps = args.iterations
+args.num_lights = 2
 
 args.vertices_lr_delay_multi = 1e-8
 # args.network_lr = 0.00125
@@ -284,37 +289,37 @@ for iteration in progress_bar:
                 target = camera.original_image.cuda()
                 tet_grad, extras = render_err(target, camera, model, tile_size=args.tile_size, lambda_ssim=args.clone_lambda_ssim)
                 # tet_rgbs_grad = torch.maximum(tet_grad, tet_rgbs_grad)
-                # visible = extras['tet_count'] > 1
-                # tet_rgbs_grad[visible] = (tet_grad + tet_rgbs_grad)[visible]
-                # tet_count += visible
+                visible = extras['tet_count'] > 1
+                tet_count += visible
 
-                # tet_grad = tet_grad * extras['tet_area'].clip(min=1, max=50)#.sqrt()
-                tet_rgbs_grad = torch.maximum(tet_grad, tet_rgbs_grad)
+                tet_grad = tet_grad * extras['tet_area'].clip(min=1, max=50)#.sqrt()
+                tet_rgbs_grad[visible] = (tet_grad + tet_rgbs_grad)[visible]
+                # tet_rgbs_grad = torch.maximum(tet_grad, tet_rgbs_grad)
         torch.cuda.empty_cache()
-        # tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
+        tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
         #         tet_rgbs_grad = tet_grad + tet_rgbs_grad
         #         tet_count += extras['mask']
         # torch.cuda.empty_cache()
         # tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
 
 
-        with torch.no_grad():
-            render_tensor = tet_rgbs_grad
-            tensor_min, tensor_max = render_tensor.min(), render_tensor.max()
-            normalized_tensor = (render_tensor - tensor_min) / (tensor_max - tensor_min)
+        # with torch.no_grad():
+        #     render_tensor = tet_rgbs_grad
+        #     tensor_min, tensor_max = render_tensor.min(), render_tensor.max()
+        #     normalized_tensor = (render_tensor - tensor_min) / (tensor_max - tensor_min)
 
-            # Convert to RGB (NxMx3) using the colormap
-            tet_grad_color = torch.as_tensor(cmap(normalized_tensor.cpu().numpy())).float().cuda()
-            tet_grad_color[:, 3] = model.get_cell_values(camera)[:, 3]
-            render_pkg = render(sample_camera, model, cell_values=tet_grad_color, tile_size=args.tile_size)
+        #     # Convert to RGB (NxMx3) using the colormap
+        #     tet_grad_color = torch.as_tensor(cmap(normalized_tensor.cpu().numpy())).float().cuda()
+        #     tet_grad_color[:, 3] = model.get_cell_values(camera)[:, 3]
+        #     render_pkg = render(sample_camera, model, cell_values=tet_grad_color, tile_size=args.tile_size)
 
-            image = render_pkg['render']
-            image = image.permute(1, 2, 0)
-            image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
-            imageio.imwrite(args.output_path / f'grad{iteration}.png', image)
-            imageio.imwrite(args.output_path / f'im{iteration}.png', cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+        #     image = render_pkg['render']
+        #     image = image.permute(1, 2, 0)
+        #     image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
+        #     imageio.imwrite(args.output_path / f'grad{iteration}.png', image)
+        #     imageio.imwrite(args.output_path / f'im{iteration}.png', cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 
-            del render_pkg, image, render_tensor
+        #     del render_pkg, image, render_tensor
 
         with torch.no_grad():
             # tet_volume = tetra_volume(model.vertices, model.indices)
@@ -322,21 +327,21 @@ for iteration in progress_bar:
             # tet_rgbs_grad = torch.where(large_enough, tet_rgbs_grad, 0)
             target = target_num((iteration - args.densify_start) // args.densify_interval + 1)
             target_addition = target - model.vertices.shape[0]
-            ic(target_addition, (iteration - args.densify_start) // args.densify_interval + 1, target)
+            print(target_addition, (iteration - args.densify_start) // args.densify_interval + 1, target)
             if target_addition > 0:
                 rgbs_threshold = torch.sort(tet_rgbs_grad).values[-min(int(target_addition), tet_rgbs_grad.shape[0])]
                 clone_mask = (tet_rgbs_grad > rgbs_threshold)
 
                 # binary_color = clone_mask.float().reshape(-1, 1).expand(-1, 3).contiguous()
-                binary_color = torch.zeros_like(tet_grad_color)
-                binary_color[clone_mask, 0] = normalized_tensor[clone_mask]
-                binary_color[~clone_mask, 1] = normalized_tensor[~clone_mask]
-                binary_color[:, 3] = tet_grad_color[:, 3]
-                render_pkg = render(sample_camera, model, cell_values=binary_color, tile_size=args.tile_size)
-                image = render_pkg['render']
-                binary_im = (image.permute(1, 2, 0)*255).clip(min=0, max=255).cpu().numpy().astype(np.uint8)
 
-                imageio.imwrite(args.output_path / f'densify{iteration}.png', binary_im)
+                # binary_color = torch.zeros_like(tet_grad_color)
+                # binary_color[clone_mask, 0] = normalized_tensor[clone_mask]
+                # binary_color[~clone_mask, 1] = normalized_tensor[~clone_mask]
+                # binary_color[:, 3] = tet_grad_color[:, 3]
+                # render_pkg = render(sample_camera, model, cell_values=binary_color, tile_size=args.tile_size)
+                # image = render_pkg['render']
+                # binary_im = (image.permute(1, 2, 0)*255).clip(min=0, max=255).cpu().numpy().astype(np.uint8)
+                # imageio.imwrite(args.output_path / f'densify{iteration}.png', binary_im)
 
                 # rgbs_grad, vertex_grad = tet_optim.get_tracker_predicates() 
                 # reduce_type = "sum"

@@ -82,6 +82,7 @@ float3 read_t3_float3(uint32_t idx, TensorView<float> t3)
                   t3[uint2(idx, 1)],
                   t3[uint2(idx, 2)]);
 }
+
 [Differentiable]
 float3 read_t3_float3(uint32_t idx, DiffTensorView t3)
 {
@@ -252,7 +253,6 @@ float2x2 covariance_3d_to_2d(Camera cam, float3 xyz_ws, float3x3 cov_ws) {
     return float2x2(cov_vs);
 }
 
-[Differentiable]
 uint4 load_virtual_tetrahedra(int32_t g_idx,
                               TensorView<int32_t> indices)
 {

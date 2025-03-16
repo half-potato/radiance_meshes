@@ -56,7 +56,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         pass
     # cell_values = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
     # cell_values[mask] = model.get_cell_values(camera, mask)
-    cell_values = model.get_cell_values(camera)
+    vertex_color, cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
     # st = time.time()
@@ -86,7 +86,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
-        rgbs=cell_values,
+        vertex_color=vertex_color,
+        tet_density=cell_values,
         output_img=output_img,
         distortion_img=distortion_img,
         n_contributors=n_contributors,
@@ -124,7 +125,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
-        rgbs=cell_values,
+        vertex_color=vertex_color,
+        tet_density=cell_values,
         output_img=output_img,
         pixel_err=pixel_err,
         tet_err=tet_err,
