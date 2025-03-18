@@ -176,7 +176,17 @@ void vertex_shader(TensorView<int32_t> indices,
     // }
 
     rectangle rect_tile_space;
-    bool contains_ray_origin = point_in_tetrahedron(tet, cam.position);
+
+    double3 A = { double(tet.verts[0].x), double(tet.verts[0].y), double(tet.verts[0].z) };
+    double3 B = { double(tet.verts[1].x), double(tet.verts[1].y), double(tet.verts[1].z) };
+    double3 C = { double(tet.verts[2].x), double(tet.verts[2].y), double(tet.verts[2].z) };
+    double3 D = { double(tet.verts[3].x), double(tet.verts[3].y), double(tet.verts[3].z) };
+    double3 P = { double(cam.position.x), double(cam.position.y), double(cam.position.z) };
+    float sort_depth = float(power_of_circumsphere(A, B, C, D, P));
+    if (sort_depth < -1e19) return;
+
+    bool contains_ray_origin = point_in_tetrahedron(tet, cam.position) || sort_depth < 0;
+
 
     if (contains_ray_origin) {
         rect_tile_space.min_x = 0;
@@ -210,13 +220,6 @@ void vertex_shader(TensorView<int32_t> indices,
     // float circum_dist = length(circumcenter - cam.position);
     // float sort_depth = circum_dist * circum_dist - radius * radius;
 
-    double3 A = { double(tet.verts[0].x), double(tet.verts[0].y), double(tet.verts[0].z) };
-    double3 B = { double(tet.verts[1].x), double(tet.verts[1].y), double(tet.verts[1].z) };
-    double3 C = { double(tet.verts[2].x), double(tet.verts[2].y), double(tet.verts[2].z) };
-    double3 D = { double(tet.verts[3].x), double(tet.verts[3].y), double(tet.verts[3].z) };
-    double3 P = { double(cam.position.x), double(cam.position.y), double(cam.position.z) };
-    float sort_depth = float(power_of_circumsphere(A, B, C, D, P));
-    if (sort_depth < -1e19) return;
 
     out_tet_area[g_idx] = area;
 

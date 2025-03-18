@@ -63,15 +63,16 @@ class DelaunayRenderTest(parameterized.TestCase):
     def run_test(self, points, viewmat, tile_size):
         """Run rendering test with different sample counts and compare results."""
         indices = compute_delaunay(points)
-        colors = generate_color_palette(len(indices))
+        vertex_colors = generate_color_palette(points.shape[0])[:, :3]
+        tet_density = torch.ones((len(indices),), device='cuda')
         results = test_tetrahedra_rendering(
-            points, indices, colors, viewmat,
+            points, indices, vertex_colors, tet_density, viewmat,
             height=self.height, width=self.width, 
             tile_size=tile_size, n_samples=10000
         )
         
         results2 = test_tetrahedra_rendering(
-            points, indices, colors, viewmat,
+            points, indices, vertex_colors, tet_density, viewmat,
             height=self.height, width=self.width, 
             tile_size=tile_size, n_samples=5000
         )
@@ -82,7 +83,7 @@ class DelaunayRenderTest(parameterized.TestCase):
     @parameterized.product(
         n_points=[10, 20],
         radius=[10, 100],
-        tile_size=[4]
+        tile_size=[8]
     )
     def test_center_view(self, n_points, radius, tile_size, N=5):
         """Test rendering from center of point cloud with random rotation."""
@@ -106,7 +107,7 @@ class DelaunayRenderTest(parameterized.TestCase):
         n_points=[10, 20],
         radius=[10, 100],
         offset_mag=[1, 10, 100],
-        tile_size=[4]
+        tile_size=[8]
     )
     def test_outside_view(self, n_points, radius, offset_mag, tile_size, N=5):
         """Test rendering from outside the point cloud looking in."""

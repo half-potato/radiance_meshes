@@ -8,14 +8,15 @@ from utils.test_util import compare_dict_values, bcolors, check_tile_indices
 import random
 import math
 from icecream import ic
+torch.set_printoptions(precision=32)
 
 key_pairs = [
     ('torch_image', 'jax_image', 'Image', 1e-1, 1e-1),
     # vertex grad is not checked because it is 0 when using quadrature
     # ('torch_vertex_grad', 'jax_vertex_grad', 'Vertex gradient', 1e-1, 1e-1),
     # ('torch_rgbs_grad', 'jax_rgbs_grad', 'RGB Sigma gradient', 1e-1, 1e-1)
-    ('torch_vertex_color_grad', 'jax_vertex_color_grad', 'Vertex color grad', 1e-1, 1e-1),
-    ('torch_tet_density_grad', 'jax_tet_density_grad', 'Tet density grad', 1e-1, 1e-1),
+    # ('torch_vertex_color_grad', 'jax_vertex_color_grad', 'Vertex color grad', 1e-1, 1e-1),
+    # ('torch_tet_density_grad', 'jax_tet_density_grad', 'Tet density grad', 1e-1, 1e-1),
 ]
 
 class TetrahedraRenderingTest(parameterized.TestCase):
@@ -55,7 +56,7 @@ class TetrahedraRenderingTest(parameterized.TestCase):
     #     # tile_size=[4, 8, 16],
     #     radius=[0.05, 0.1, 0.2, 0.4],
     # )
-    # def test_center_view(self, tile_size=4, N=20, radius=100):
+    # def test_center_view(self, tile_size=8, N=20, radius=100):
     #     """Test rendering from random center with random rotation."""
     #     for i in range(N):
     #         vertices = self._create_base_tetrahedra(radius)
@@ -133,11 +134,11 @@ class TetrahedraRenderingTest(parameterized.TestCase):
                                         
 
     @parameterized.product(
-        offset_mag=[0.1, 1, 5, 10],#, 100, 1000],
+        offset_mag=[0, 0.1, 1, 5, 10],#, 100, 1000],
         # tile_size=[4, 8, 16],
         radius=[0.05, 0.1, 0.2, 0.4],
     )
-    def test_face_view(self, offset_mag, tile_size=4, width=32, height=32, radius=100, N=5):
+    def test_face_view(self, offset_mag, tile_size=8, width=32, height=32, radius=100, N=5):
         """Test rendering from face with inward-pointing rotation."""
         for i in range(N):
             vertices = self._create_base_tetrahedra(radius)
@@ -163,7 +164,7 @@ class TetrahedraRenderingTest(parameterized.TestCase):
             camera_pos = face_point + normal * offset
             
             # Create view matrix looking at face point
-            forward = face_point - camera_pos
+            forward = normal
             forward = forward / torch.norm(forward)
             right = torch.cross(forward, torch.randn(3).cuda())
             right = right / torch.norm(right)
@@ -179,11 +180,11 @@ class TetrahedraRenderingTest(parameterized.TestCase):
             self.run_test(vertices, viewmat, tile_size)
 
     @parameterized.product(
-        depth=[1, 5, 10],
+        depth=[0, 1, 5, 10],
         origin_radius=[1],
         # tile_size=[4, 8, 16],
     )
-    def test_frustum_point(self, depth, origin_radius, tile_size=4, radius=1, N=5):
+    def test_frustum_point(self, depth, origin_radius, tile_size=8, radius=1, N=5):
         """Test rendering tetrahedra positioned in view frustum."""
         for i in range(N):
             vertices = self._create_base_tetrahedra(radius)

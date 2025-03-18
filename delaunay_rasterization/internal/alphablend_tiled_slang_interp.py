@@ -4,103 +4,12 @@ import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
-import math
-
-def fov2focal(fov, pixels):
-    return pixels / (2 * math.tan(fov / 2))
-
-def focal2fov(focal, pixels):
-    return 2*math.atan(pixels/(2*focal))
-
-def render_alpha_blend_tiles_slang_raw(indices, vertices,
-                                       rgbs_fn,
-                                       camera,
-                                       cell_values=None, tile_size=16, min_t=0.1):
-    fy = fov2focal(camera.fovy, camera.image_height)
-    fx = fov2focal(camera.fovx, camera.image_width)
-    K = torch.tensor([
-        [fx, 0, camera.image_width/2],
-        [0, fy, camera.image_height/2],
-        [0, 0, 1],
-    ]).to(camera.world_view_transform.device)
-    cam_pos = camera.camera_center
-    world_view_transform = camera.world_view_transform.T
-    torch.cuda.synchronize()
-    assert(indices.device == vertices.device)
-    assert(indices.device == world_view_transform.device)
-    assert(indices.device == K.device)
-    assert(indices.device == cam_pos.device)
-    st = time.time()
-    
-    render_grid = RenderGrid(camera.image_height,
-                             camera.image_width,
-                             tile_height=tile_size,
-                             tile_width=tile_size)
-    st = time.time()
-    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
-        indices,
-        vertices,
-        world_view_transform,
-        K,
-        cam_pos,
-        camera.fovy,
-        camera.fovx,
-        render_grid)
-   
-    # torch.cuda.synchronize()
-    # ic("vt", time.time()-st)
-    # retain_grad fails if called with torch.no_grad() under evaluation
-    try:
-        vs_tetra.retain_grad()
-    except:
-        pass
-    # ic(circumcenter)
-    # torch.cuda.synchronize()
-    # dt1 = (time.time() - st)
-    if cell_values is None:
-        rgbs = torch.zeros((mask.shape[0], 4), device=circumcenter.device)
-        rgbs[mask] = rgbs_fn(circumcenter[mask])
-    else:
-        rgbs = cell_values
-    rgbs = cell_values
-
-    # torch.cuda.synchronize()
-    # st = time.time()
-    # tet_vertices = vertices[indices]
-    image_rgb, distortion_img = AlphaBlendTiledRender.apply(
-        sorted_tetra_idx,
-        tile_ranges,
-        indices,
-        vertices,
-        rgbs,
-        render_grid,
-        world_view_transform,
-        K,
-        cam_pos,
-        100,
-        -0.1,
-        min_t,
-        camera.fovy,
-        camera.fovx)
-    # torch.cuda.synchronize()
-    
-    render_pkg = {
-        'render': image_rgb.permute(2,0,1)[:3, ...],
-        'viewspace_points': vs_tetra,
-        'visibility_filter': mask,
-        'circumcenters': circumcenter,
-        'rgbs': rgbs,
-        'tet_area': tet_area,
-    }
-
-    return render_pkg
-
 
 class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
     def forward(ctx, 
                 sorted_tetra_idx, tile_ranges,
-                indices, vertices, rgbs, render_grid,
+                indices, vertices, vertex_color, tet_density, render_grid,
                 world_view_transform, K, cam_pos, pre_multi, ladder_p, min_t,
                 fovy, fovx, device="cuda"):
         distortion_img = torch.zeros((render_grid.image_height, 
@@ -113,20 +22,21 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                                       render_grid.image_width, 1),
                                      dtype=torch.int32, device=device)
 
-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
+        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
             'Alpha Blend Shader was not compiled for this tile'
             f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-            f' {slang_modules.alpha_blend_shaders.keys()}'
+            f' {slang_modules.alpha_blend_shaders_interp.keys()}'
         )
 
-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
         st = time.time()
         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
             sorted_gauss_idx=sorted_tetra_idx,
             tile_ranges=tile_ranges,
             indices=indices,
             vertices=vertices,
-            rgbs=rgbs,
+            vertex_color=vertex_color,
+            tet_density=tet_density,
             output_img=output_img,
             distortion_img=distortion_img,
             n_contributors=n_contributors,
@@ -156,7 +66,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         # ic(n_contributors.float().mean(), n_contributors.max())
 
         ctx.save_for_backward(sorted_tetra_idx, tile_ranges,
-                              indices, vertices, rgbs, 
+                              indices, vertices, vertex_color, tet_density, 
                               output_img, distortion_img, n_contributors,
                               world_view_transform, K, cam_pos)
 
@@ -172,7 +82,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output_img, grad_distortion_img):
         (sorted_tetra_idx, tile_ranges, 
-         indices, vertices, rgbs, 
+         indices, vertices, vertex_color, tet_density,
          output_img, distortion_img, n_contributors,
          world_view_transform, K, cam_pos) = ctx.saved_tensors
         render_grid = ctx.render_grid
@@ -183,15 +93,16 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         pre_multi = ctx.pre_multi
 
         vertices_grad = torch.zeros_like(vertices)
-        rgbs_grad = torch.zeros_like(rgbs)
+        vertex_color_grad = torch.zeros_like(vertex_color)
+        tet_density_grad = torch.zeros_like(tet_density)
 
-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
+        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
             'Alpha Blend Shader was not compiled for this tile'
             f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-            f' {slang_modules.alpha_blend_shaders.keys()}'
+            f' {slang_modules.alpha_blend_shaders_interp.keys()}'
         )
 
-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
 
         st = time.time()
         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(
@@ -199,7 +110,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             tile_ranges=tile_ranges,
             indices=indices,
             vertices=(vertices, vertices_grad),
-            rgbs=(rgbs, rgbs_grad),
+            # rgbs=(rgbs, rgbs_grad),
+            vertex_color=(vertex_color, vertex_color_grad),
+            tet_density=(tet_density, tet_density_grad),
             output_img=(output_img, grad_output_img),
             distortion_img=(distortion_img, grad_distortion_img),
             n_contributors=n_contributors,
@@ -228,5 +141,5 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         # torch.cuda.synchronize()
         # ic("abb", time.time()-st)
         
-        return (None, None, None, vertices_grad, rgbs_grad, 
+        return (None, None, None, vertices_grad, vertex_color_grad, tet_density_grad, 
                 None, None, None, None, None, None, None, None, None)

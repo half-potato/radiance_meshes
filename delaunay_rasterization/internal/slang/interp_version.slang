@@ -38,6 +38,13 @@ float4 tet_barycentric(float3 p, float4x3 vs)
     return float4(uvw, t);
 }
 
+void print_verts(float4x3 verts) {
+    printf("%f, %f, %f, %f\n", verts[0].x, verts[1].x, verts[2].x, verts[3].x);
+}
+void print_vec(float3 vec) {
+    printf("(%f, %f, %f),", vec.x, vec.y, vec.z);
+}
+
 [Differentiable]
 float3 compute_integral(float3 c0, float3 c1, float dt, float d) {
     float alpha = safe_exp(-d*dt);
@@ -51,18 +58,12 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
     return vertex_color[0] * bary.x + vertex_color[1] * bary.y + vertex_color[2] * bary.z + vertex_color[3] * bary.w;
 }
 
-void print_verts(float4x3 verts) {
-    printf("%f, %f, %f, %f\n", verts[0].x, verts[1].x, verts[2].x, verts[3].x);
-}
-void print_vec(float3 vec) {
-    printf("(%f, %f, %f),", vec.x, vec.y, vec.z);
-}
-
 [Differentiable]
 CtrlPt evaluate_tetra_interp(
     in SplatTetrahedra_interp g, 
     in float3 ray_o,
-    in float3 ray_d)
+    in float3 ray_d,
+    no_diff in float t_min)
 {
     float2 dist;
 
@@ -71,14 +72,16 @@ CtrlPt evaluate_tetra_interp(
     bool hit = ray_tetrahedron_intersect_fused(
         ray_o, ray_d, verts, dist);
 
-    float intersection_t = 0.5f * (dist.x + dist.y);
-    float dt = max(abs(dist.y - dist.x), 0.0f);
+    float exit = dist.y;
+    float enter = max(dist.x, t_min);
+    float dt = max(dist.y - enter, 0.0f);
+    float intersection_t = enter + 0.5f * dt;
 
     if (!hit) {
         return { (float4)(0.f, 0.f, 0.f, 0.f), intersection_t };
     } else {
         float3x3 T = transpose(float3x3(verts[0] - verts[3], verts[1] - verts[3], verts[2] - verts[3]));
-        float3 uvw_enter = SolveLinearSystem(T, dist.x * ray_d + ray_o - verts[3]);
+        float3 uvw_enter = SolveLinearSystem(T, enter * ray_d + ray_o - verts[3]);
         float3 uvw_exit = SolveLinearSystem(T, dist.y * ray_d + ray_o - verts[3]);
 
         float w_enter = safe_clip(1.0 - uvw_enter.x - uvw_enter.y - uvw_enter.z, 0, 1);
@@ -132,7 +135,6 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     return result;
 }
 
-/*
 // Non-diff version (if needed)
 SplatTetrahedra_interp load_tet_alphablend_interp(
     int32_t        g_idx,
@@ -161,4 +163,3 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     result.vertex_color[3] = c3;
     return result;
 }
-*/

@@ -9,19 +9,54 @@ float det_3x3(float3 a, float3 b, float3 c) {
     return dot(a, cross(b, c));
 }
 
-bool same_side(float3 v1, float3 v2, float3 v3, float3 v4, float3 p) {
-    float3 normal = cross(v2 - v1, v3 - v1);
-    float dot_v4 = dot(normal, v4 - v1);
-    float dot_p = dot(normal, p - v1);
-    return sign(dot_v4) * sign(dot_p) > 0;
+// bool same_side(float3 v1, float3 v2, float3 v3, float3 v4, float3 p) {
+//     float3 normal = cross(v2 - v1, v3 - v1);
+//     float dot_v4 = dot(normal, v4 - v1);
+//     float dot_p = dot(normal, p - v1);
+//     return sign(dot_v4) * sign(dot_p) > 0;
+// }
+
+// bool point_in_tetrahedron(Tetrahedra tet, float3 point) {
+//     return (same_side(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point) &&
+//             same_side(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point) &&
+//             same_side(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point) && 
+//             same_side(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point));
+// };
+
+inline int sign_with_eps(float x, float eps) {
+    if      (x >  eps) return  1;
+    else if (x < -eps) return -1;
+    else               return  0;
 }
 
-bool point_in_tetrahedron(Tetrahedra tet, float3 point) {
-    return (same_side(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point) &&
-            same_side(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point) &&
-            same_side(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point) && 
-            same_side(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point));
-};
+bool same_side_eps(
+    const float3 v1,
+    const float3 v2,
+    const float3 v3,
+    const float3 v4,
+    const float3 p,
+    float eps
+) {
+    float3 normal = cross(v2 - v1, v3 - v1); 
+    float   dpV4  = dot(normal, v4 - v1);
+    float   dpP   = dot(normal, p  - v1);
+
+    // Compare the "sign" of dpV4 and dpP with a tolerance:
+    int sV4 = sign_with_eps(dpV4, eps);
+    int sP  = sign_with_eps(dpP,  eps);
+
+    // same_side means they are either the same nonzero sign or at least one is effectively zero
+    // So we check sV4*sP >= 0 (which includes both > 0 and == 0):
+    return (sV4 * sP) >= 0;
+}
+
+bool point_in_tetrahedron(const Tetrahedra tet, const float3 point, float eps=1e-20)
+{
+    return ( same_side_eps(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point, eps) &&
+             same_side_eps(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point, eps) &&
+             same_side_eps(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point, eps) &&
+             same_side_eps(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point, eps) );
+}
 
 struct Tetrahedra : IDifferentiable
 {
@@ -310,39 +345,77 @@ bool ray_tetrahedron_intersect_fused(
     // 1. Compute plane equations for the 4 faces (outward normals)
     //    n[i].x, n[i].y, n[i].z, and d[i]
     // --------------------------------------------------------------------
+    static const uint3 kTetTriangles[4] = {
+        /* 
+        *    y
+        *    ^
+        *    |
+        *    *v2    z
+        *    |     /
+        *    |    *v3
+        *    |   /
+        *    |  /
+        *    | /          v1
+        *    v0------------*--->x
+        *                 
+        */
+        uint3(0, 2, 1),
+        uint3(1, 2, 3),
+        uint3(0, 3, 2),
+        uint3(3, 0, 1),
+    };
 
-    float3 v0 = verts[0] - orig;
-    float3 v1 = verts[1] - orig;
-    float3 v2 = verts[2] - orig;
-    float3 v3 = verts[3] - orig;
+
+
+    float3 v0 = verts[0];
+    float3 v1 = verts[1];
+    float3 v2 = verts[2];
+    float3 v3 = verts[3];    
+    // const float3 n0 = cross(
+    //     verts[kTetTriangles[0][2]] - verts[kTetTriangles[0][0]],
+    //     verts[kTetTriangles[0][1]] - verts[kTetTriangles[0][0]]);
+    // const float d0  = -dot(n0, verts[kTetTriangles[0][0]] - orig);
+    // const float3 n1 = cross(
+    //     verts[kTetTriangles[1][2]] - verts[kTetTriangles[1][0]],
+    //     verts[kTetTriangles[1][1]] - verts[kTetTriangles[1][0]]);
+    // const float d1  = -dot(n1, verts[kTetTriangles[1][0]] - orig);
+    // const float3 n2 = cross(
+    //     verts[kTetTriangles[2][2]] - verts[kTetTriangles[2][0]],
+    //     verts[kTetTriangles[2][1]] - verts[kTetTriangles[2][0]]);
+    // const float d2  = -dot(n2, verts[kTetTriangles[2][0]] - orig);
+    // const float3 n3 = cross(
+    //     verts[kTetTriangles[3][2]] - verts[kTetTriangles[3][0]],
+    //     verts[kTetTriangles[3][1]] - verts[kTetTriangles[3][0]]);
+    // const float d3  = -dot(n3, verts[kTetTriangles[3][0]] - orig);
+
 
     // Face 0: (v0, v1, v2)
     float3 n0 = cross(v1 - v0, v2 - v0);
     if (dot(n0, v3 - v0) > 0) {
         n0 = -n0;
     }
-    float d0 = -dot(n0, v0);
+    float d0 = -dot(n0, v0-orig);
 
     // Face 1: (v0, v1, v3)
     float3 n1 = cross(v1 - v0, v3 - v0);
     if (dot(n1, v2 - v0) > 0) {
         n1 = -n1;
     }
-    float d1 = -dot(n1, v0);
+    float d1 = -dot(n1, v0-orig);
 
     // Face 2: (v0, v2, v3)
     float3 n2 = cross(v2 - v0, v3 - v0);
     if (dot(n2, v1 - v0) > 0) {
         n2 = -n2;
     }
-    float d2 = -dot(n2, v0);
+    float d2 = -dot(n2, v0-orig);
 
     // Face 3: (v1, v2, v3)
     float3 n3 = cross(v2 - v1, v3 - v1);
     if (dot(n3, v0 - v1) > 0) {
         n3 = -n3;
     }
-    float d3 = -dot(n3, v1);
+    float d3 = -dot(n3, v1-orig);
 
     // --------------------------------------------------------------------
     // 2. Initialize the intersection range [t_enter, t_exit]
@@ -479,177 +552,6 @@ bool ray_tetrahedron_intersect_fused(
         return false;
     }
     t_enter = max(t_enter, 0.f);
-    t = { t_enter, t_exit };
-    return true;
-}
-
-
-// Pick the dominant axis (kz) where |dir[kz]| is largest.
-// Then pick kx, ky in a cyclic manner, optionally swap if dir[kz] < 0.
-int3 pickTransformAxes(float3 dir)
-{
-    float3 ad = abs(dir);
-    int kz = 0;
-    if (ad.y > ad.x && ad.y > ad.z) kz = 1;
-    else if (ad.z > ad.x && ad.z > ad.y) kz = 2;
-
-    int kx = (kz + 1) % 3;
-    int ky = (kx + 1) % 3;
-
-    // If the dominant component is negative, swap kx, ky
-    // to preserve triangle winding
-    if (dir[kz] < 0.0f)
-    {
-        int tmp = kx;
-        kx = ky;
-        ky = tmp;
-    }
-
-    return int3(kx, ky, kz);
-}
-
-// Shear+scale transform a 3D point P into the new space (where the ray
-// becomes (0,0,1)), assuming we have already translated so the ray origin is (0,0,0).
-[Differentiable]
-float3 shearScalePoint(float3 P, float3 S, int3 axes)
-{
-    int kz = axes.z;
-    int kx = axes.x;
-    int ky = axes.y;
-
-    float3 outP;
-    return {
-        P[kx] - S.x * P[kz],
-        P[ky] - S.y * P[kz],
-        P[kz] * S.z
-    };
-}
-
-[Differentiable]
-bool cyrusBeckTetrahedronShearScale(
-    float3 orig, float3 dir,
-    float3 v0, float3 v1, float3 v2, float3 v3,
-    inout float2 t)
-{
-    // Face index array: each face is a triple of vertex indices
-    int faceIndices[4][4] = {
-        { 3, 2, 1, 0 }, // Face 0: (v3, v2, v1)
-        { 2, 3, 0, 1 }, // Face 1: (v2, v3, v0)
-        { 1, 0, 3, 2 }, // Face 2: (v1, v0, v3)
-        { 0, 1, 2, 3 }  // Face 3: (v0, v1, v2)
-    };
-
-    // --------------------------------------------------------------------
-    // A) Translate all vertices so 'orig' is the new (0,0,0)
-    //    This ensures the param 't' in new space matches 't' in old space.
-    // --------------------------------------------------------------------
-    float3 V0 = v0 - orig;
-    float3 V1 = v1 - orig;
-    float3 V2 = v2 - orig;
-    float3 V3 = v3 - orig;
-
-    // --------------------------------------------------------------------
-    // B) Determine which axis is dominant and compute shear+scale
-    // --------------------------------------------------------------------
-    int3 axes = pickTransformAxes(dir);
-    int kz = axes.z;
-    int kx = axes.x;
-    int ky = axes.y;
-
-    float3 S = {
-        dir[kx] / dir[kz],
-        dir[ky] / dir[kz],
-        1.0f / dir[kz]};    // Scale in z
-
-    // Transform each vertex into new space
-    float3 A0 = shearScalePoint(V0, S, axes);
-    float3 A1 = shearScalePoint(V1, S, axes);
-    float3 A2 = shearScalePoint(V2, S, axes);
-    float3 A3 = shearScalePoint(V3, S, axes);
-
-    // Now, in that new space:
-    //   Ray origin => (0,0,0)
-    //   Ray direction => (0,0,1)
-
-    // --------------------------------------------------------------------
-    // C) We do standard Cyrus–Beck plane-clipping in the new space.
-    //    We'll treat each face (A,B,C) => normal, d, and clip t_enter, t_exit
-    // --------------------------------------------------------------------
-    float t_enter = 0.0f;
-    float t_exit = 1e30f;
-    float eps = 1e-12f; // small threshold
-
-    // We'll store the transformed vertices in an array for convenience
-    float3 tverts[4] = { A0, A1, A2, A3 };
-
-    for (int faceIdx = 0; faceIdx < 4; faceIdx++)
-    {
-        float3 P0 = tverts[faceIndices[faceIdx][0]];
-        float3 P1 = tverts[faceIndices[faceIdx][1]];
-        float3 P2 = tverts[faceIndices[faceIdx][2]];
-        float3 P3 = tverts[faceIndices[faceIdx][3]];
-
-        // Face normal in the new space. Flip based on opp vec
-        float3 n = cross(P1 - P0, P2 - P0);
-        if (dot(n, P3 - P0) > 0) {
-            n = -n;
-        }
-
-        // Plane equation: dot(n, X) + d = 0 -> d = -dot(n, P0)
-        float d = -dot(n, P0);
-
-        // Dist at origin (0,0,0) is dot(n, origin) + d => d
-        float dist = d;
-
-        // denom = dot(n, (0,0,1)) => just n.z in new space
-        float denom = n.z;
-
-        // Clip as usual
-        if (abs(denom) < eps)
-        {
-            // Parallel to plane
-            // If dist > 0 => outside, no intersection
-            if (dist > 0.0f)
-            {
-                return false;
-            }
-        }
-        else
-        {
-            float tplane = -dist / denom;
-            if (denom < 0.0f)
-            {
-                // entering
-                if (tplane > t_enter) t_enter = tplane;
-            }
-            else
-            {
-                // exiting
-                if (tplane < t_exit) t_exit = tplane;
-            }
-
-        }
-    }
-    if (t_enter > t_exit)
-    {
-        return false;
-    }
-
-    // --------------------------------------------------------------------
-    // D) We have t_enter..t_exit in the new space. Because we set 'orig'->(0,0,0)
-    //    before the transform, that param range is valid in the *original* space!
-    // --------------------------------------------------------------------
-
-    // Clip t_enter to be >= 0
-    t_enter = max(0.0f, t_enter);
-
-    if (t_exit <= 0.0f)
-    {
-        // Degenerate or behind
-        return false;
-    }
-
-    // Return the param-space length plus some representative t
     t = { t_enter, t_exit };
     return true;
 }

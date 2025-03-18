@@ -128,7 +128,9 @@ class Model(nn.Module):
         print(f"Loaded {vertices.shape[0]} vertices")
         temp = config.contract_vertices
         config.contract_vertices = False
-        model = Model(vertices.to(device), ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
+        base_colors = ckpt['vertex_base_color']
+        lights = ckpt['vertex_lights']
+        model = Model(vertices.to(device), base_colors, lights, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
         model.contract_vertices = temp
         return model
@@ -247,6 +249,7 @@ class Model(nn.Module):
 
         # vertex_base_color = torch.as_tensor(point_cloud.colors).float().to(device)
         # vertex_base_color = vertex_base_color.reshape(-1, 1, 3).expand(-1, repeats, 3).reshape(-1, 3)
+
         vertex_base_color = torch.ones_like(vertices, device=device) * 0.1
         vertex_lights = torch.zeros((vertices.shape[0], num_lights*6)).to(device)
 
@@ -262,11 +265,13 @@ class Model(nn.Module):
             vertices, indices[start:end], self.center, self.scene_scaling,
             self.per_level_scale, self.L, self.scale_multi, self.base_resolution)
         x = (cv/2 + 1)/2
+        # output = self.encoding(x)
         output = checkpoint(self.encoding, x, use_reentrant=True).float()
         output = output.reshape(-1, self.dim, self.L)
 
         output = output * scaling
         output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
+        # output = self.network(output.reshape(-1, self.L * self.dim))
         return output
 
     def update_triangulation(self, alpha_threshold=1.0/255):
@@ -274,8 +279,12 @@ class Model(nn.Module):
         v = Del(verts.shape[0])
         indices_np, prev = v.compute(verts.detach().cpu())
         indices_np = indices_np.numpy()
-        indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
-        
+        finite_tets = (indices_np < verts.shape[0]).all(axis=1)
+        boundary_verts = np.unique(indices_np[~finite_tets].flatten())
+        indices_np = indices_np[finite_tets]
+
+        self.boundary_tets = torch.as_tensor(np.any(np.isin(indices_np, boundary_verts), axis=1)).cuda()
+
         # Convert to tensor and move to CUDA
         self.indices = torch.as_tensor(indices_np).cuda()
         
@@ -308,8 +317,9 @@ class Model(nn.Module):
                 # start = end
             
             # Concatenate mask and apply it
-            mask = torch.cat(mask_list, dim=0)
+            mask = torch.cat(mask_list, dim=0) & ~self.boundary_tets
             self.indices = self.indices[mask]
+            self.boundary_tets = self.boundary_tets[mask]
             
             del indices_np, prev, mask_list, mask
         else:
@@ -319,6 +329,7 @@ class Model(nn.Module):
                         circumcenters=None, radii=None):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
+        boundary_tets = self.boundary_tets[mask] if mask is not None else self.boundary_tets
 
         # densities = torch.empty((indices.shape[0]), device=self.device)
         densities = []
@@ -329,6 +340,8 @@ class Model(nn.Module):
             # densities[start:end] = density
             densities.append(density)
         densities = torch.cat(densities, dim=0)
+        # densities[boundary_tets] = 1000
+        densities = torch.where(boundary_tets, 1000, densities)
         vertex_color = compute_vert_color(
             self.vertex_base_color, self.vertex_lights.reshape(-1, self.num_lights, 6)[:, :self.max_lights],
             vertices, camera.camera_center, self.light_offset, self.dir_offset[:self.max_lights])
@@ -354,7 +367,7 @@ class TetOptimizer:
                  vertices_lr: float=4e-4,
                  final_vertices_lr: float=4e-7,
                  vertices_lr_delay_multi: float=0.01,
-                 vertices_lr_max_steps: int=5000,
+                 max_steps: int=5000,
                  weight_decay=1e-10,
                  net_weight_decay=1e-3,
                  split_std: float = 0.5,
@@ -367,7 +380,7 @@ class TetOptimizer:
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], eps=1e-15)
         self.net_optim = optim.CustomAdam([
             {"params": model.network.parameters(), "lr": network_lr, "name": "network"},
-        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], weight_decay=net_weight_decay)
+        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99])
         self.base_color_optim = optim.CustomAdam([
             {"params": model.vertex_base_color, "lr": color_lr, "name": "base_color"},
         ])
@@ -388,30 +401,30 @@ class TetOptimizer:
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=10000)
+                                                max_steps=max_steps)
         self.encoder_scheduler_args = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=10000)
+                                                max_steps=max_steps)
         self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vert_lr_multi*vertices_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
-                                                max_steps=10000,
+                                                max_steps=max_steps,
                                                 lr_delay_steps=lr_delay)
         self.color_scheduler_args = get_expon_lr_func(
             lr_init=color_lr,
             lr_final=final_color_lr,
             # lr_delay_mult=1e-8,
             lr_delay_steps=0,
-            max_steps=10000
+            max_steps=max_steps
         )
         self.lights_scheduler_args = get_expon_lr_func(
             lr_init=lights_lr,
             lr_final=final_lights_lr,
             # lr_delay_mult=1e-8,
             lr_delay_steps=0,
-            max_steps=10000
+            max_steps=max_steps
         )
 
     def update_learning_rate(self, iteration):

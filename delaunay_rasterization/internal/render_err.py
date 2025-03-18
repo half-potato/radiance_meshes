@@ -73,13 +73,13 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     tet_err = torch.zeros((tet_vertices.shape[0]), dtype=torch.float, device=device)
     tet_count = torch.zeros((tet_vertices.shape[0]), dtype=torch.int32, device=device)
 
-    assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
+    assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
         'Alpha Blend Shader was not compiled for this tile'
         f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-        f' {slang_modules.alpha_blend_shaders.keys()}'
+        f' {slang_modules.alpha_blend_shaders_interp.keys()}'
     )
 
-    alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+    alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
     st = time.time()
     splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
         sorted_gauss_idx=sorted_tetra_idx,

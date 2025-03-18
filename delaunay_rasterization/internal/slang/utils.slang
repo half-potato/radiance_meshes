@@ -687,7 +687,7 @@ Ray get_ray(Camera cam, float2 center_pix_coord, float min_t) {
         1.0
     )));
     
-    ray.o = cam.position + ray.d * min_t;
+    ray.o = cam.position;// + ray.d * min_t;
     return ray;
 }
 

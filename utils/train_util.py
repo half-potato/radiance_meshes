@@ -4,7 +4,7 @@ import math
 from data.camera import Camera
 from utils import optim
 from sh_slang.eval_sh import eval_sh
-from delaunay_rasterization.internal.alphablend_tiled_slang import AlphaBlendTiledRender
+from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader, point2image
 import numpy as np
@@ -140,7 +140,7 @@ def safe_sin(x):
 
 
 def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.1,
-           pre_multi=500, ladder_p=-0.1, clip_multi=1e-3,
+           pre_multi=500, ladder_p=-0.1,
            **kwargs):
     fy = fov2focal(camera.fovy, camera.image_height)
     fx = fov2focal(camera.fovx, camera.image_width)
@@ -207,12 +207,12 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         world_view_transform,
         K,
         cam_pos,
-        pre_multi,
+        pre_multi,# / model.scene_scaling,
         ladder_p,
         min_t,
         camera.fovy,
         camera.fovx)
-    distortion_loss = (distortion_img[:, :, 0] - distortion_img[:, :, 1]).mean()
+    distortion_loss = (distortion_img[:, :, 0] - distortion_img[:, :, 1])
     # torch.cuda.synchronize()
     # dt2 = (time.time() - st)
     # print(dt1, dt2, 1/(dt1+dt2))
@@ -220,7 +220,8 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
     
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
-        'distortion_loss': distortion_loss,
+        'distortion_img': distortion_loss,
+        'distortion_loss': distortion_loss.mean(),
         'viewspace_points': vs_tetra,
         'visibility_filter': mask,
         'circumcenters': circumcenter,
