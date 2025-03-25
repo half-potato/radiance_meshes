@@ -73,6 +73,7 @@ args.num_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
 args.iterations = 7000
+args.freeze_start = 28000
 args.sh_interval = 500
 args.image_folder = "images_4"
 args.eval = True
@@ -90,7 +91,6 @@ args.final_lights_lr = 1e-4
 args.color_lr = 1e-2
 args.final_color_lr = 1e-2
 args.p_norm = 100
-args.freeze_start = 9000
 
 args.hidden_dim = 64
 args.scale_multi = 1.0
@@ -230,22 +230,6 @@ for iteration in progress_bar:
     if do_sh_up:
         model.sh_up()
 
-    # st = time.time()
-    with torch.no_grad():
-        if iteration % 10 == 0:
-            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-            sample_image = render_pkg['render']
-            sample_image = sample_image.permute(1, 2, 0)
-            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-            video_writer.write(pad_image2even(sample_image))
-
-            # di = render_pkg['distortion_img'].detach().cpu().numpy()
-            # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
-            # imageio.imwrite('di.png', di)
-            # images.append(image)
-    # print(f'second: {(time.time()-st)}')
-
     if do_cloning:
         # collect data
         tet_optim.optim.zero_grad()
@@ -333,6 +317,22 @@ for iteration in progress_bar:
     if do_delaunay:
         st = time.time()
         model.update_triangulation()
+
+    # st = time.time()
+    with torch.no_grad():
+        if iteration % 10 == 0:
+            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+            sample_image = render_pkg['render']
+            sample_image = sample_image.permute(1, 2, 0)
+            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+            video_writer.write(pad_image2even(sample_image))
+
+            # di = render_pkg['distortion_img'].detach().cpu().numpy()
+            # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
+            # imageio.imwrite('di.png', di)
+            # images.append(image)
+    # print(f'second: {(time.time()-st)}')
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 video_writer.release()

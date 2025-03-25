@@ -14,7 +14,6 @@ import tinycudann as tcnn
 from utils.topo_utils import calculate_circumcenters_torch
 from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin, remove_zero, safe_arctan2
 from utils.contraction import contract_mean_std
-from torch_ema import ExponentialMovingAverage
 from utils.contraction import contract_points, inv_contract_points
 from utils.train_util import RGB2SH, safe_exp, get_expon_lr_func, sample_uniform_in_sphere
 from utils import topo_utils
@@ -22,8 +21,6 @@ from utils.graphics_utils import l2_normalize_th
 from typing import List
 from utils import hashgrid
 from torch.utils.checkpoint import checkpoint
-from torch.cuda.amp import autocast
-from plyfile import PlyData, PlyElement
 from pathlib import Path
 import numpy as np
 from utils.args import Args
@@ -31,6 +28,7 @@ import tinyplypy
 from utils.phong_shading import to_sphere, activate_lights, light_function, compute_vert_color
 from sh_slang.eval_sh import eval_sh
 
+MAX_DENSITY = 1000000
 
 def init_weights(m, gain):
     if isinstance(m, nn.Linear):
@@ -190,9 +188,9 @@ class Model(nn.Module):
             end = min(start + self.chunk_size, indices.shape[0])
 
             output = self.compute_batch_features(vertices, indices, start, end)
-            density = torch.exp(output[:, 0] + self.density_offset)
+            density = safe_exp(output[:, 0] + self.density_offset)
             densities[start:end] = density.cpu().numpy().astype(np.float32)
-        densities = np.where(self.boundary_tets.cpu().numpy(), 1000, densities)
+        densities = np.where(self.boundary_tets.cpu().numpy(), MAX_DENSITY, densities).astype(np.float32)
 
         # 3. Build the dictionary for your "tetrahedron" element
         #    'vertex_indices' is a 2D array (N,4) for the tetra indices
@@ -260,10 +258,10 @@ class Model(nn.Module):
         vertex_base_color = vertex_base_color.reshape(-1, 1, 3).expand(-1, repeats, 3).reshape(-1, 3)
 
         # add sphere
-        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=torch.inf).max()
-        x = l2_normalize_th(torch.randn((1000, 3))) * 1.2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
-        vertices = torch.cat([vertices, x], dim=0)
-        vertex_base_color = torch.cat([vertex_base_color, torch.zeros_like(x).to(vertex_base_color.device)], dim=0)
+        # pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=torch.inf).max()
+        # x = l2_normalize_th(torch.randn((1000, 3))) * 1.2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
+        # vertices = torch.cat([vertices, x], dim=0)
+        # vertex_base_color = torch.cat([vertex_base_color, torch.zeros_like(x).to(vertex_base_color.device)], dim=0)
 
         # vertex_base_color = torch.ones_like(vertices, device=device) * 0.1
         # vertex_lights = torch.zeros((vertices.shape[0], num_lights*6)).to(device)
@@ -288,7 +286,7 @@ class Model(nn.Module):
         output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
         return output
 
-    def update_triangulation(self, alpha_threshold=1.0/255):
+    def update_triangulation(self, alpha_threshold=0.0/255):
         verts = self.vertices
         v = Del(verts.shape[0])
         verts_c = verts.detach().cpu()
@@ -297,8 +295,7 @@ class Model(nn.Module):
         finite_tets = (indices_np < verts.shape[0]).all(axis=1)
         self.boundary_tets = torch.zeros((indices_np.shape[0]), dtype=bool, device='cuda')
         v = prev.get_boundary_tets(verts_c)
-        # ic(v, v.max(), indices_np.shape)
-        self.boundary_tets[v] = False
+        self.boundary_tets[v] = True
         indices_np = indices_np[finite_tets]
         self.boundary_tets = self.boundary_tets[finite_tets]
         self.indices = torch.as_tensor(indices_np).cuda()
@@ -355,7 +352,7 @@ class Model(nn.Module):
             densities[start:end] = density
             # densities.append(density)
         # densities = torch.cat(densities, dim=0)
-        densities = torch.where(boundary_tets, 1000, densities)
+        densities = torch.where(boundary_tets, MAX_DENSITY, densities)
 
         vertex_color_raw = eval_sh(
             vertices,
