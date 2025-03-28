@@ -6,6 +6,7 @@ import time
 import torch
 from torch.autograd.functional import jacobian
 from icecream import ic
+from submodules.spectral_norm3 import compute_spectral_norm3
 
 def calculate_circumcenters(vertices):
     """
@@ -386,8 +387,12 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) ->
     a = tetra_points[..., 1:, :] - tetra_points[..., 0:1, :]  # Shape: (3, 3)
 
     # Compute Jacobian of circumcenters (M, 3, 4, 3)
-    jacobian_matrix = compute_circumsphere_jacobian(tetra_points)
-    jacobian_matrix_sens = (torch.linalg.norm(jacobian_matrix, dim=-1)+1e-5)**2
+    # jacobian_matrix = compute_circumsphere_jacobian(tetra_points)
+    # jacobian_matrix_sens = (torch.linalg.norm(jacobian_matrix, dim=-1)+1e-5)**2
+    # jacobian_matrix_sens = 1/torch.linalg.matrix_norm(a, ord=-2).clip(min=1e-5)
+    # jacobian_matrix_sens = 1/torch.linalg.matrix_norm(a, ord='fro').clip(min=1e-5)
+    jacobian_matrix_sens = 1/compute_spectral_norm3(a).clip(min=1e-5)
+    # ic(jacobian_matrix_sens.mean(), jacobian_matrix_sens)
     # Compute sensitivity per vertex (Frobenius norm across Jacobian dimensions)
     num_vertices = vertices.shape[0]
 
@@ -395,10 +400,11 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) ->
     # vertex_sensitivity = torch.full((num_vertices,3), float('-inf'), device=sensitivity_per_tetra.device)
     vertex_sensitivity = torch.full((num_vertices,), 0.0, device=vertices.device)
     indices = indices.long()
-    jacobian_matrix_sens = 1/(torch.linalg.det(a)+1e-8) + jacobian_matrix_sens.sum(dim=-1)
+    # jacobian_matrix_sens = 1/(torch.linalg.det(a)+1e-8) + jacobian_matrix_sens.sum(dim=-1)
+    # jacobian_matrix_sens = jacobian_matrix_sens.sum(dim=-1)
 
     reduce_type = "amax"
-    reduce_type = "sum"
+    # reduce_type = "sum"
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 0], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 1], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=jacobian_matrix_sens, reduce=reduce_type)
@@ -412,4 +418,4 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) ->
     # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=sensitivity_per_tetra, reduce="amax")
     # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 3], src=sensitivity_per_tetra, reduce="amax")
 
-    return 10*vertex_sensitivity.reshape(num_vertices, -1)
+    return vertex_sensitivity.reshape(num_vertices, -1)

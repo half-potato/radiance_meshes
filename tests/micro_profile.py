@@ -31,4 +31,4 @@ image = image.permute(1, 2, 0)
 image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
 imageio.imwrite('test.png', image)
 
-# model.save2ply(Path("ckpt2.ply"), camera)
+# model.save2ply(Path("ckpt2.ply"))

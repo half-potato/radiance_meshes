@@ -120,7 +120,6 @@ class Model(nn.Module):
         self.update_triangulation()
 
     def load_ckpt(path: Path, device):
-
         data_dict = tinyplypy.read_ply(str(path / "ckpt.ply"))
         tet_data = data_dict["tetrahedron"]
         indices = tet_data["vertex_indices"]  # shape (N,4)
@@ -144,29 +143,21 @@ class Model(nn.Module):
         return model
 
     @torch.no_grad
-    def save2ply(self, path, sample_camera):
+    def save2ply(self, path):
         """
         Convert the old save2ply function (which used 'plyfile'),
         so it uses our new tinyply-based library via pybind11.
         """
 
-        # Ensure the output directory exists
         path.parent.mkdir(exist_ok=True, parents=True)
 
-        # 1. Gather vertex positions
         xyz = self.vertices.detach().cpu().numpy().astype(np.float32)
         rgb = self.vertex_base_color.detach().cpu().numpy().astype(np.float32)
 
-        # For tinyply, we store them as one dictionary for the "vertex" element:
-        #   { "x": array([...]), "y": ..., "z": ... }
-        # Make sure to cast to a concrete dtype (e.g. float32).
         vertex_dict = {
             "x": xyz[:, 0],
             "y": xyz[:, 1],
             "z": xyz[:, 2],
-            # "r": rgb[:, 0],
-            # "g": rgb[:, 1],
-            # "b": rgb[:, 2],
         }
         vertex_dict[f"sh_{0}_r"] = np.ascontiguousarray(rgb[:, 0])
         vertex_dict[f"sh_{0}_g"] = np.ascontiguousarray(rgb[:, 1])
@@ -176,17 +167,7 @@ class Model(nn.Module):
             vertex_dict[f"sh_{i+1}_r"] = np.ascontiguousarray(vertex_lights[:, i, 0])
             vertex_dict[f"sh_{i+1}_g"] = np.ascontiguousarray(vertex_lights[:, i, 1])
             vertex_dict[f"sh_{i+1}_b"] = np.ascontiguousarray(vertex_lights[:, i, 2])
-        # for i in range(self.num_lights):
-        #     offset = i*6
-        #     vertex_dict[f"l{i}_r"]         = np.ascontiguousarray(vertex_lights[:, offset + 0])
-        #     vertex_dict[f"l{i}_g"]         = np.ascontiguousarray(vertex_lights[:, offset + 1])
-        #     vertex_dict[f"l{i}_b"]         = np.ascontiguousarray(vertex_lights[:, offset + 2])
-        #     vertex_dict[f"l{i}_roughness"] = np.ascontiguousarray(vertex_lights[:, offset + 3])
-        #     vertex_dict[f"l{i}_phi"]       = np.ascontiguousarray(vertex_lights[:, offset + 4])
-        #     vertex_dict[f"l{i}_theta"]     = np.ascontiguousarray(vertex_lights[:, offset + 5])
 
-        # 2. Compute your RGBA / lighting data per tetrahedron
-        #    (same logic as in your code: iterative chunking, gather, etc.)
         N = self.indices.shape[0]
         densities = np.zeros((N), dtype=np.float32)
 
@@ -201,19 +182,9 @@ class Model(nn.Module):
             densities[start:end] = density.cpu().numpy().astype(np.float32)
         densities = np.where(self.boundary_tets.cpu().numpy(), MAX_DENSITY, densities).astype(np.float32)
 
-        # 3. Build the dictionary for your "tetrahedron" element
-        #    'vertex_indices' is a 2D array (N,4) for the tetra indices
-        #    plus 'r', 'g', 'b', 's', and the per-light properties
         tetra_dict = {}
-
-        # Indices: shape (N, 4). Must be stored as an unsigned int (common for face/tet indices).
         tetra_dict["vertex_indices"] = self.indices.cpu().numpy().astype(np.int32)
-
-        # The first 4 columns in rgbs are [r, g, b, s].
         tetra_dict["density"] = np.ascontiguousarray(densities)
-
-        # 4. Final data structure:
-        # data_dict[element_name][property_name] = numpy_array
         data_dict = {
             "vertex": vertex_dict,
             "tetrahedron": tetra_dict,
@@ -266,11 +237,11 @@ class Model(nn.Module):
         vertex_base_color = RGB2SH(torch.as_tensor(point_cloud.colors).float().to(device))
         vertex_base_color = vertex_base_color.reshape(-1, 1, 3).expand(-1, repeats, 3).reshape(-1, 3)
 
-        # add sphere
-        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
-        x = l2_normalize_th(torch.randn((1000, 3))) * 1.2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
-        vertices = torch.cat([vertices, x], dim=0)
-        vertex_base_color = torch.cat([vertex_base_color, torch.zeros_like(x).to(vertex_base_color.device)], dim=0)
+        # # add sphere
+        # pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
+        # x = l2_normalize_th(torch.randn((1000, 3))) * 1.2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
+        # vertices = torch.cat([vertices, x], dim=0)
+        # vertex_base_color = torch.cat([vertex_base_color, torch.zeros_like(x).to(vertex_base_color.device)], dim=0)
 
         # vertex_base_color = torch.ones_like(vertices, device=device) * 0.1
         # vertex_lights = torch.zeros((vertices.shape[0], num_lights*6)).to(device)
@@ -291,11 +262,11 @@ class Model(nn.Module):
         output = checkpoint(self.encoding, cv, use_reentrant=True).float()
         output = output.reshape(-1, self.dim, self.L)
 
-        output = output * scaling
+        output = output * scaling.detach()
         output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
         return output
 
-    def update_triangulation(self, alpha_threshold=0.0/255):
+    def update_triangulation(self, alpha_threshold=0.05/255):
         verts = self.vertices
         v = Del(verts.shape[0])
         verts_c = verts.detach().cpu()
@@ -334,12 +305,12 @@ class Model(nn.Module):
                 ], dim=0).max(dim=0).values
                 
                 # Compute the maximum possible alpha using the largest edge length
-                alpha = 1 - torch.exp(-density * edge_lengths)
+                alpha = -torch.expm1(-density * edge_lengths)
                 # mask_list.append(density > density_threshold)
                 mask_list.append(alpha > alpha_threshold)
             
             # Concatenate mask and apply it
-            mask = torch.cat(mask_list, dim=0) & ~self.boundary_tets
+            mask = torch.cat(mask_list, dim=0)# & ~self.boundary_tets
             self.indices = self.indices[mask]
             self.boundary_tets = self.boundary_tets[mask]
             
@@ -457,14 +428,14 @@ class TetOptimizer:
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
-        for param_group in self.net_optim.param_groups:
-            if param_group["name"] == "network":
-                lr = self.net_scheduler_args(iteration)
-                param_group['lr'] = lr
-        for param_group in self.optim.param_groups:
-            if param_group["name"] == "encoding":
-                lr = self.encoder_scheduler_args(iteration)
-                param_group['lr'] = lr
+        # for param_group in self.net_optim.param_groups:
+        #     if param_group["name"] == "network":
+        #         lr = self.net_scheduler_args(iteration)
+        #         param_group['lr'] = lr
+        # for param_group in self.optim.param_groups:
+        #     if param_group["name"] == "encoding":
+        #         lr = self.encoder_scheduler_args(iteration)
+        #         param_group['lr'] = lr
         for param_group in self.vertex_optim.param_groups:
             if param_group["name"] == "contracted_vertices":
                 lr = self.vertex_scheduler_args(iteration)

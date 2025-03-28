@@ -361,7 +361,7 @@ with torch.no_grad():
         eimages.append(image)
 
 mediapy.write_video(args.output_path / "rotating.mp4", eimages)
-model.save2ply(args.output_path / "ckpt.ply", sample_camera)
+model.save2ply(args.output_path / "ckpt.ply")
 torch.save(model.state_dict(), args.output_path / "ckpt.pth")
 
 test_util.evaluate_and_save(model, test_cameras, args.output_path, args.tile_size, min_t)

@@ -141,7 +141,7 @@ def safe_sin(x):
 
 
 def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.1,
-           pre_multi=500, ladder_p=-0.1,
+           pre_multi=500, ladder_p=-0.1, clip_multi=1e-1,
            **kwargs):
     fy = fov2focal(camera.fovy, camera.image_height)
     fx = fov2focal(camera.fovx, camera.image_width)
@@ -165,7 +165,7 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              tile_width=tile_size)
     # with torch.no_grad():
     #     sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
-    #     scaling = clip_multi/(sensitivity.reshape(-1, 1)+1e-5)
+    #     scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1e-3, max=1000)
     # vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         model.indices,

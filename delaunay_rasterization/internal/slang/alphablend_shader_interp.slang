@@ -49,14 +49,15 @@ float safe_exp4alpha(float x) {
 
 [Differentiable]
 float moment_0_int(float a, float b, float s1) {
-    return safe_div((1 - safe_exp4alpha(s1*(a - b))),s1);
+    return safe_div((-safe_expm1(s1*(a - b))),s1);
 }
 [Differentiable]
 float moment_1_int(float a, float b, float s1) {
-    if (s1 < 1e-4) {
+    if (s1 < 1e-6) {
         return 0.5 * (b * b - a * a);
     } else {
-        return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
+        // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
+        return -safe_div(safe_expm1(s1*(a - b)), s1*s1) + (a - b*safe_exp(s1*(a - b))) / s1;
     }
 }
 [Differentiable]
@@ -66,13 +67,11 @@ float self_dist(float a, float b, float s) {
     if (abs(ds) < 1e-4) {
         return -1 / 3 * pow(dt, 3);
     } else {
-        return (( 2 * s * (a - b) * safe_exp(ds) - safe_expm1(2 * ds)) /
+        return safe_div(( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
                 (s * s * s));
+        // return safe_div(( 2 * s * (a - b) * safe_exp(ds) - safe_expm1(2 * ds)),
+        //         (s * s * s));
     }
-}
-
-float scale_dist(float x) {
-    return safe_div(1.f, 1+safe_exp(x-3));
 }
 
 [Differentiable]
@@ -86,19 +85,21 @@ DistortionState5 update_distortion_state(
 {
     // float start = tukey_power_ladder(dist.x*pre_multi, ladder_p);
     // float end = tukey_power_ladder(dist.y*pre_multi, ladder_p);
-    float start = dist.x;//tukey_power_ladder(dist.x*pre_multi, ladder_p);
-    float end = dist.y;//tukey_power_ladder(dist.y*pre_multi, ladder_p);
+    no_diff float start = dist.x;//tukey_power_ladder(dist.x*pre_multi, ladder_p);
+    no_diff float end = dist.y;  // tukey_power_ladder(dist.y*pre_multi, ladder_p);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
+    float d = density;
 
-    float m0 = T * moment_0_int(start, end, density);
-    float m1 = T * moment_1_int(start, end, density*scaling);
+    float m0 = T * moment_0_int(start, end, d);
+    float m1 = T * moment_1_int(start, end, d);
 
     DistortionState5 new_state;
     new_state.x = old_state.x + 2.0f * m1 * old_state.z;
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + T * T * self_dist(start, end, density*scaling);
+    new_state.v = old_state.v + T * T * self_dist(start, end, d);
+    // printf("%f - %f, d: %f, v: %f T: %f, m0: %f, m1: %f\n", start, end, d, new_state.v, T, m0, m1);
 
     return new_state;
 }
@@ -119,16 +120,17 @@ DistortionState5 undo_distortion_state(
     float end = dist.y;//tukey_power_ladder(dist.y*pre_multi, ladder_p);
     // float scaling = scale_dist((dist.x+dist.y)*0.5);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
+    float d = density;
 
-    float m0 = T * moment_0_int(start, end, density)*scaling;
-    float m1 = T * moment_1_int(start, end, density)*scaling;
+    float m0 = T * moment_0_int(start, end, d);
+    float m1 = T * moment_1_int(start, end, d);
 
     DistortionState5 old_state;
     old_state.z = new_state.z - m0;
     old_state.w = new_state.w - m1;
     old_state.x = new_state.x - 2.0f * m1 * old_state.z;
     old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - T * T * self_dist(start, end, density)*scaling;
+    old_state.v = new_state.v - T * T * self_dist(start, end, d);
     return old_state;
 }
 
@@ -235,20 +237,22 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             {
                 local_n_contrib++;
                 SplatTetrahedra_interp g = collected_splats[j];
-                CtrlPt tetra_ctrl = evaluate_tetra_interp(g, ray.o, ray.d, min_t);
-                AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
-                ao = new_ao;
+                CtrlPt tetra_ctrl;
+                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl)) {
+                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
+                    ao = new_ao;
 
 
-                // float4 new_rgba = update_pixel_state(ao.rgba, tetra_ctrl.rgba);
-                // ao.rgba = new_rgba;
+                    // float4 new_rgba = update_pixel_state(ao.rgba, tetra_ctrl.rgba);
+                    // ao.rgba = new_rgba;
 
-                if (new_ao.rgba.a < 1/255.f) {
-                // if (new_rgba.a < 1/255.f) {
-                    // This Splat never registred so we subtract it before we break.
-                    // local_n_contrib--;
-                    thread_active = false;
-                    break;
+                    if (new_ao.rgba.a < 1 / 255.f) {
+                    // if (new_rgba.a < 1/255.f) {
+                        // This Splat never registred so we subtract it before we break.
+                        // local_n_contrib--;
+                        thread_active = false;
+                        break;
+                    }
                 }
             }
         }
@@ -337,25 +341,31 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 uint32_t g_idx = collected_idx[j];
                 SplatTetrahedra_interp g = collected_splats[j];
 
-                CtrlPt tetra_ctrl = evaluate_tetra_interp(g, ray.o, ray.d, min_t);
-                // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
-                if (tetra_ctrl.rgba.a < 1/255.f) continue;
+                CtrlPt tetra_ctrl;
+                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl)) {
+                    // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
+                    // if (tetra_ctrl.rgba.a < 1 / 255.f) {
+                    //     printf("Continue\n");
+                    //     continue;
+                    // }
 
-                // Undo pixel state
-                ao = undo_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
+                    // Undo pixel state
+                    ao = undo_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
 
-                // Back-prop automatically through blending and gaussian evaluation.
-                DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
-                DifferentialPair<float3> dp_ray_o = diffPair(ray.o);
-                DifferentialPair<float3> dp_ray_d = diffPair(ray.d);
-                DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
-                DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
+                    // Back-prop automatically through blending and gaussian evaluation.
+                    DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
+                    DifferentialPair<float3> dp_ray_o = diffPair(ray.o);
+                    DifferentialPair<float3> dp_ray_d = diffPair(ray.d);
+                    DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
+                    DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
 
-                bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, pre_multi, ladder_p, d_ao);
-                d_ao = dp_ao.getDifferential();
-                bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, min_t, dp_tetra_ctrl.d);
-                // bwd_diff(evaluate_tetra_2D)(dp_g, cam, min_t, dp_center_pix_coord, dp_tetra_ctrl.d);
-                bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, vertex_color, dp_g.d);
+                    bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, pre_multi, ladder_p, d_ao);
+                    d_ao = dp_ao.getDifferential();
+                    bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, min_t, dp_tetra_ctrl.d);
+                    // bwd_diff(evaluate_tetra_2D)(dp_g, cam, min_t, dp_center_pix_coord, dp_tetra_ctrl.d);
+                    bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, vertex_color, dp_g.d);
+
+                }
             }
         }
         splats_left_to_process -= block_size;
@@ -500,21 +510,22 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 uint32_t g_idx = collected_idx[j];
                 SplatTetrahedra_interp g = collected_splats[j];
 
-                CtrlPt tetra_ctrl = evaluate_tetra_interp(g, ray.o, ray.d, min_t);
-                // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
-                if (tetra_ctrl.rgba.a < 1/255.f) continue;
+                CtrlPt tetra_ctrl;
+                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl)) {
+                    // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
+                    if (tetra_ctrl.rgba.a < 1/255.f) continue;
 
-                // Undo pixel state
-                current_pixel_state = undo_pixel_state(current_pixel_state, tetra_ctrl.rgba);
+                    // Undo pixel state
+                    current_pixel_state = undo_pixel_state(current_pixel_state, tetra_ctrl.rgba);
 
-                float err = current_pixel_state.a * tetra_ctrl.rgba.a * pixel_err;
-                // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
-                float old_val;
-                int32_t old_ival;
-                tet_err.InterlockedAdd(g_idx, err, old_val);
-                tet_count.InterlockedAdd(g_idx, 1, old_ival);
-                // tet_err.InterlockedMax(g_idx, err, old_val);
-
+                    float err = current_pixel_state.a * tetra_ctrl.rgba.a * pixel_err;
+                    // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
+                    float old_val;
+                    int32_t old_ival;
+                    tet_err.InterlockedAdd(g_idx, err, old_val);
+                    tet_count.InterlockedAdd(g_idx, 1, old_ival);
+                    // tet_err.InterlockedMax(g_idx, err, old_val);
+                }
             }
         }
         splats_left_to_process -= block_size;

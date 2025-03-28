@@ -59,11 +59,12 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
 }
 
 [Differentiable]
-CtrlPt evaluate_tetra_interp(
+bool evaluate_tetra_interp(
     in SplatTetrahedra_interp g, 
     in float3 ray_o,
     in float3 ray_d,
-    no_diff in float t_min)
+    no_diff in float t_min,
+    out CtrlPt ctrl_pt)
 {
     float2 dist;
 
@@ -78,7 +79,8 @@ CtrlPt evaluate_tetra_interp(
     float intersection_t = 0.5*(exit+enter);
 
     if (!hit) {
-        return { (float4)(0.f, 0.f, 0.f, 0.f), {0.f, 0.f}, g.density };
+        ctrl_pt = { (float4)(0.f, 0.f, 0.f, 0.f), {0.f, 0.f}, g.density };
+        return false;
     } else {
         float3x3 T = transpose(float3x3(verts[0] - verts[3], verts[1] - verts[3], verts[2] - verts[3]));
         float3 uvw_enter = SolveLinearSystem(T, enter * ray_d + ray_o - verts[3]);
@@ -100,7 +102,8 @@ CtrlPt evaluate_tetra_interp(
                        final_color.y,
                        final_color.z,
                        alpha};
-        return { rgba, {enter, exit}, g.density };
+        ctrl_pt = { rgba, {enter, exit}, g.density };
+        return true;
     }
 }
 
