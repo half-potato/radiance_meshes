@@ -47,31 +47,44 @@ float safe_exp4alpha(float x) {
     return safe_clip(safe_exp(x), 0, 1);
 }
 
+// [Differentiable]
+// float moment_0_int(float a, float b, float s1) {
+//     return safe_div((-safe_expm1(s1*(a - b))),s1);
+// }
+// [Differentiable]
+// float moment_1_int(float a, float b, float s1) {
+//     if (s1 < 1e-6) {
+//         return 0.5 * max(b * b - a * a, 0);
+//     } else {
+//         // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
+//         return max(-safe_div(safe_expm1(s1*(a - b)), s1*s1) + (a - b*safe_exp(s1*(a - b))) / s1, 0);
+//     }
+// }
+// [Differentiable]
+// float self_dist(float a, float b, float s, float T) {
+//     float dt = (a - b);
+//     float ds = s * dt;
+//     if (abs(ds) < 1e-4) {
+//         return T * T * max(-1 / 3 * pow(dt, 3), 0);
+//     } else {
+//         return T*T*max(safe_div(( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
+//                 (s * s * s)), 0);
+//     }
+// }
+
 [Differentiable]
 float moment_0_int(float a, float b, float s1) {
-    return safe_div((-safe_expm1(s1*(a - b))),s1);
+    return s1;
 }
 [Differentiable]
 float moment_1_int(float a, float b, float s1) {
-    if (s1 < 1e-6) {
-        return 0.5 * (b * b - a * a);
-    } else {
-        // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
-        return -safe_div(safe_expm1(s1*(a - b)), s1*s1) + (a - b*safe_exp(s1*(a - b))) / s1;
-    }
+    return s1 * (b+a)/2;
 }
 [Differentiable]
-float self_dist(float a, float b, float s) {
+float self_dist(float a, float b, float s, float T) {
     float dt = (a - b);
-    float ds = s * dt;
-    if (abs(ds) < 1e-4) {
-        return -1 / 3 * pow(dt, 3);
-    } else {
-        return safe_div(( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
-                (s * s * s));
-        // return safe_div(( 2 * s * (a - b) * safe_exp(ds) - safe_expm1(2 * ds)),
-        //         (s * s * s));
-    }
+    return s*s*dt/3;
+
 }
 
 [Differentiable]
@@ -98,7 +111,8 @@ DistortionState5 update_distortion_state(
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + T * T * self_dist(start, end, d);
+    // new_state.v = old_state.v + T * T * self_dist(start, end, d);
+    new_state.v = old_state.v + self_dist(start, end, d, T);
     // printf("%f - %f, d: %f, v: %f T: %f, m0: %f, m1: %f\n", start, end, d, new_state.v, T, m0, m1);
 
     return new_state;
@@ -130,7 +144,7 @@ DistortionState5 undo_distortion_state(
     old_state.w = new_state.w - m1;
     old_state.x = new_state.x - 2.0f * m1 * old_state.z;
     old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - T * T * self_dist(start, end, d);
+    old_state.v = new_state.v - self_dist(start, end, d, T);
     return old_state;
 }
 
@@ -242,12 +256,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
                     ao = new_ao;
 
-
-                    // float4 new_rgba = update_pixel_state(ao.rgba, tetra_ctrl.rgba);
-                    // ao.rgba = new_rgba;
-
                     if (new_ao.rgba.a < 1 / 255.f) {
-                    // if (new_rgba.a < 1/255.f) {
                         // This Splat never registred so we subtract it before we break.
                         // local_n_contrib--;
                         thread_active = false;
@@ -524,7 +533,6 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     int32_t old_ival;
                     tet_err.InterlockedAdd(g_idx, err, old_val);
                     tet_count.InterlockedAdd(g_idx, 1, old_ival);
-                    // tet_err.InterlockedMax(g_idx, err, old_val);
                 }
             }
         }

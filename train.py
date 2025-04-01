@@ -20,7 +20,7 @@ import numpy as np
 from utils import cam_util
 from utils.train_util import *
 # from models.vertex_color import Model, TetOptimizer
-from models.ingp_density import Model, TetOptimizer
+from models.ingp_color import Model, TetOptimizer
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -73,7 +73,7 @@ args.num_samples = 200
 args.densify_start = 2000
 args.densify_end = 5000
 args.iterations = 7000
-args.freeze_start = 28000
+args.freeze_start = 9000
 args.sh_interval = 500
 args.image_folder = "images_4"
 args.eval = True
@@ -85,7 +85,7 @@ args.delaunay_start = 100000
 args.log2_hashmap_size = 22
 args.per_level_scale = 2
 args.L = 10
-args.density_offset = -1
+args.density_offset = -2
 args.light_offset = -3
 args.lights_lr = 1e-4
 args.final_lights_lr = 1e-4
@@ -98,10 +98,12 @@ args.scale_multi = 1.0
 
 args.vertices_lr = 1e-4
 args.lr_delay = 50
+args.vert_lr_delay = 50
 args.final_vertices_lr = 1e-6
 args.max_steps = 10000
 args.num_lights = 2
 args.sh_lr_delay = 1000
+args.clip_multi = 1e-1
 
 args.vertices_lr_delay_multi = 1e-8
 args.encoding_lr = 0.00125
@@ -118,14 +120,14 @@ args.vertices_beta = [0.9, 0.99]
 args.contract_vertices = False
 args.hashmap_dim = 4
 
-args.lambda_dist = 1e-2
+args.lambda_dist = 0.0
 args.ladder_p = -0.25
 args.pre_multi = 10000
 
 args.split_std = 0.1
 args.split_mode = "barycentric"
 args.clone_schedule = "quadratic"
-args.base_min_t = 0.2
+args.base_min_t = 0.05
 args.sample_cam = 3
 
 args = Args.from_namespace(args.get_parser().parse_args())
@@ -213,7 +215,8 @@ for iteration in progress_bar:
     l2_loss = ((target - image)**2).mean()
     reg = tet_optim.regularizer()
     ssim_loss = 1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))
-    loss = (1-args.lambda_ssim)*l2_loss + args.lambda_ssim*ssim_loss + reg + args.lambda_dist * render_pkg['distortion_loss']
+    dl_loss = render_pkg['distortion_loss']
+    loss = (1-args.lambda_ssim)*l2_loss + args.lambda_ssim*ssim_loss + reg + args.lambda_dist * dl_loss
 
     st = time.time()
     loss.backward()
@@ -266,8 +269,8 @@ for iteration in progress_bar:
 
             # Convert to RGB (NxMx3) using the colormap
             tet_grad_color = torch.as_tensor(cmap(normalized_tensor.cpu().numpy())).float().cuda()
-            _, densities = model.get_cell_values(camera)
-            tet_grad_color[:, 3] = densities
+            _, features = model.get_cell_values(camera)
+            tet_grad_color[:, 3] = features[:, 0]
             render_pkg = render_alpha_blend_tiles_slang_raw(model.indices, model.vertices, None, sample_camera, cell_values=tet_grad_color)
 
             image = render_pkg['render']
@@ -315,7 +318,8 @@ for iteration in progress_bar:
         "PSNR": repr(f"{psnr:>5.2f}"),
         "Mean": repr(f"{avg_psnr:>5.2f}"),
         "#V": len(model),
-        "#T": model.indices.shape[0]
+        "#T": model.indices.shape[0],
+        "DL": repr(f"{dl_loss:>5.2f}"),
     })
 
     if do_delaunay:

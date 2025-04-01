@@ -163,10 +163,10 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
-    # with torch.no_grad():
-    #     sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
-    #     scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1e-3, max=1000)
-    # vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
+    with torch.no_grad():
+        sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
+        scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
+    vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         model.indices,
         # scale_vertices,
@@ -177,13 +177,13 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         camera.fovy,
         camera.fovx,
         render_grid)
-    # if cell_values is None:
-    #     cell_values = torch.zeros((mask.shape[0]), device=circumcenter.device)
-    #     if mask.sum() > 0:
-    #         vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
-    #     else:
-    #         vertex_color, cell_values = model.get_cell_values(camera)
-    vertex_color, cell_values = model.get_cell_values(camera)
+    if cell_values is None:
+        cell_values = torch.zeros((mask.shape[0], 13), device=circumcenter.device)
+        if mask.sum() > 0:
+            vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+        else:
+            vertex_color, cell_values = model.get_cell_values(camera)
+    # vertex_color, cell_values = model.get_cell_values(camera)
     # cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
@@ -214,7 +214,8 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         camera.fovx)
     # alpha = 1-image_rgb.permute(2,0,1)[3, ...]
     # ic(alpha.min(), alpha.max())
-    distortion_loss = ((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4])# / alpha.clip(min=1e-3)
+    total_density = distortion_img[:, :, 2].clip(min=1e-6)
+    distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)# / alpha.clip(min=1e-3)
     # ic(distortion_img)
     # torch.cuda.synchronize()
     # dt2 = (time.time() - st)

@@ -124,13 +124,33 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
     // Here we assume each tetrahedron has a single scalar density in tet_density:
-    float density = tet_density[g_idx];
+    float density = float(tet_density[g_idx, 0]);
+    float3 c0 = {
+        float(tet_density[g_idx, 1]),
+        float(tet_density[g_idx, 2]),
+        float(tet_density[g_idx, 3]),
+    };
+    float3 c1 = {
+        float(tet_density[g_idx, 4]),
+        float(tet_density[g_idx, 5]),
+        float(tet_density[g_idx, 6]),
+    };
+    float3 c2 = {
+        float(tet_density[g_idx, 7]),
+        float(tet_density[g_idx, 8]),
+        float(tet_density[g_idx, 9]),
+    };
+    float3 c3 = {
+        float(tet_density[g_idx, 10]),
+        float(tet_density[g_idx, 11]),
+        float(tet_density[g_idx, 12]),
+    };
 
-    // For vertex colors, we read color from each vertex index in the tetrahedron:
-    float3 c0 = read_t3_float3(virtual_tet.x, vertex_color);
-    float3 c1 = read_t3_float3(virtual_tet.y, vertex_color);
-    float3 c2 = read_t3_float3(virtual_tet.z, vertex_color);
-    float3 c3 = read_t3_float3(virtual_tet.w, vertex_color);
+    // // For vertex colors, we read color from each vertex index in the tetrahedron:
+    // float3 c0 = read_t3_float3(virtual_tet.x, vertex_color);
+    // float3 c1 = read_t3_float3(virtual_tet.y, vertex_color);
+    // float3 c2 = read_t3_float3(virtual_tet.z, vertex_color);
+    // float3 c3 = read_t3_float3(virtual_tet.w, vertex_color);
 
     SplatTetrahedra_interp result = {
         tet, density, {c0, c1, c2, c3}
@@ -149,13 +169,34 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    float density = tet_density[g_idx];  // or read_float(g_idx, tet_density) if you prefer
+    // float density = tet_density[g_idx];  // or read_float(g_idx, tet_density) if you prefer
 
-    // For each vertex index:
-    float3 c0 = read_t3_float3(virtual_tet.x, vertex_color);
-    float3 c1 = read_t3_float3(virtual_tet.y, vertex_color);
-    float3 c2 = read_t3_float3(virtual_tet.z, vertex_color);
-    float3 c3 = read_t3_float3(virtual_tet.w, vertex_color);
+    // // For each vertex index:
+    // float3 c0 = read_t3_float3(virtual_tet.x, vertex_color);
+    // float3 c1 = read_t3_float3(virtual_tet.y, vertex_color);
+    // float3 c2 = read_t3_float3(virtual_tet.z, vertex_color);
+    // float3 c3 = read_t3_float3(virtual_tet.w, vertex_color);
+    float density = float(tet_density[g_idx, 0]);
+    float3 c0 = {
+        float(tet_density[g_idx, 1]),
+        float(tet_density[g_idx, 2]),
+        float(tet_density[g_idx, 3]),
+    };
+    float3 c1 = {
+        float(tet_density[g_idx, 4]),
+        float(tet_density[g_idx, 5]),
+        float(tet_density[g_idx, 6]),
+    };
+    float3 c2 = {
+        float(tet_density[g_idx, 7]),
+        float(tet_density[g_idx, 8]),
+        float(tet_density[g_idx, 9]),
+    };
+    float3 c3 = {
+        float(tet_density[g_idx, 10]),
+        float(tet_density[g_idx, 11]),
+        float(tet_density[g_idx, 12]),
+    };
 
     SplatTetrahedra_interp result;
     result.tet       = tet;

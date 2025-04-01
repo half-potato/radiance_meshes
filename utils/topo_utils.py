@@ -405,6 +405,7 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) ->
 
     reduce_type = "amax"
     # reduce_type = "sum"
+    # reduce_type = "amin"
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 0], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 1], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=jacobian_matrix_sens, reduce=reduce_type)
