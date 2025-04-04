@@ -1,9 +1,9 @@
 import os
-VERSION = 9
-if VERSION is not None:
-    os.environ["CC"] = f"/usr/bin/gcc-{VERSION}"
-    os.environ["CXX"] = f"/usr/bin/g++-{VERSION}"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# VERSION = 9
+# if VERSION is not None:
+#     os.environ["CC"] = f"/usr/bin/gcc-{VERSION}"
+#     os.environ["CXX"] = f"/usr/bin/g++-{VERSION}"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from pathlib import Path
 import sys
 sys.path.append(str(Path(os.path.abspath('')).parent))
@@ -94,29 +94,30 @@ def project_points_to_tetrahedra(points, tets):
     """
     Projects each point in `points` (shape (N, 3)) onto the corresponding tetrahedron in `tets` (shape (N, 4, 3))
     by clamping negative barycentrics to zero and renormalizing them so that they sum to 1.
-    
+
     The barycentrics for a tetrahedron with vertices v0, v1, v2, v3 are computed as:
       w0 = 1 - (x0+x1+x2)
       w1, w2, w3 = x0, x1, x2, where x solves T x = (p - v0) with T = [v1-v0, v2-v0, v3-v0]
     """
-    N = points.shape[0]
     v0 = tets[:, 0, :]             # shape (N, 3)
     T = tets[:, 1:, :] - v0.unsqueeze(1)  # shape (N, 3, 3)
-    
+    T = T.permute(0,2,1)
+
     # Solve for x: T x = (p - v0)
     p_minus_v0 = points - v0       # shape (N, 3)
     x = torch.linalg.solve(T, p_minus_v0.unsqueeze(2)).squeeze(2)  # shape (N, 3)
-    
+
     # Compute full barycentrics: weight for v0 and for v1,v2,v3.
     w0 = 1 - x.sum(dim=1, keepdim=True)  # shape (N, 1)
     bary = torch.cat([w0, x], dim=1)      # shape (N, 4)
-    
+    bary = bary.clip(min=0)
+
+    norm = (bary.sum(dim=1, keepdim=True)).clip(min=1e-8)
     # Clamp negative values and renormalize to sum to 1.
-    # bary = torch.clamp(bary, min=0, max=1)
-    # norm = (bary.sum(dim=1, keepdim=True)).clip(min=1e-8)
-    # mask = (norm > 1).reshape(-1)
-    # bary[mask] = bary[mask] / norm[mask]
-    
+    bary = torch.clamp(bary, min=0)
+    mask = (norm > 1).reshape(-1)
+    bary[mask] = bary[mask] / norm[mask]
+
     # Reconstruct the point as the weighted sum of the tetrahedron vertices.
     p_proj = (T * bary[:, 1:].unsqueeze(1)).sum(dim=2) + v0
     return p_proj
@@ -184,12 +185,8 @@ for i in range(M):
 
     tets = vertices[indices]
     circumcenter, radius = calculate_circumcenters_torch(tets.double())
-    # clipped_circumcenter = project_points_to_tetrahedra(circumcenter.float(), tets)
-    clipped_circumcenter = circumcenter.clone()
-    max_norm = torch.linalg.norm(vertices, dim=1).max()
-    norm = torch.linalg.norm(circumcenter, dim=-1, keepdim=True)
-    mask = (norm > max_norm)[:, 0]
-    clipped_circumcenter[mask] = clipped_circumcenter[mask] / norm[mask] * max_norm
+    clipped_circumcenter = project_points_to_tetrahedra(circumcenter.float(), tets)
+    # clipped_circumcenter = circumcenter.clone()
     output = field(clipped_circumcenter)
     # cv, cr = contract_mean_std(circumcenter, radius)
     # output = field(cv)

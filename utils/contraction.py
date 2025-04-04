@@ -44,12 +44,6 @@ def l2_normalize_th(x, eps=torch.finfo(torch.float32).eps, dim=-1):
         torch.clip(torch.sum(x**2, dim=dim, keepdim=True), eps, None)
     )
 
-def contract_points(x, eps=torch.finfo(torch.float32).eps, dim=-1):
-    mag = torch.sqrt(
-        torch.clip(torch.sum(x**2, dim=dim, keepdim=True), eps, None)
-    )
-    return torch.where(mag <= 1, x, (2 - (1 / mag)) * (x / mag))
-
 
 def inv_contract_points(z, eps=torch.finfo(torch.float32).eps):
     z_mag_sq = torch.sum(z**2, dim=-1, keepdims=True)
@@ -58,6 +52,16 @@ def inv_contract_points(z, eps=torch.finfo(torch.float32).eps):
     x = safe_div(z, inv_scale)
     return x
 
+def contract_points(x, eps=torch.finfo(torch.float32).eps, dim=-1):
+    mag = torch.sqrt(
+        torch.clip(torch.sum(x**2, dim=dim, keepdim=True), eps, None)
+    )
+    return torch.where(mag <= 1, x, (2 - (1 / mag)) * (x / mag))
+
+def contraction_jacobian(means):
+    jc_means = torch.vmap(torch.func.jacrev(contract_points))(means.view(-1, means.shape[-1]))
+    jc_means = jc_means.view(list(means.shape) + [means.shape[-1]])
+    return jc_means
 
 def track_gaussians(fn, means, covs, densities):
     jc_means = torch.vmap(torch.func.jacrev(fn))(means.view(-1, means.shape[-1]))

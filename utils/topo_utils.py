@@ -7,6 +7,40 @@ import torch
 from torch.autograd.functional import jacobian
 from icecream import ic
 from submodules.spectral_norm3 import compute_spectral_norm3
+from utils.contraction import contract_points, contraction_jacobian
+
+@torch.jit.script
+def project_points_to_tetrahedra(points, tets):
+    """
+    Projects each point in `points` (shape (N, 3)) onto the corresponding tetrahedron in `tets` (shape (N, 4, 3))
+    by clamping negative barycentrics to zero and renormalizing them so that they sum to 1.
+
+    The barycentrics for a tetrahedron with vertices v0, v1, v2, v3 are computed as:
+      w0 = 1 - (x0+x1+x2)
+      w1, w2, w3 = x0, x1, x2, where x solves T x = (p - v0) with T = [v1-v0, v2-v0, v3-v0]
+    """
+    v0 = tets[:, 0, :]             # shape (N, 3)
+    T = tets[:, 1:, :] - v0.unsqueeze(1)  # shape (N, 3, 3)
+    T = T.permute(0,2,1)
+
+    # Solve for x: T x = (p - v0)
+    p_minus_v0 = points - v0       # shape (N, 3)
+    x = torch.linalg.solve(T, p_minus_v0.unsqueeze(2)).squeeze(2)  # shape (N, 3)
+
+    # Compute full barycentrics: weight for v0 and for v1,v2,v3.
+    w0 = 1 - x.sum(dim=1, keepdim=True)  # shape (N, 1)
+    bary = torch.cat([w0, x], dim=1)      # shape (N, 4)
+    bary = bary.clip(min=0)
+
+    norm = (bary.sum(dim=1, keepdim=True)).clip(min=1e-8)
+    # Clamp negative values and renormalize to sum to 1.
+    bary = torch.clamp(bary, min=0)
+    mask = (norm > 1).reshape(-1)
+    bary[mask] = bary[mask] / norm[mask]
+
+    # Reconstruct the point as the weighted sum of the tetrahedron vertices.
+    p_proj = (T * bary[:, 1:].unsqueeze(1)).sum(dim=2) + v0
+    return p_proj
 
 def calculate_circumcenters(vertices):
     """
@@ -372,7 +406,9 @@ def circumcenter_jacobian(vertices):
     jacobian_numerical = jacobian(wrapper, vertices).squeeze(0)  # (3, 4, 3)
     return jacobian_numerical
 
-def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) -> torch.Tensor:
+# @torch.jit.script
+def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor,
+                               normalized_circumcenter: torch.Tensor) -> torch.Tensor:
     """
     Compute mean sensitivity for each vertex by vectorizing the computation.
     
@@ -391,32 +427,21 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor) ->
     # jacobian_matrix_sens = (torch.linalg.norm(jacobian_matrix, dim=-1)+1e-5)**2
     # jacobian_matrix_sens = 1/torch.linalg.matrix_norm(a, ord=-2).clip(min=1e-5)
     # jacobian_matrix_sens = 1/torch.linalg.matrix_norm(a, ord='fro').clip(min=1e-5)
-    jacobian_matrix_sens = 1/compute_spectral_norm3(a).clip(min=1e-5)
-    # ic(jacobian_matrix_sens.mean(), jacobian_matrix_sens)
-    # Compute sensitivity per vertex (Frobenius norm across Jacobian dimensions)
+    # circumcenter, radius = calculate_circumcenters_torch(tetra_points.double())
+    # ccc = project_points_to_tetrahedra(circumcenter.float(), tetra_points)
+    # normalized_circumcenter = (ccc - center.reshape(1, 3))/scaling
+    J = contraction_jacobian(normalized_circumcenter).float()
+    J_d = torch.det(J).abs()
+    jacobian_matrix_sens = J_d/compute_spectral_norm3(a).clip(min=1e-5)
     num_vertices = vertices.shape[0]
 
-    # Scatter sensitivity back to vertices
-    # vertex_sensitivity = torch.full((num_vertices,3), float('-inf'), device=sensitivity_per_tetra.device)
     vertex_sensitivity = torch.full((num_vertices,), 0.0, device=vertices.device)
     indices = indices.long()
-    # jacobian_matrix_sens = 1/(torch.linalg.det(a)+1e-8) + jacobian_matrix_sens.sum(dim=-1)
-    # jacobian_matrix_sens = jacobian_matrix_sens.sum(dim=-1)
 
     reduce_type = "amax"
-    # reduce_type = "sum"
-    # reduce_type = "amin"
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 0], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 1], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=jacobian_matrix_sens, reduce=reduce_type)
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 3], src=jacobian_matrix_sens, reduce=reduce_type)
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 0], src=jacobian_matrix_sens[:, 0], reduce=reduce_type)
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 1], src=jacobian_matrix_sens[:, 1], reduce=reduce_type)
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=jacobian_matrix_sens[:, 2], reduce=reduce_type)
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 3], src=jacobian_matrix_sens[:, 3], reduce=reduce_type)
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 0], src=sensitivity_per_tetra, reduce="amax")
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 1], src=sensitivity_per_tetra, reduce="amax")
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 2], src=sensitivity_per_tetra, reduce="amax")
-    # vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 3], src=sensitivity_per_tetra, reduce="amax")
 
-    return vertex_sensitivity.reshape(num_vertices, -1)
+    return jacobian_matrix_sens, vertex_sensitivity.reshape(num_vertices, -1)

@@ -6,6 +6,8 @@ from PIL import Image
 from data.dataset_readers import sceneLoadTypeCallbacks
 from data.camera import Camera
 
+WARNED = False
+
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)
     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0

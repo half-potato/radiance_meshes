@@ -9,6 +9,7 @@ from data.camera import Camera
 from utils.ssim import ssim
 
 def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_ssim=0.2, **kwargs):
+    device = model.device
     indices = model.indices
     vertices = model.vertices
     fy = fov2focal(camera.fovy, camera.image_height)
@@ -17,10 +18,10 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     [fx, 0, camera.image_width/2],
     [0, fy, camera.image_height/2],
     [0, 0, 1],
-    ]).to(camera.world_view_transform.device)
-    world_view_transform = camera.world_view_transform.T
+    ]).to(device)
+    world_view_transform = camera.world_view_transform.T.to(device)
 
-    cam_pos = camera.world_view_transform.T.inverse()[:3, 3]
+    cam_pos = camera.world_view_transform.T.inverse()[:3, 3].to(device)
     fovy = camera.fovy
     fovx = camera.fovx
     torch.cuda.synchronize()

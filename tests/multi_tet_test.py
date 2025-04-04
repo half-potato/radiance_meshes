@@ -3,10 +3,8 @@ from absl.testing import parameterized
 import torch
 from pyquaternion import Quaternion
 import numpy as np
-from scipy.spatial import Delaunay
-import matplotlib.pyplot as plt
 from utils.compare_quad import test_tetrahedra_rendering
-from utils.test_util import compare_dict_values, bcolors
+from utils.test_util import compare_dict_values, bcolors, compute_delaunay, generate_color_palette
 import random
 import math
 
@@ -23,20 +21,6 @@ def generate_point_cloud(n_points, radius, device='cuda'):
     distances = torch.norm(points, dim=1)
     points = points[distances <= radius]
     return points
-
-def compute_delaunay(points):
-    """Compute Delaunay tetrahedralization of points."""
-    points_cpu = points.cpu().numpy()
-    delaunay = Delaunay(points_cpu)
-    indices = torch.tensor(delaunay.simplices, device=points.device).int()
-    return indices
-
-def generate_color_palette(n_colors):
-    """Generate distinct colors using matplotlib colormaps."""
-    colors = plt.cm.rainbow(np.linspace(0, 1, n_colors))
-    colors = torch.tensor(colors, device='cuda')
-    colors[:, 3] = 0.2  # Set alpha value
-    return colors.float()
 
 def create_view_matrix(camera_pos, look_at_point):
     """Create view matrix looking from camera_pos to look_at_point."""

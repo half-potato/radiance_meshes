@@ -12,19 +12,20 @@ def fov2focal(fov, pixels):
 def focal2fov(focal, pixels):
     return 2*math.atan(pixels/(2*focal))
 
-def render_alpha_blend_tiles_slang_raw(indices, vertices,
+def render_constant_color(indices, vertices,
                                        rgbs_fn,
                                        camera,
                                        cell_values=None, tile_size=16, min_t=0.1):
+    device = indices.device
     fy = fov2focal(camera.fovy, camera.image_height)
     fx = fov2focal(camera.fovx, camera.image_width)
     K = torch.tensor([
         [fx, 0, camera.image_width/2],
         [0, fy, camera.image_height/2],
         [0, 0, 1],
-    ]).to(camera.world_view_transform.device)
-    cam_pos = camera.camera_center
-    world_view_transform = camera.world_view_transform.T
+    ]).to(device)
+    cam_pos = camera.camera_center.to(device)
+    world_view_transform = camera.world_view_transform.T.to(device)
     torch.cuda.synchronize()
     assert(indices.device == vertices.device)
     assert(indices.device == world_view_transform.device)

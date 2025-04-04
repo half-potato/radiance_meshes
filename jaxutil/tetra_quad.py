@@ -32,8 +32,9 @@ def assert_valid_stepfun(t, y):
     )
 
 @jax.jit
-def lossfun_distortion(t, w):
+def lossfun_distortion(t, mass):
   """Compute iint w[i] w[j] |t[i] - t[j]| di dj."""
+  w = mass
   assert_valid_stepfun(t, w)
 
   # The loss incurred between all pairs of intervals.
@@ -91,7 +92,8 @@ def render_quadrature(tdist, query_fn, return_extras=False):
             "avg_colors": avg_colors,
             "weights": weights,
             "dist_loss": dist_loss,
-            "total_density": jnp.sum(total_density*t_delta, axis=-1),
+            # "total_density": jnp.sum(total_density*t_delta, axis=-1),
+            "total_density": total_density,
         }
     else:
         return rendered_color

@@ -1,8 +1,6 @@
 import numpy as np
 import torch
-import torch.nn as nn
 import math
-from pathlib import Path
 
 from jaxutil import tetra_quad
 from pyquaternion import Quaternion
@@ -11,9 +9,6 @@ from jax import jacrev, grad
 import jax.numpy as jnp
 from utils.train_util import render
 from data.camera import Camera
-from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
-from delaunay_rasterization.internal.render_grid import RenderGrid
-from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader, point2image
 
 def get_projection_matrix(znear, zfar, fy, fx, height, width, device):
     """Calculate projection matrix for given camera parameters."""
@@ -168,7 +163,7 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
 
     if check_gradients:
         # Compute gradients through both implementations
-        torch_loss = torch_image[..., :3].sum()
+        torch_loss = torch_image[..., :3].sum() + render_pkg['distortion_loss'].mean()
         # ic(torch_loss)
         torch_loss.backward()
         
@@ -190,6 +185,7 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
                 tmin,
                 jnp.linspace(0, 1, n_samples)
             )
+            dist = img[..., 4]
             return img[..., :3].sum()
 
         # Compute JAX gradients using jacrev

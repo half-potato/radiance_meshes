@@ -11,6 +11,7 @@ import numpy as np
 from utils import topo_utils, train_util
 from icecream import ic
 import math
+from utils.contraction import contraction_jacobian
 
 def sample_uniform_in_sphere(batch_size, dim, radius=1.0, device=None):
     """
@@ -143,16 +144,17 @@ def safe_sin(x):
 def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.1,
            pre_multi=500, ladder_p=-0.1, clip_multi=1e-1,
            **kwargs):
+    device = model.device
     fy = fov2focal(camera.fovy, camera.image_height)
     fx = fov2focal(camera.fovx, camera.image_width)
     K = torch.tensor([
         [fx, 0, camera.image_width/2],
         [0, fy, camera.image_height/2],
         [0, 0, 1],
-    ]).to(camera.world_view_transform.device)
-    cam_pos = camera.camera_center
+    ]).to(device)
+    cam_pos = camera.camera_center.to(device)
     vertices = model.vertices
-    world_view_transform = camera.world_view_transform.T
+    world_view_transform = camera.world_view_transform.T.to(device)
 
     assert(model.indices.device == model.vertices.device)
     assert(model.indices.device == world_view_transform.device)
@@ -163,10 +165,6 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
-    with torch.no_grad():
-        sensitivity = topo_utils.compute_vertex_sensitivity(model.indices, model.vertices)
-        scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
-    vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         model.indices,
         # scale_vertices,
@@ -180,11 +178,20 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
     if cell_values is None:
         cell_values = torch.zeros((mask.shape[0], 13), device=circumcenter.device)
         if mask.sum() > 0:
-            vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+            normed_cc, cell_values[mask] = model.get_cell_values(camera, mask)
         else:
-            vertex_color, cell_values = model.get_cell_values(camera)
+            normed_cc, cell_values = model.get_cell_values(camera)
+    vertex_color = torch.empty([1], device=device)
     # vertex_color, cell_values = model.get_cell_values(camera)
     # cell_values = model.get_cell_values(camera)
+    with torch.no_grad():
+        tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask], model.vertices, normed_cc)
+        # J = contraction_jacobian(normed_cc)
+        # ic(J.shape)
+        # J_d = torch.linalg.det(J).abs()
+        # scaling = J_d * clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
+        scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
+    vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
 
     # torch.cuda.synchronize()
     # ic("vt", time.time()-st)
@@ -231,9 +238,32 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         'viewspace_points': vs_tetra,
         'visibility_filter': mask,
         'circumcenters': circumcenter,
+        'normed_cc': normed_cc,
         'tet_area': tet_area,
+        'cc_sensitivity': tet_sens,
+        'density': cell_values[:, 0],
+        'mask': mask,
     }
     return render_pkg
+
+@torch.jit.script
+def compute_perturbation(indices, vertices, cc, density, mask, cc_sensitivity, lr:float, k:float=100, t:float=(1-0.005)):
+    inds = indices[mask]
+    verts = vertices
+    device = verts.device
+    v0, v1, v2, v3 = verts[inds[:, 0]], verts[inds[:, 1]], verts[inds[:, 2]], verts[inds[:, 3]]
+    
+    edge_lengths = torch.stack([
+        torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
+        torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
+    ], dim=0).max(dim=0)[0]
+    
+    # Compute the maximum possible alpha using the largest edge length
+    alpha = 1 - torch.exp(-density[mask].reshape(-1, 1) * edge_lengths.reshape(-1, 1))
+    # perturb = lr * torch.sigmoid(-k*(alpha - t)) / cc_sensitivity.reshape(-1, 1) * torch.randn((inds.shape[0], 3), device=device)
+    perturb = lr * torch.sigmoid(-k*(alpha - t)) * torch.randn((inds.shape[0], 3), device=device)
+    target = cc - perturb
+    return torch.linalg.norm(cc - target.detach(), dim=-1).mean()
 
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000

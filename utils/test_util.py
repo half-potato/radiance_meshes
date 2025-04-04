@@ -8,8 +8,24 @@ from tqdm import tqdm
 from submodules.lpipsPyTorch import LPIPSEval
 from fused_ssim import fused_ssim
 from utils.train_util import render
+from scipy.spatial import Delaunay
+import matplotlib.pyplot as plt
 
 torch.set_printoptions(precision=10)
+
+def compute_delaunay(points):
+    """Compute Delaunay tetrahedralization of points."""
+    points_cpu = points.cpu().numpy()
+    delaunay = Delaunay(points_cpu)
+    indices = torch.tensor(delaunay.simplices, device=points.device).int()
+    return indices
+
+def generate_color_palette(n_colors):
+    """Generate distinct colors using matplotlib colormaps."""
+    colors = plt.cm.rainbow(np.linspace(0, 1, n_colors))
+    colors = torch.tensor(colors, device='cuda')
+    colors[:, 3] = 0.2  # Set alpha value
+    return colors.float()
 
 
 class bcolors:

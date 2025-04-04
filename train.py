@@ -1,3 +1,4 @@
+import cv2
 import os
 # VERSION = 9
 # if VERSION is not None:
@@ -31,10 +32,14 @@ from delaunay_rasterization.internal.render_err import render_err
 import imageio
 from torch.profiler import profile, ProfilerActivity, record_function
 from utils import test_util
-import cv2
 from utils.graphics_utils import tetra_volume
 import termplotlib as tpl
-from delaunay_rasterization.internal.alphablend_tiled_slang import render_alpha_blend_tiles_slang_raw
+from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
+from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
+from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
+import gc
+
+
 torch.set_num_threads(1)
 
 
@@ -66,76 +71,87 @@ class SimpleSampler:
 eps = torch.finfo(torch.float).eps
 args = Args()
 args.tile_size = 16
-args.output_path = Path("output")
-args.densify_interval = 500
-args.budget = 1_000_000
-args.num_samples = 200
-args.densify_start = 2000
-args.densify_end = 5000
-args.iterations = 7000
-args.freeze_start = 9000
-args.sh_interval = 500
 args.image_folder = "images_4"
-args.eval = True
+args.eval = False
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
+args.iterations = 10000
 args.ckpt = ""
-args.delaunay_start = 100000
 
-args.log2_hashmap_size = 22
-args.per_level_scale = 2
-args.L = 10
-args.density_offset = -2
+# Light Settings
 args.light_offset = -3
 args.lights_lr = 1e-4
 args.final_lights_lr = 1e-4
 args.color_lr = 1e-2
 args.final_color_lr = 1e-2
-args.p_norm = 100
+args.num_lights = 2
+args.sh_interval = 1000
 
+# iNGP Settings
+args.encoding_lr = 3e-3
+args.final_encoding_lr = 3e-4
+args.network_lr = 3e-4
+args.final_network_lr = 3e-4
 args.hidden_dim = 64
 args.scale_multi = 1.0
-
-args.vertices_lr = 1e-4
-args.lr_delay = 50
-args.vert_lr_delay = 50
-args.final_vertices_lr = 1e-6
-args.max_steps = 10000
-args.num_lights = 2
-args.sh_lr_delay = 1000
-args.clip_multi = 1e-1
-
-args.vertices_lr_delay_multi = 1e-8
-args.encoding_lr = 0.00125
-args.final_encoding_lr = 0.000125
-
-args.network_lr = 0.00125
-args.final_network_lr = 0.000125
-
-args.lambda_ssim = 0.1
-args.clone_lambda_ssim = 0.1
-
+args.log2_hashmap_size = 22
+args.per_level_scale = 2
+args.L = 10
+args.density_offset = -4
 args.weight_decay = 0.01
-args.vertices_beta = [0.9, 0.99]
-args.contract_vertices = False
 args.hashmap_dim = 4
 
-args.lambda_dist = 0.0
+# Vertex Settings
+args.lr_delay = 50
+args.vert_lr_delay = 50
+args.vertices_lr = 1e-3
+args.final_vertices_lr = 1e-5
+args.max_steps = 30000
+args.vertices_lr_delay_multi = 1e-8
+args.vertices_beta = [0.9, 0.99]
+args.contract_vertices = False
+args.clip_multi = 50
+args.delaunay_start = 17000
+args.freeze_start = 25000
+
+# Distortion Settings
+args.lambda_dist = 1e-5
 args.ladder_p = -0.25
 args.pre_multi = 10000
 
+# Clone Settings
+args.p_norm = 100
+args.clone_lambda_ssim = 0.2
 args.split_std = 0.1
 args.split_mode = "barycentric"
 args.clone_schedule = "quadratic"
+args.min_tet_count = 4
+args.prune_alpha_thres = 1/255
+args.densify_start = 2000
+args.densify_end = 15000
+args.num_samples = 200
+args.densify_interval = 500
+args.budget = 2_000_000
+args.lambda_noise = 1e-2
+
+args.lambda_ssim = 0.2
 args.base_min_t = 0.01
-args.sample_cam = 3
+args.sample_cam = 4
+args.data_device = 'cuda'
+
+# Bilateral grid arguments
+# Bilateral grid parameters
+args.use_bilateral_grid = False
+args.bilateral_grid_shape = [16, 16, 8]
+args.bilateral_grid_lr = 0.003  # Match gsplat's default
+args.lambda_tv: float = 10.0
 
 args = Args.from_namespace(args.get_parser().parse_args())
 
 args.output_path.mkdir(exist_ok=True, parents=True)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
+    args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval)
 
 args.num_samples = min(len(train_cameras), args.num_samples)
 
@@ -149,7 +165,16 @@ else:
 min_t = model.scene_scaling * args.base_min_t
 
 tet_optim = TetOptimizer(model, **args.as_dict())
-sample_camera = test_cameras[args.sample_cam]
+if args.eval:
+    sample_camera = test_cameras[args.sample_cam]
+else:
+    sample_camera = train_cameras[args.sample_cam]
+
+camera_inds = {}
+camera_inds_back = {}
+for i, camera in enumerate(train_cameras):
+    camera_inds[camera.uid] = i
+    camera_inds_back[i] = camera.uid
 
 images = []
 psnrs = [[]]
@@ -177,6 +202,34 @@ fig.plot(xs, ys, width=100, height=20)
 fig.show()
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples)
+
+# ----- Initialize bilateral grid if enabled -----
+bil_grids = None
+bil_optimizer = None
+if args.use_bilateral_grid:
+    print("\nInitializing Bilateral Grid:")
+    print(f"- Grid shape: {args.bilateral_grid_shape}")
+    print(f"- Learning rate: {args.bilateral_grid_lr}")
+    print(f"- TV loss weight: {args.lambda_tv}")
+    bil_grids = BilateralGrid(
+        len(train_cameras),
+        grid_X=args.bilateral_grid_shape[0],
+        grid_Y=args.bilateral_grid_shape[1],
+        grid_W=args.bilateral_grid_shape[2],
+    ).to("cuda")
+    bil_optimizer = torch.optim.Adam([bil_grids.grids], lr=args.bilateral_grid_lr, eps=1e-15)
+    
+    # Create a chained scheduler with warmup like in gsplat
+    # First 1000 iterations: linear warmup from 1% to 100% of learning rate
+    # Then exponential decay to 1% of initial learning rate by the end of training
+    bil_warmup = LinearLR(bil_optimizer, start_factor=0.01, total_iters=1000)
+    bil_decay = ExponentialLR(bil_optimizer, gamma=0.01**(1.0/args.iterations))
+    bil_scheduler = ChainedScheduler([bil_warmup, bil_decay])
+    
+    print(f"- Number of grids: {len(train_cameras)}")
+    print("- Using LinearLR warmup + ExponentialLR decay scheduler")
+    print("Bilateral Grid initialized successfully!\n")
+# ------------------------------------------------
 
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
@@ -212,11 +265,56 @@ for iteration in progress_bar:
     # torch.cuda.synchronize()
     # print(f'render: {(time.time()-st)}')
     image = render_pkg['render'].clip(min=0, max=1)
+
+    # ----- Apply bilateral grid transformation if enabled -----
+    if args.use_bilateral_grid:
+        # Get camera ID for this viewpoint
+        camera_id = camera_inds[camera.uid]
+        
+        # Create normalized pixel coordinates [0,1]
+        h, w = image.shape[1], image.shape[2]
+        y_coords, x_coords = torch.meshgrid(
+            (torch.arange(h, device="cuda") + 0.5) / h,
+            (torch.arange(w, device="cuda") + 0.5) / w,
+            indexing="ij"
+        )
+        coords = torch.stack([x_coords, y_coords], dim=-1).reshape(-1, 2)
+        
+        # Reshape image for bilateral grid transformation
+        img_for_bil = image.permute(1, 2, 0).reshape(-1, 3)
+        
+        # Create image IDs tensor (all pixels have same image ID)
+        img_ids = torch.full((img_for_bil.shape[0],), camera_id, 
+                              device="cuda", dtype=torch.long)
+        
+        # Apply bilateral transformation
+        transformed = slice(bil_grids, coords, img_for_bil, img_ids)
+        
+        # Reshape back to original format
+        image = transformed["rgb"].reshape(h, w, 3).permute(2, 0, 1)
+    # --------------------------------------------------------
+
     l2_loss = ((target - image)**2).mean()
     reg = tet_optim.regularizer()
     ssim_loss = 1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))
     dl_loss = render_pkg['distortion_loss']
     loss = (1-args.lambda_ssim)*l2_loss + args.lambda_ssim*ssim_loss + reg + args.lambda_dist * dl_loss
+
+    mask = render_pkg['mask']
+    cc = render_pkg['normed_cc']
+    reg_perturb = compute_perturbation(model.indices, model.vertices, cc, render_pkg['density'],
+                                   mask, render_pkg['cc_sensitivity'],
+                                   tet_optim.vertex_lr, k=100, t=(1-0.005))
+    reg = args.lambda_noise * reg_perturb
+    loss = loss + reg
+
+    # ----- Add total variation loss for bilateral grid if enabled -----
+    tvloss = None
+    if args.use_bilateral_grid:
+        # Use the configurable lambda_tv parameter (default is 10.0)
+        tvloss = args.lambda_tv * total_variation_loss(bil_grids.grids)
+        loss += tvloss
+    # --------------------------------------------------------------
 
     st = time.time()
     loss.backward()
@@ -232,10 +330,32 @@ for iteration in progress_bar:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
+    # ----- Update bilateral grid if enabled -----
+    if args.use_bilateral_grid:
+        bil_optimizer.step()
+        bil_optimizer.zero_grad(set_to_none=True)
+        bil_scheduler.step()
+    # ------------------------------------------
+
     tet_optim.update_learning_rate(iteration)
 
     if do_sh_up:
         model.sh_up()
+
+    with torch.no_grad():
+        if iteration % 10 == 0:
+            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+            sample_image = render_pkg['render']
+            sample_image = sample_image.permute(1, 2, 0)
+            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+            video_writer.write(pad_image2even(sample_image))
+
+            # di = render_pkg['distortion_img'].detach().cpu().numpy()
+            # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
+            # imageio.imwrite('di.png', di)
+            # images.append(image)
+    # print(f'second: {(time.time()-st)}')
 
     if do_cloning:
         # collect data
@@ -251,13 +371,13 @@ for iteration in progress_bar:
             with torch.no_grad():
                 target = camera.original_image.cuda()
                 tet_grad, extras = render_err(target, camera, model, tile_size=args.tile_size, lambda_ssim=args.clone_lambda_ssim)
-                visible = extras['tet_count'] > 4
+                visible = extras['tet_count'] > args.min_tet_count
                 if args.p_norm > 10:
-                    # tet_rgbs_grad = torch.maximum(tet_grad / extras['tet_count'].clip(min=1), tet_rgbs_grad)
                     tet_rgbs_grad[visible] = torch.maximum(tet_grad, tet_rgbs_grad)[visible]
                 else:
                     tet_count += visible
                     tet_rgbs_grad[visible] = (tet_rgbs_grad + tet_grad.abs().clip(min=eps).pow(args.p_norm))[visible]
+                del tet_grad, extras
         torch.cuda.empty_cache()
         if args.p_norm < 10:
             tet_rgbs_grad = tet_rgbs_grad / tet_count.clip(min=1)
@@ -271,7 +391,7 @@ for iteration in progress_bar:
             tet_grad_color = torch.as_tensor(cmap(normalized_tensor.cpu().numpy())).float().cuda()
             _, features = model.get_cell_values(camera)
             tet_grad_color[:, 3] = features[:, 0]
-            render_pkg = render_alpha_blend_tiles_slang_raw(model.indices, model.vertices, None, sample_camera, cell_values=tet_grad_color)
+            render_pkg = render_constant_color(model.indices, model.vertices, None, sample_camera, cell_values=tet_grad_color)
 
             image = render_pkg['render']
             image = image.permute(1, 2, 0)
@@ -284,7 +404,6 @@ for iteration in progress_bar:
         with torch.no_grad():
             target = target_num((iteration - args.densify_start) // args.densify_interval + 1)
             target_addition = target - model.vertices.shape[0]
-            print(target_addition, (iteration - args.densify_start) // args.densify_interval + 1, target)
             if target_addition > 0:
                 rgbs_threshold = torch.sort(tet_rgbs_grad).values[-min(int(target_addition), tet_rgbs_grad.shape[0])]
                 clone_mask = (tet_rgbs_grad > rgbs_threshold)
@@ -293,21 +412,22 @@ for iteration in progress_bar:
                 binary_color[clone_mask, 0] = normalized_tensor[clone_mask]
                 binary_color[~clone_mask, 1] = normalized_tensor[~clone_mask]
                 binary_color[:, 3] = tet_grad_color[:, 3]
-                render_pkg = render_alpha_blend_tiles_slang_raw(model.indices, model.vertices, None, sample_camera, min_t=min_t, cell_values=binary_color)
+                render_pkg = render_constant_color(model.indices, model.vertices, None, sample_camera, min_t=min_t, cell_values=binary_color)
                 image = render_pkg['render']
                 binary_im = (image.permute(1, 2, 0)*255).clip(min=0, max=255).cpu().numpy().astype(np.uint8)
                 imageio.imwrite(args.output_path / f'densify{iteration}.png', binary_im)
 
                 clone_indices = model.indices[clone_mask]
 
-                tet_optim.split(clone_indices, args.split_mode)
+                tet_optim.split(clone_indices, args.split_mode, args.prune_alpha_thres)
 
 
                 out = f"#RGBS Clone: {(tet_rgbs_grad > rgbs_threshold).sum()} "
                 out += f"∇RGBS: {tet_rgbs_grad.mean()} "
                 out += f"target_addition: {target_addition} "
                 print(out)
-                torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
 
     psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
     psnrs[-1].append(psnr)
@@ -325,22 +445,6 @@ for iteration in progress_bar:
     if do_delaunay:
         st = time.time()
         model.update_triangulation()
-
-    # st = time.time()
-    with torch.no_grad():
-        if iteration % 10 == 0:
-            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-            sample_image = render_pkg['render']
-            sample_image = sample_image.permute(1, 2, 0)
-            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-            video_writer.write(pad_image2even(sample_image))
-
-            # di = render_pkg['distortion_img'].detach().cpu().numpy()
-            # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
-            # imageio.imwrite('di.png', di)
-            # images.append(image)
-    # print(f'second: {(time.time()-st)}')
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 video_writer.release()

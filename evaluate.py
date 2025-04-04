@@ -27,7 +27,7 @@ if args.use_ply:
     from models.tet_color import Model
     model = Model.load_ply(args.output_path / "ckpt.ply", device)
 else:
-    from models.ingp_density import Model
+    from models.ingp_color import Model
     model = Model.load_ckpt(args.output_path, device)
 
 # model.light_offset = -1
@@ -48,3 +48,4 @@ with torch.no_grad():
 
 mediapy.write_video(args.output_path / "rotating.mp4", eimages)
 test_util.evaluate_and_save(model, test_cameras, args.output_path, args.tile_size, min_t=model.min_t)
+model.save2ply(Path('test.ply'))
