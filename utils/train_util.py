@@ -12,6 +12,7 @@ from utils import topo_utils, train_util
 from icecream import ic
 import math
 from utils.contraction import contraction_jacobian
+from utils.graphics_utils import l2_normalize_th
 
 def sample_uniform_in_sphere(batch_size, dim, radius=1.0, device=None):
     """
@@ -52,8 +53,12 @@ class ClippedGradients(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         lr_matrix, = ctx.saved_tensors
-        grad_output = torch.maximum(-lr_matrix.abs(), torch.minimum(lr_matrix.abs(), grad_output))
-        return grad_output, None
+        grad_norm = torch.linalg.norm(grad_output, dim=-1, keepdim=True)
+        # grad_output = torch.maximum(-lr_matrix.abs(), torch.minimum(lr_matrix.abs(), grad_output))
+        shape = grad_norm.shape
+        clipped_grad_norm = grad_norm.clip(-lr_matrix.abs().reshape(*shape), lr_matrix.abs().reshape(*shape))
+        return l2_normalize_th(grad_output) * clipped_grad_norm, None
+        # return grad_output, None
 
 class ScaledGradients(torch.autograd.Function):
     @staticmethod
@@ -181,21 +186,11 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
             normed_cc, cell_values[mask] = model.get_cell_values(camera, mask)
         else:
             normed_cc, cell_values = model.get_cell_values(camera)
-    # vertex_color, cell_values = model.get_cell_values(camera)
-    # cell_values = model.get_cell_values(camera)
     with torch.no_grad():
         tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask], model.vertices, normed_cc)
-        # J = contraction_jacobian(normed_cc)
-        # ic(J.shape)
-        # J_d = torch.linalg.det(J).abs()
-        # scaling = J_d * clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
-        scaling = clip_multi/sensitivity.reshape(-1, 1).clip(min=1)
+        scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1)
     vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
 
-    # vs_tetra.retain_grad()
-    # tet_vertices = vertices[model.indices]
-    # verts_trans = point2image(model.vertices, world_view_transform, K, cam_pos)
-    # st = time.time()
     image_rgb, distortion_img = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
         tile_ranges,
@@ -211,16 +206,9 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         min_t,
         camera.fovy,
         camera.fovx)
-    # alpha = 1-image_rgb.permute(2,0,1)[3, ...]
-    # ic(alpha.min(), alpha.max())
     total_density = distortion_img[:, :, 2].clip(min=1e-6)
-    distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)# / alpha.clip(min=1e-3)
-    # ic(distortion_img)
-    # torch.cuda.synchronize()
-    # dt2 = (time.time() - st)
-    # print(dt1, dt2, 1/(dt1+dt2))
-    # image_rgb = image_rgb + (1-image_rgb[..., 3:4]) * bg * torch.rand_like(image_rgb)
-    # ic(distortion_loss.mean(), distortion_loss.max())
+    distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
+    # ic(sensitivity.min(), sensitivity.max(), distortion_img.mean(dim=0).mean(dim=0), cell_values.min(), vertices.min())
     
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
@@ -251,7 +239,7 @@ def compute_perturbation(indices, vertices, cc, density, mask, cc_sensitivity, l
     
     # Compute the maximum possible alpha using the largest edge length
     alpha = 1 - torch.exp(-density[mask].reshape(-1, 1) * edge_lengths.reshape(-1, 1))
-    perturb = lr * torch.sigmoid(-k*(alpha - t)) / cc_sensitivity.reshape(-1, 1) * torch.randn((inds.shape[0], 3), device=device)
+    perturb = lr * torch.sigmoid(-k*(alpha - t)) * cc_sensitivity.reshape(-1, 1) * torch.randn((inds.shape[0], 3), device=device)
     # perturb = lr * torch.sigmoid(-k*(alpha - t)) * torch.randn((inds.shape[0], 3), device=device)
     target = cc - perturb
     return torch.linalg.norm(cc - target.detach(), dim=-1).mean()

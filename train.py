@@ -38,6 +38,9 @@ from delaunay_rasterization.internal.alphablend_tiled_slang import render_consta
 from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
 from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import pyvista as pv
 
 
 torch.set_num_threads(1)
@@ -100,6 +103,7 @@ args.L = 10
 args.density_offset = -4
 args.weight_decay = 0.01
 args.hashmap_dim = 4
+args.grad_clip = 1e-2
 
 # Vertex Settings
 args.lr_delay = 50
@@ -110,7 +114,7 @@ args.max_steps = 30000
 args.vertices_lr_delay_multi = 1e-8
 args.vertices_beta = [0.9, 0.99]
 args.contract_vertices = False
-args.clip_multi = 50
+args.clip_multi = 50.0
 args.delaunay_start = 17000
 args.freeze_start = 25000
 
@@ -234,6 +238,7 @@ if args.use_bilateral_grid:
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
+cc_locations = []
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for iteration in progress_bar:
@@ -318,6 +323,7 @@ for iteration in progress_bar:
 
     st = time.time()
     loss.backward()
+    # tet_optim.clip_gradient(args.grad_clip)
 
     tet_optim.main_step()
     tet_optim.main_zero_grad()
@@ -327,6 +333,10 @@ for iteration in progress_bar:
         tet_optim.sh_optim.zero_grad()
 
     if do_delaunay:
+        circumcenters = model.get_circumcenters()
+        cc_locations.append(
+            model.contract(circumcenters.detach()).cpu().numpy()
+        )
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
@@ -448,6 +458,65 @@ for iteration in progress_bar:
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 video_writer.release()
+
+
+
+def pad_point_clouds(cc_locations):
+    """
+    Pads all frames in cc_locations to have the same number of points
+    as the frame with the maximum number of points, padding with zeros.
+
+    Parameters:
+        cc_locations (list or array): List/array of frames (num_frames, num_points, 3)
+
+    Returns:
+        np.ndarray: Padded cc_locations of shape (num_frames, max_num_points, 3)
+    """
+    max_num_points = max(frame.shape[0] for frame in cc_locations)
+
+    padded_frames = []
+    for frame in cc_locations:
+        num_points = frame.shape[0]
+        if num_points < max_num_points:
+            padding = np.zeros((max_num_points - num_points, 3))
+            padded_frame = np.vstack([frame, padding])
+        else:
+            padded_frame = frame
+
+        padded_frames.append(padded_frame)
+
+    return np.array(padded_frames)
+
+# cc_locations: (num_frames, num_points, 3) numpy array
+plotter = pv.Plotter()
+cc_locations = pad_point_clouds(cc_locations)
+points = cc_locations[0]
+
+# Initialize the scatter plot
+point_cloud = pv.PolyData(points)
+scatter = plotter.add_mesh(point_cloud, render_points_as_spheres=False, point_size=2.0)
+
+# Set consistent camera bounds
+plotter.set_background('white')
+plotter.show_bounds(bounds=(-2, 2, -2, 2, -2, 2))
+
+# Create and save the animation
+plotter.open_movie(str(args.output_path / 'circumcenters.mp4'), framerate=24)
+
+for i, frame in tqdm(enumerate(cc_locations)):
+    # Efficiently update points in-place
+    point_cloud.points = frame
+
+    # Update the text efficiently
+    plotter.add_text(f"Frame {i+1}/{len(cc_locations)}", position='upper_edge', font_size=12, name='frame_label')
+
+    # Write current frame
+    plotter.write_frame()
+
+    # Remove only the text (avoid clearing all actors)
+    plotter.remove_actor('frame_label')
+
+plotter.close()
 
 with (args.output_path / "alldata.json").open("w") as f:
     all_data = dict(**args.as_dict(), 

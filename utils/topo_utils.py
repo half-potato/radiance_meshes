@@ -8,16 +8,13 @@ from torch.autograd.functional import jacobian
 from icecream import ic
 from submodules.spectral_norm3 import compute_spectral_norm3
 from utils.contraction import contract_points, contraction_jacobian
+import math
 
 @torch.jit.script
 def project_points_to_tetrahedra(points, tets):
     """
-    Projects each point in `points` (shape (N, 3)) onto the corresponding tetrahedron in `tets` (shape (N, 4, 3))
-    by clamping negative barycentrics to zero and renormalizing them so that they sum to 1.
-
-    The barycentrics for a tetrahedron with vertices v0, v1, v2, v3 are computed as:
-      w0 = 1 - (x0+x1+x2)
-      w1, w2, w3 = x0, x1, x2, where x solves T x = (p - v0) with T = [v1-v0, v2-v0, v3-v0]
+    points: (N, 3)
+    tets: (N, 4, 3)
     """
     v0 = tets[:, 0, :]             # shape (N, 3)
     T = tets[:, 1:, :] - v0.unsqueeze(1)  # shape (N, 3, 3)
@@ -422,6 +419,8 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor,
     tetra_points = vertices[indices]  # Shape: (M, 4, 3)
     a = tetra_points[..., 1:, :] - tetra_points[..., 0:1, :]  # Shape: (3, 3)
 
+    # tetra_radius = torch.linalg.norm(tetra_points - normalized_circumcenter.reshape(-1, 1, 3), dim=-1).max(dim=-1).values.float()
+
     # Compute Jacobian of circumcenters (M, 3, 4, 3)
     # jacobian_matrix = compute_circumsphere_jacobian(tetra_points)
     # jacobian_matrix_sens = (torch.linalg.norm(jacobian_matrix, dim=-1)+1e-5)**2
@@ -435,7 +434,15 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor,
     # J_d is lower the further from the center it is.
     # sensitivity is lower the further we are from the origin
     # Then, divide by the spectral norm, because we actually find the min eigen value for A, instead of max eigen of A^-1
-    jacobian_matrix_sens = J_d.clip(min=1e-5)/compute_spectral_norm3(a).clip(min=1e-5)
+    # jacobian_matrix_sens = J_d.clip(min=1e-3)/compute_spectral_norm3(a).clip(min=1e-5)
+    sp_norm = compute_spectral_norm3(a)
+    # this is true if the circumcenter is not on the outside
+    # sp_norm[~border] = sp_norm.clip(max=tetra_radius)[~border]
+    # sp_norm = sp_norm.clip(max=tetra_radius)
+    # I need to clip the sp_norm 
+    jacobian_matrix_sens = J_d.clip(min=1e-5)*sp_norm.clip(min=1e-5)
+    # jacobian_matrix_sens = sp_norm.clip(min=1e-5)
+    # jacobian_matrix_sens = sp_norm.clip(min=1e-5)
     num_vertices = vertices.shape[0]
 
     vertex_sensitivity = torch.full((num_vertices,), 0.0, device=vertices.device)
@@ -449,3 +456,40 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor,
     vertex_sensitivity.scatter_reduce_(dim=0, index=indices[..., 3], src=jacobian_matrix_sens, reduce=reduce_type)
 
     return jacobian_matrix_sens, vertex_sensitivity.reshape(num_vertices, -1)
+
+def fibonacci_spiral_on_sphere(n_points: int, 
+                               radius: float = 1.0, 
+                               device: str = 'cpu') -> torch.Tensor:
+    """
+    Generate points on a sphere (approximately evenly) via a Fibonacci spiral.
+
+    Args:
+        n_points (int): Number of points to generate on the sphere.
+        radius (float): Radius of the sphere. Default = 1.0 (unit sphere).
+        device (str): PyTorch device (e.g., 'cpu' or 'cuda'). Default = 'cpu'.
+
+    Returns:
+        torch.Tensor: A (n_points x 3) tensor of 3D coordinates on the sphere.
+    """
+    # Golden angle in radians
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))  # ~2.39996323
+
+    # Create an index tensor [0, 1, 2, ..., n_points-1]
+    idx = torch.arange(n_points, device=device, dtype=torch.float)
+
+    # y ranges from +1 to -1
+    y = 1.0 - (idx * 2.0 / (n_points - 1.0))
+    # Radius in the plane for each y
+    r = torch.sqrt(1.0 - y * y)
+
+    # Fibonacci spiral angle
+    theta = golden_angle * idx
+
+    # Project to Cartesian coordinates
+    x = r * torch.cos(theta)
+    z = r * torch.sin(theta)
+
+    # Stack into an (n_points x 3) tensor and scale by 'radius'
+    points = torch.stack([x, y, z], dim=1) * radius
+
+    return points

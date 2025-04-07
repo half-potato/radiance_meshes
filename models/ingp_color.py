@@ -4,15 +4,12 @@ import math
 from data.camera import Camera
 from utils import optim
 from sh_slang.eval_sh import eval_sh
-# from delaunay_rasterization.internal.alphablend_tiled_slang import AlphaBlendTiledRender, render_alpha_blend_tiles_slang_raw
-# from delaunay_rasterization.internal.render_grid import RenderGrid
-# from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
 from utils.train_util import RGB2SH
 import tinycudann as tcnn
-from utils.topo_utils import calculate_circumcenters_torch, project_points_to_tetrahedra
+from utils.topo_utils import calculate_circumcenters_torch, project_points_to_tetrahedra, fibonacci_spiral_on_sphere
 from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin, remove_zero, safe_arctan2
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
@@ -124,6 +121,7 @@ class iNGPDW(nn.Module):
         n = torch.arange(self.L, device=x.device).reshape(1, 1, -1)
         erf_x = safe_div(torch.tensor(1.0, device=x.device), safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
         scaling = torch.erf(erf_x)
+        # ic(scaling.mean(dim=0), output.mean(dim=0))
 
         output = output * scaling
         # output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
@@ -133,6 +131,7 @@ class iNGPDW(nn.Module):
 class Model(nn.Module):
     def __init__(self,
                  vertices: torch.Tensor,
+                 ext_vertices: torch.Tensor,
                  vertex_lights: torch.Tensor,
                  center: torch.Tensor,
                  scene_scaling: float,
@@ -157,6 +156,7 @@ class Model(nn.Module):
 
         self.vertex_lights = nn.Parameter(vertex_lights)
 
+        self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
         self.contract_vertices = contract_vertices
@@ -165,6 +165,11 @@ class Model(nn.Module):
         else:
             self.contracted_vertices = nn.Parameter(vertices.detach())
         self.update_triangulation()
+
+    def get_circumcenters(self):
+        circumcenter, cv, cr, normalized =  pre_calc_cell_values(
+            self.vertices, self.indices, self.center, self.scene_scaling)
+        return cv
 
     def get_cell_values(self, camera: Camera, mask=None,
                         circumcenters=None, radii=None):
@@ -187,6 +192,10 @@ class Model(nn.Module):
             dvrgbs = activate_output(output, indices[start:end],
                                      vertex_color_raw, circumcenters,
                                      vertices, self.density_offset)
+            # ic(output.max(dim=0).values, output.min(dim=0).values, dvrgbs.max(dim=0).values, dvrgbs.min(dim=0).values,
+            #    vertex_color_raw.max(dim=0))
+
+            # ic(output.mean(dim=0), normalized.mean(dim=0), vertex_color_raw.mean(dim=0), dvrgbs.mean(dim=0))
             normed_cc.append(normalized)
             outputs.append(dvrgbs)
         features = torch.cat(outputs, dim=0)
@@ -219,12 +228,14 @@ class Model(nn.Module):
 
         # add sphere
         pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
-        x = l2_normalize_th(torch.randn((1000, 3))) * 1.2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
-        vertices = torch.cat([vertices, x], dim=0)
-        vertex_lights = torch.zeros((vertices.shape[0], ((num_lights+1)**2-1)*3)).to(device)
+        num_ext = 1000
+        # ext_vertices = l2_normalize_th(torch.randn((num_ext, 3))) * 2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
+
+        ext_vertices = fibonacci_spiral_on_sphere(num_ext, 2* pcd_scaling.cpu(), device='cpu') + center.reshape(1, 3).cpu()
+        vertex_lights = torch.zeros((vertices.shape[0] + num_ext, ((num_lights+1)**2-1)*3)).to(device)
 
         vertices = nn.Parameter(vertices.cuda())
-        model = Model(vertices, vertex_lights, center, scaling, **kwargs)
+        model = Model(vertices, ext_vertices, vertex_lights, center, scaling, **kwargs)
         return model
 
     def compute_batch_features(self, vertices, indices, start, end):
@@ -248,7 +259,8 @@ class Model(nn.Module):
         temp = config.contract_vertices
         config.contract_vertices = False
         lights = ckpt['vertex_lights']
-        model = Model(vertices.to(device), lights, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
+        ext_vertices = ckpt['ext_vertices']
+        model = Model(vertices.to(device), ext_vertices, lights, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
         model.contract_vertices = temp
         model.min_t = model.scene_scaling * config.base_min_t
@@ -379,9 +391,10 @@ class Model(nn.Module):
     @property
     def vertices(self):
         if self.contract_vertices:
-            return self.inv_contract(self.contracted_vertices)
+            verts = self.inv_contract(self.contracted_vertices)
         else:
-            return self.contracted_vertices
+            verts = self.contracted_vertices
+        return torch.cat([verts, self.ext_vertices])
 
     def sh_up(self):
         self.max_lights = min(self.num_lights, self.max_lights+1)
@@ -389,7 +402,7 @@ class Model(nn.Module):
     def update_triangulation(self, alpha_threshold=0.05/255):
         verts = self.vertices
         v = Del(verts.shape[0])
-        indices_np, prev = v.compute(verts.detach().cpu())
+        indices_np, prev = v.compute(verts.detach().cpu().double())
         indices_np = indices_np.numpy()
         indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
         
@@ -493,6 +506,7 @@ class TetOptimizer:
         self.model.update_triangulation()
 
     def remove_points(self, mask: torch.Tensor):
+        mask = mask[:self.model.contracted_vertices.shape[0]]
         new_tensors = self.optim.prune_optimizer(mask)
         self.model.contracted_vertices = self.vertex_optim.prune_optimizer(mask)['contracted_vertices']
         self.model.update_triangulation()
@@ -536,6 +550,10 @@ class TetOptimizer:
     @property
     def sh_optim(self):
         return self.lights_optim
+
+    def clip_gradient(self, grad_clip):
+        for module in self.model.backbone.encoding.embeddings:
+            torch.nn.utils.clip_grad_norm_(module.parameters(), grad_clip, error_if_nonfinite=True)
 
     def regularizer(self):
         return self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
