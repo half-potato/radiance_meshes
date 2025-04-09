@@ -1,0 +1,10 @@
+dataset_path
+/optane/nerf_datasets/360/bicycle
+/optane/nerf_datasets/360/garden
+/optane/nerf_datasets/360/room
+/optane/nerf_datasets/360/counter
+/optane/nerf_datasets/360/kitchen
+/optane/nerf_datasets/360/stump
+/optane/nerf_datasets/360/bonsai
+/optane/nerf_datasets/360/treehill
+/optane/nerf_datasets/360/flowers

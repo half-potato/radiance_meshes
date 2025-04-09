@@ -42,7 +42,7 @@ def calculate_circumcenters_torch(vertices: torch.Tensor):
     cross_ab = torch.cross(a, b, dim=-1)
 
     # Compute denominator
-    denominator = 2.0 * torch.sum(a * cross_bc, dim=-1, keepdim=True)
+    denominator = 2.0 * torch.sum(a * cross_bc, dim=-1, keepdim=True) + 1e-3
 
     # Create mask for small denominators
     mask = torch.abs(denominator) < 1e-6
@@ -137,7 +137,7 @@ v = Del(points_cpu.shape[0])
 indices, prev = v.compute(points_cpu)
 mask = (indices < points_cpu.shape[0]).all(axis=1)
 indices = torch.as_tensor(indices[mask])
-border = prev.get_boundary_tets(points_cpu)
+border = prev.get_boundary_tets(points_cpu.double())
 border_mask = torch.zeros_like(torch.as_tensor(mask))
 border_mask[border] = True
 border_mask = border_mask[mask]
@@ -171,7 +171,7 @@ for i in range(M):
     # delaunay = Delaunay(points_cpu)
     # indices = torch.tensor(delaunay.simplices, device=vertices.device).int()
     v = Del(points_cpu.shape[0])
-    indices, prev = v.compute(points_cpu)
+    indices, prev = v.compute(points_cpu.double())
     mask = (indices < points_cpu.shape[0]).all(axis=1)
     indices = indices[mask]
     border = prev.get_boundary_tets(points_cpu)

@@ -226,7 +226,7 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
     return render_pkg
 
 @torch.jit.script
-def compute_v_perturbation(indices, vertices, cc, density, mask, cc_sensitivity, lr:float, k:float=100, t:float=(1-0.005)):
+def compute_alpha(indices, vertices, density, mask):
     inds = indices[mask]
     verts = vertices
     device = verts.device
@@ -239,6 +239,12 @@ def compute_v_perturbation(indices, vertices, cc, density, mask, cc_sensitivity,
     
     # Compute the maximum possible alpha using the largest edge length
     alpha = 1 - torch.exp(-density[mask].reshape(-1, 1) * edge_lengths.reshape(-1, 1))
+    return alpha
+
+@torch.jit.script
+def compute_v_perturbation(inds, verts, cc, alpha, mask, cc_sensitivity, lr:float, k:float=100, t:float=(1-0.005)):
+    inds = inds[mask]
+    device = verts.device
     tet_perturb = lr * torch.sigmoid(-k*(alpha - t)) * cc_sensitivity.reshape(-1, 1) * torch.randn((inds.shape[0], 3), device=device)
     # tet_perturb = lr * torch.sigmoid(-k*(alpha - t)) * torch.randn((inds.shape[0], 3), device=device)
     v_perturb = torch.full((verts.shape[0],3), 0.0, device=device)

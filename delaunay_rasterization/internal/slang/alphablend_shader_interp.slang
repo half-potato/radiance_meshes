@@ -98,8 +98,8 @@ DistortionState5 update_distortion_state(
 {
     // float start = tukey_power_ladder(dist.x*pre_multi, ladder_p);
     // float end = tukey_power_ladder(dist.y*pre_multi, ladder_p);
-    no_diff float start = dist.x;//tukey_power_ladder(dist.x*pre_multi, ladder_p);
-    no_diff float end = dist.y;  // tukey_power_ladder(dist.y*pre_multi, ladder_p);
+    float start = dist.x;//tukey_power_ladder(dist.x*pre_multi, ladder_p);
+    float end = dist.y;  // tukey_power_ladder(dist.y*pre_multi, ladder_p);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
     float d = density;
 

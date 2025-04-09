@@ -36,10 +36,10 @@ def generate_folder_name(test_params, base_dir="output"):
     # Construct the full path inside the base directory.
     full_path = os.path.join(base_dir, folder_name)
     # If the folder already exists, append a short random suffix to ensure uniqueness.
-    if os.path.exists(full_path):
-        suffix = uuid.uuid4().hex[:6]
-        folder_name = folder_name + "_" + suffix
-        full_path = os.path.join(base_dir, folder_name)
+    # if os.path.exists(full_path):
+    #     suffix = uuid.uuid4().hex[:6]
+    #     folder_name = folder_name + "_" + suffix
+    #     full_path = os.path.join(base_dir, folder_name)
     return full_path
 
 def run_test(test_params, gpu_id):
@@ -56,7 +56,7 @@ def run_test(test_params, gpu_id):
     os.makedirs(output_folder, exist_ok=True)
     
     # Base command with GPU assignment and script name.
-    base_command = f"CUDA_VISIBLE_DEVICES={gpu_id} python nerf_test.py"
+    base_command = f"CUDA_VISIBLE_DEVICES={gpu_id} python train.py --eval "
     
     # Build command-line arguments. Override any CSV-specified output_path with our unique folder.
     cmd_args = []
@@ -70,7 +70,7 @@ def run_test(test_params, gpu_id):
     command = f"{base_command} " + " ".join(cmd_args)
     print(f"Running on GPU {gpu_id}: {command}")
     
-    json_file = os.path.join(output_folder, "alldata.json")
+    json_file = os.path.join(output_folder, "results.json")
     # Attempt to run the command. If it fails, still try to read the JSON output.
     try:
         subprocess.run(command, shell=True, check=True)

@@ -1,0 +1,10 @@
+output_folder,gpu_id,dataset_path,error
+output/dp/optane/nerf_datasets/360/room,3,/optane/nerf_datasets/360/room,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/bicycle,1,/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/garden,2,/optane/nerf_datasets/360/garden,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/stump,3,/optane/nerf_datasets/360/stump,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/counter,1,/optane/nerf_datasets/360/counter,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/kitchen,2,/optane/nerf_datasets/360/kitchen,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/treehill,2,/optane/nerf_datasets/360/treehill,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/flowers,3,/optane/nerf_datasets/360/flowers,Process failed and no JSON output file found
+output/dp/optane/nerf_datasets/360/bonsai,1,/optane/nerf_datasets/360/bonsai,Process failed and no JSON output file found

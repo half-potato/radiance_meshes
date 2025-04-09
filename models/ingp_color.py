@@ -8,7 +8,6 @@ from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
 from utils.train_util import RGB2SH
-import tinycudann as tcnn
 from utils.topo_utils import calculate_circumcenters_torch, project_points_to_tetrahedra, fibonacci_spiral_on_sphere
 from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin, remove_zero, safe_arctan2
 from utils.contraction import contract_mean_std
@@ -115,6 +114,7 @@ class iNGPDW(nn.Module):
 
     def forward(self, x, cr):
         # output = checkpoint(self.encoding, x, use_reentrant=True).float()
+        x = x.detach()
         output = self.encoding(x).float()
         output = output.reshape(-1, self.dim, self.L)
         cr = cr.float() * self.scale_multi
@@ -448,6 +448,7 @@ class TetOptimizer:
                  split_std: float = 0.5,
                  lights_lr: float=1e-4,
                  lr_delay: int = 500,
+                 max_steps: int = 10000,
                  vert_lr_delay: int = 500,
                  **kwargs):
         self.weight_decay = weight_decay
@@ -456,7 +457,7 @@ class TetOptimizer:
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], eps=1e-15)
         self.net_optim = optim.CustomAdam([
             {"params": model.backbone.network.parameters(), "lr": network_lr, "name": "network"},
-        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], weight_decay=net_weight_decay)
+        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99])
         self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
@@ -474,17 +475,17 @@ class TetOptimizer:
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=10000)
+                                                max_steps=max_steps)
         self.encoder_scheduler_args = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=10000)
+                                                max_steps=max_steps)
         self.vertex_lr = self.vert_lr_multi*vertices_lr
         self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vertex_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
-                                                max_steps=10000,
+                                                max_steps=max_steps,
                                                 lr_delay_steps=vert_lr_delay)
 
     def update_learning_rate(self, iteration):

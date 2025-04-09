@@ -144,6 +144,7 @@ def evaluate_and_save(model, test_cameras, output_path, tile_size, min_t):
     # Initialize LPIPS
     lpips_eval = LPIPSEval(net_type='vgg', device='cuda')
     
+    short_results = {}
     results = {}
     for split, cameras in zip(['test'], [test_cameras]):
         renders, gts = [], []
@@ -178,11 +179,17 @@ def evaluate_and_save(model, test_cameras, output_path, tile_size, min_t):
                 # Save per-image metrics
                 results[f"{split}_{idx:04d}"] = {"SSIM": ssim_val, "PSNR": psnr_val, "LPIPS": lpips_val}
         
-        # Compute mean metrics
-        results[f"{split}_mean"] = {
+        means = {
             "SSIM": torch.tensor(ssims).mean().item(),
             "PSNR": torch.tensor(psnrs).mean().item(),
             "LPIPS": torch.tensor(lpipss).mean().item()
+        }
+        # Compute mean metrics
+        results[f"{split}_mean"] = means
+        short_results = {**short_results,
+            f"{split}_SSIM": torch.tensor(ssims).mean().item(),
+            f"{split}_PSNR": torch.tensor(psnrs).mean().item(),
+            f"{split}_LPIPS": torch.tensor(lpipss).mean().item()
         }
         
         print(f"{split.upper()} SET METRICS:")
@@ -196,3 +203,4 @@ def evaluate_and_save(model, test_cameras, output_path, tile_size, min_t):
         json.dump(results, f, indent=4)
     
     print(f"Metrics saved to {os.path.join(output_path, 'metrics.json')}")
+    return short_results

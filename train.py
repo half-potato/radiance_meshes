@@ -83,8 +83,8 @@ args.ckpt = ""
 
 # Light Settings
 args.light_offset = -3
-args.lights_lr = 1e-4
-args.final_lights_lr = 1e-4
+args.lights_lr = 5e-3
+args.final_lights_lr = 5e-3
 args.color_lr = 1e-2
 args.final_color_lr = 1e-2
 args.num_lights = 2
@@ -92,9 +92,9 @@ args.sh_interval = 1000
 
 # iNGP Settings
 args.encoding_lr = 3e-3
-args.final_encoding_lr = 3e-4
+args.final_encoding_lr = 3e-3
 args.network_lr = 3e-4
-args.final_network_lr = 3e-4
+args.final_network_lr = 3e-5
 args.hidden_dim = 64
 args.scale_multi = 1.0
 args.log2_hashmap_size = 22
@@ -114,7 +114,7 @@ args.max_steps = 30000
 args.vertices_lr_delay_multi = 1e-8
 args.vertices_beta = [0.9, 0.99]
 args.contract_vertices = False
-args.clip_multi = 50.0
+args.clip_multi = 1e-3
 args.delaunay_start = 17000
 args.freeze_start = 25000
 
@@ -130,18 +130,18 @@ args.split_std = 0.1
 args.split_mode = "barycentric"
 args.clone_schedule = "quadratic"
 args.min_tet_count = 4
-args.prune_alpha_thres = 1/255
+args.prune_alpha_thres = 0
 args.densify_start = 2000
-args.densify_end = 15000
+args.densify_end = 8000
 args.num_samples = 200
 args.densify_interval = 500
 args.budget = 2_000_000
-args.lambda_noise = 1e-2
+args.lambda_noise = 5e9
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.01
-args.sample_cam = 4
-args.data_device = 'cuda'
+args.sample_cam = 1
+args.data_device = 'cpu'
 
 # Bilateral grid arguments
 # Bilateral grid parameters
@@ -313,14 +313,17 @@ for iteration in progress_bar:
         loss += tvloss
     # --------------------------------------------------------------
 
+    mask = render_pkg['mask']
     st = time.time()
+    alphas = compute_alpha(model.indices, model.vertices, render_pkg['density'], mask)
+    # loss += args.alphas.mean()
+
     loss.backward()
     # tet_optim.clip_gradient(args.grad_clip)
 
-    mask = render_pkg['mask']
     cc = render_pkg['normed_cc']
     v_perturb = compute_v_perturbation(
-        model.indices, model.vertices, cc, render_pkg['density'],
+        model.indices, model.vertices, cc, alphas,
         mask, render_pkg['cc_sensitivity'],
         tet_optim.vertex_lr, k=100, t=(1-0.005))
     model.perturb_vertices(v_perturb)
@@ -487,42 +490,36 @@ def pad_point_clouds(cc_locations):
 
     return np.array(padded_frames)
 
-# cc_locations: (num_frames, num_points, 3) numpy array
-plotter = pv.Plotter()
-cc_locations = pad_point_clouds(cc_locations)
-points = cc_locations[0]
+# # cc_locations: (num_frames, num_points, 3) numpy array
+# plotter = pv.Plotter()
+# cc_locations = pad_point_clouds(cc_locations)
+# points = cc_locations[0]
 
-# Initialize the scatter plot
-point_cloud = pv.PolyData(points)
-scatter = plotter.add_mesh(point_cloud, render_points_as_spheres=False, point_size=2.0)
+# # Initialize the scatter plot
+# point_cloud = pv.PolyData(points)
+# scatter = plotter.add_mesh(point_cloud, render_points_as_spheres=False, point_size=2.0)
 
-# Set consistent camera bounds
-plotter.set_background('white')
-plotter.show_bounds(bounds=(-2, 2, -2, 2, -2, 2))
+# # Set consistent camera bounds
+# plotter.set_background('white')
+# plotter.show_bounds(bounds=(-2, 2, -2, 2, -2, 2))
 
-# Create and save the animation
-plotter.open_movie(str(args.output_path / 'circumcenters.mp4'), framerate=24)
+# # Create and save the animation
+# plotter.open_movie(str(args.output_path / 'circumcenters.mp4'), framerate=24)
 
-for i, frame in tqdm(enumerate(cc_locations)):
-    # Efficiently update points in-place
-    point_cloud.points = frame
+# for i, frame in tqdm(enumerate(cc_locations)):
+#     # Efficiently update points in-place
+#     point_cloud.points = frame
 
-    # Update the text efficiently
-    plotter.add_text(f"Frame {i+1}/{len(cc_locations)}", position='upper_edge', font_size=12, name='frame_label')
+#     # Update the text efficiently
+#     plotter.add_text(f"Frame {i+1}/{len(cc_locations)}", position='upper_edge', font_size=12, name='frame_label')
 
-    # Write current frame
-    plotter.write_frame()
+#     # Write current frame
+#     plotter.write_frame()
 
-    # Remove only the text (avoid clearing all actors)
-    plotter.remove_actor('frame_label')
+#     # Remove only the text (avoid clearing all actors)
+#     plotter.remove_actor('frame_label')
 
-plotter.close()
-
-with (args.output_path / "alldata.json").open("w") as f:
-    all_data = dict(**args.as_dict(), 
-        psnr = avged_psnrs[-1] if len(avged_psnrs) > 0 else 0,
-    )
-    json.dump(all_data, f, cls=CustomEncoder)
+# plotter.close()
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
@@ -541,4 +538,18 @@ mediapy.write_video(args.output_path / "rotating.mp4", eimages)
 model.save2ply(args.output_path / "ckpt.ply")
 torch.save(model.state_dict(), args.output_path / "ckpt.pth")
 
-test_util.evaluate_and_save(model, test_cameras, args.output_path, args.tile_size, min_t)
+results = test_util.evaluate_and_save(model, test_cameras, args.output_path, args.tile_size, min_t)
+
+with (args.output_path / "results.json").open("w") as f:
+    all_data = dict(
+        psnr = avged_psnrs[-1] if len(avged_psnrs) > 0 else 0,
+        **results
+    )
+    json.dump(all_data, f, cls=CustomEncoder)
+
+with (args.output_path / "alldata.json").open("w") as f:
+    all_data = dict(**args.as_dict(), 
+        psnr = avged_psnrs[-1] if len(avged_psnrs) > 0 else 0,
+        **results
+    )
+    json.dump(all_data, f, cls=CustomEncoder)
