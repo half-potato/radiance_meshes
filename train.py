@@ -91,10 +91,10 @@ args.num_lights = 2
 args.sh_interval = 1000
 
 # iNGP Settings
-args.encoding_lr = 3e-3
-args.final_encoding_lr = 3e-3
-args.network_lr = 3e-4
-args.final_network_lr = 3e-5
+args.encoding_lr = 1e-3
+args.final_encoding_lr = 1e-3
+args.network_lr = 5e-5
+args.final_network_lr = 5e-6
 args.hidden_dim = 64
 args.scale_multi = 1.0
 args.log2_hashmap_size = 22
@@ -131,7 +131,7 @@ args.split_std = 0.1
 args.split_mode = "split_point"
 args.clone_schedule = "quadratic"
 args.min_tet_count = 4
-args.prune_alpha_thres = 0
+args.prune_alpha_thres = 0.0
 args.densify_start = 2000
 args.densify_end = 8000
 args.num_samples = 200
@@ -242,6 +242,8 @@ video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_F
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
 # cc_locations = []
+vert_alive = torch.ones((model.contracted_vertices.shape[0]), dtype=bool, device=device)
+
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for iteration in progress_bar:
@@ -272,6 +274,7 @@ for iteration in progress_bar:
 
     # torch.cuda.synchronize()
     # print(f'render: {(time.time()-st)}')
+    vert_alive |= render_pkg['vert_alive'][:vert_alive.shape[0]]
     image = render_pkg['render'].clip(min=0, max=1)
 
     # ----- Apply bilateral grid transformation if enabled -----
@@ -320,7 +323,7 @@ for iteration in progress_bar:
     cc = render_pkg['normed_cc']
     st = time.time()
     alphas = compute_alpha(model.indices, model.vertices, render_pkg['density'], mask)
-    loss += args.lambda_alpha * alphas.mean()
+    # loss += args.lambda_alpha * alphas.mean()
     loss.backward()
     # tet_optim.clip_gradient(args.grad_clip)
 
@@ -374,10 +377,8 @@ for iteration in progress_bar:
 
     if do_cloning:
         # collect data
-        tet_optim.optim.zero_grad()
-        tet_optim.vertex_optim.zero_grad()
-        tet_optim.sh_optim.zero_grad()
-
+        print(f"Culling {(~vert_alive).sum()} dead vertices")
+        tet_optim.remove_points(vert_alive)
 
         sampled_cameras = [train_cameras[i] for i in densification_sampler.nextids()]
         tet_moments = torch.zeros((model.indices.shape[0], 4), device=device)
@@ -400,9 +401,10 @@ for iteration in progress_bar:
             tet_moments = tet_moments / tet_count.clip(min=1)
 
         with torch.no_grad():
-            render_tensor = tet_moments[:, 3]
-            tensor_min, tensor_max = render_tensor.min(), render_tensor.max()
-            normalized_tensor = (render_tensor - tensor_min) / (tensor_max - tensor_min)
+            tet_err_weight = tet_moments[:, 3] + 0.1*model.tet_variability()
+            render_tensor = tet_err_weight
+            tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
+            normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
 
             # Convert to RGB (NxMx3) using the colormap
             tet_grad_color = torch.as_tensor(cmap(normalized_tensor.cpu().numpy())).float().cuda()
@@ -422,7 +424,6 @@ for iteration in progress_bar:
             target = target_num((iteration - args.densify_start) // args.densify_interval + 1)
             target_addition = target - model.vertices.shape[0]
             if target_addition > 0:
-                tet_err_weight = tet_moments[:, 3]
                 rgbs_threshold = torch.sort(tet_err_weight).values[-min(int(target_addition), tet_moments.shape[0])]
                 clone_mask = (tet_err_weight > rgbs_threshold)
 
@@ -447,6 +448,7 @@ for iteration in progress_bar:
                 print(out)
             gc.collect()
             torch.cuda.empty_cache()
+            vert_alive = torch.zeros((model.contracted_vertices.shape[0]), dtype=bool, device=device)
 
     psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
     psnrs[-1].append(psnr)

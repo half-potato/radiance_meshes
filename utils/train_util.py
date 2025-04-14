@@ -172,7 +172,6 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
                              tile_width=tile_size)
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         model.indices,
-        # scale_vertices,
         vertices,
         world_view_transform,
         K,
@@ -188,13 +187,14 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         else:
             normed_cc, cell_values = model.get_cell_values(camera, circumcenter)
         with torch.no_grad():
-            tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask], model.vertices, normed_cc)
+            tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask],
+                                                                          vertices, normed_cc)
             scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1)
-        vertices = train_util.ClippedGradients.apply(model.vertices, scaling)
+        vertices = train_util.ClippedGradients.apply(vertices, scaling)
         extras['normed_cc'] = normed_cc
         extras['cc_sensitivity'] = tet_sens
 
-    image_rgb, distortion_img = AlphaBlendTiledRender.apply(
+    image_rgb, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
         tile_ranges,
         model.indices,
@@ -211,8 +211,15 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         camera.fovx)
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
-    # ic(sensitivity.min(), sensitivity.max(), distortion_img.mean(dim=0).mean(dim=0), cell_values.min(), vertices.min())
+    vert_alive = torch.zeros((vertices.shape[0]), dtype=bool, device=device)
     
+    indices = model.indices.long()
+    reduce_type = "sum"
+    vert_alive.scatter_reduce_(dim=0, index=indices[..., 0], src=tet_alive, reduce=reduce_type)
+    vert_alive.scatter_reduce_(dim=0, index=indices[..., 1], src=tet_alive, reduce=reduce_type)
+    vert_alive.scatter_reduce_(dim=0, index=indices[..., 2], src=tet_alive, reduce=reduce_type)
+    vert_alive.scatter_reduce_(dim=0, index=indices[..., 3], src=tet_alive, reduce=reduce_type)
+
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
         'alpha': image_rgb.permute(2,0,1)[3, ...],
@@ -223,6 +230,7 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         'tet_area': tet_area,
         'density': cell_values[:, 0],
         'mask': mask,
+        'vert_alive': vert_alive,
         **extras
     }
     return render_pkg

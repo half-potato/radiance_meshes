@@ -71,6 +71,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     n_contributors = torch.zeros((render_grid.image_height, 
                                     render_grid.image_width, 1),
                                     dtype=torch.int32, device=device)
+    tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
 
     assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
         'Alpha Blend Shader was not compiled for this tile'
@@ -89,6 +90,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         output_img=output_img,
         distortion_img=distortion_img,
         n_contributors=n_contributors,
+        tet_alive=tet_alive,
         image_height=render_grid.image_height,
         image_width=render_grid.image_width,
         grid_height=render_grid.grid_height,

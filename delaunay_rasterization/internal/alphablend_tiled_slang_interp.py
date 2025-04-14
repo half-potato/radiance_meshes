@@ -22,6 +22,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                                       render_grid.image_width, 1),
                                      dtype=torch.int32, device=device)
 
+        tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
         assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
             'Alpha Blend Shader was not compiled for this tile'
             f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
@@ -39,6 +40,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             output_img=output_img,
             distortion_img=distortion_img,
             n_contributors=n_contributors,
+            tet_alive=tet_alive,
             image_height=render_grid.image_height,
             image_width=render_grid.image_width,
             grid_height=render_grid.grid_height,
@@ -76,10 +78,10 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         ctx.ladder_p = ladder_p
         ctx.pre_multi = pre_multi
 
-        return output_img, distortion_img
+        return output_img, distortion_img, tet_alive
 
     @staticmethod
-    def backward(ctx, grad_output_img, grad_distortion_img):
+    def backward(ctx, grad_output_img, grad_distortion_img, grad_vert_alive):
         (sorted_tetra_idx, tile_ranges, 
          indices, vertices, tet_density,
          output_img, distortion_img, n_contributors,
@@ -102,6 +104,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
         alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
 
+        tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=vertices.device)
         st = time.time()
         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(
             sorted_gauss_idx=sorted_tetra_idx,
@@ -113,6 +116,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             output_img=(output_img, grad_output_img),
             distortion_img=(distortion_img, grad_distortion_img),
             n_contributors=n_contributors,
+            tet_alive=tet_alive,
             grid_height=render_grid.grid_height,
             grid_width=render_grid.grid_width,
             image_height=render_grid.image_height,

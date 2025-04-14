@@ -199,6 +199,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                    DiffTensorView final_pixel_state,
                    DiffTensorView final_distortion_state,
                    TensorView<int32_t> n_contributors,
+                   TensorView<bool> tet_alive,
                    no_diff Camera cam,
                    no_diff float ladder_p,
                    no_diff float pre_multi,
@@ -242,6 +243,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
         if (tile_idx_start + splat_pointer_offset < tile_idx_end)
         {
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
+            collected_idx[thread_rank] = coll_id;
             collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
         }
         AllMemoryBarrierWithGroupSync();
@@ -254,6 +256,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl)) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
                     ao = new_ao;
+                    tet_alive[collected_idx[j]] = true;
 
                     if (new_ao.rgba.a < 1 / 255.f) {
                         // This Splat never registred so we subtract it before we break.
@@ -281,6 +284,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      DiffTensorView final_pixel_state,
                      DiffTensorView final_distortion_state,
                      TensorView<int32_t> n_contributors,
+                     TensorView<bool> tet_alive,
                      Camera cam,
                      no_diff float ladder_p,
                      no_diff float pre_multi,
@@ -390,6 +394,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  DiffTensorView output_img,
                  DiffTensorView distortion_img,
                  TensorView<int32_t> n_contributors,
+                 TensorView<bool> tet_alive,
                  int grid_height,
                  int grid_width,
 
@@ -426,6 +431,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
         output_img,
         distortion_img,
         n_contributors,
+        tet_alive,
         cam,
         ladder_p, pre_multi,
         min_t,

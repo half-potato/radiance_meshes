@@ -65,13 +65,13 @@ def compute_vertex_colors_from_field(triangle_verts, field_samples, circumcenter
     offsets = l2_normalize_th(offsets)
     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
     vertex_colors = base[:, None, :] + grad_contrib
-    return vertex_colors
+    return vertex_colors, gradients
 
 @torch.jit.script
 def activate_output(output, indices, vertex_color_raw, circumcenters, vertices, density_offset:float):
     density = safe_exp(output[:, 0:1]+density_offset)
     field_samples = output[:, 1:]
-    vcolors = compute_vertex_colors_from_field(
+    vcolors, _ = compute_vertex_colors_from_field(
         vertices[indices].detach(), field_samples.float(), circumcenters.float().detach())
     vcolors = torch.nn.functional.softplus(vertex_color_raw[indices] + vcolors, beta=10)
     vcolors = vcolors.reshape(-1, 12)
@@ -327,6 +327,27 @@ class Model(nn.Module):
         alphas = torch.cat(alpha_list, dim=0)
         return alphas
 
+    def tet_variability(self):
+        vertices = self.vertices
+        indices = self.indices
+        tet_var = torch.zeros((indices.shape[0]), device=vertices.device)
+        for start in range(0, indices.shape[0], self.chunk_size):
+            end = min(start + self.chunk_size, indices.shape[0])
+
+            circumcenters, _, output = self.compute_batch_features(vertices, indices, start, end)
+            radius = torch.linalg.norm(circumcenters - vertices[indices[start:end, 0]], dim=-1)
+            density = safe_exp(output[:, 0:1]+self.density_offset)
+            field_samples = output[:, 1:]
+            base = (field_samples[:, :3]) + 0.5  # shape (T, 3)
+            base = base.reshape(-1, 3, 1).clip(min=0)
+            gradients = base * torch.tanh(field_samples[:, 3:12].reshape(-1, 3, 3))  # shape (T, 3, 3)
+            clipped_gradients = (base+gradients).clip(min=0, max=1) - base
+            # tet_var[start:end] = torch.linalg.norm(
+            #     torch.linalg.norm(clipped_gradients, dim=-1), dim=-1, ord=torch.inf)
+            # tet_var[start:end] = torch.linalg.norm(clipped_gradients, dim=-1).min(dim=-1).values
+            tet_var[start:end] = torch.linalg.norm(clipped_gradients, dim=-1).mean(dim=-1)
+        return tet_var
+
     @torch.no_grad
     def extract_mesh(self, path, alpha_threshold=0.5):
         verts = self.vertices
@@ -378,7 +399,7 @@ class Model(nn.Module):
             circumcenters, _, output = self.compute_batch_features(vertices, indices, start, end)
             density = safe_exp(output[:, 0:1]+self.density_offset)
             field_samples = output[:, 1:]
-            vcolors = compute_vertex_colors_from_field(
+            vcolors, _ = compute_vertex_colors_from_field(
                 vertices[indices[start:end]].detach(), field_samples.float(), circumcenters.float().detach())
             vcolors = vcolors.cpu().numpy().astype(np.float32)
             density = density.cpu().numpy().astype(np.float32)
@@ -540,7 +561,6 @@ class TetOptimizer:
 
     def remove_points(self, mask: torch.Tensor):
         mask = mask[:self.model.contracted_vertices.shape[0]]
-        new_tensors = self.optim.prune_optimizer(mask)
         self.model.contracted_vertices = self.vertex_optim.prune_optimizer(mask)['contracted_vertices']
         self.model.update_triangulation()
 
@@ -597,5 +617,6 @@ class TetOptimizer:
 
     def regularizer(self):
         weight_decay = self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
-        sh_decay = self.lambda_color * (self.model.vertex_lights ** 2).mean()
+        mean_sh = (self.model.vertex_lights).abs().mean()
+        sh_decay = self.lambda_color * mean_sh
         return sh_decay + weight_decay
