@@ -135,7 +135,7 @@ def psnr(img1, img2):
     mse = (((img1 - img2)) ** 2).reshape(img1.shape[0], -1).mean(1, keepdim=True)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
-def evaluate_and_save(model, train_cameras, test_cameras, output_path, tile_size, min_t):
+def evaluate_and_save(model, splits, output_path, tile_size, min_t):
     gt_path = os.path.join(output_path, "images", "gt")
     pred_path = os.path.join(output_path, "images", "pred")
     os.makedirs(gt_path, exist_ok=True)
@@ -146,7 +146,7 @@ def evaluate_and_save(model, train_cameras, test_cameras, output_path, tile_size
     
     short_results = {}
     results = {}
-    for split, cameras in zip(['train', 'test'], [train_cameras, test_cameras]):
+    for split, cameras in splits:
         renders, gts = [], []
         ssims, psnrs, lpipss = [], [], []
         os.makedirs(os.path.join(gt_path, split), exist_ok=True)

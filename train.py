@@ -80,6 +80,7 @@ args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
 args.iterations = 10000
 args.ckpt = ""
+args.render_train = False
 
 # Light Settings
 args.light_offset = -3
@@ -342,6 +343,7 @@ for iteration in progress_bar:
         tet_optim.sh_optim.zero_grad()
 
     if do_delaunay:
+        model.perturb_vertices(args.lambda_noise * v_perturb)
         circumcenters = model.get_circumcenters()
         # cc_locations.append(
         #     model.contract(circumcenters.detach()).cpu().numpy()
@@ -547,7 +549,11 @@ mediapy.write_video(args.output_path / "rotating.mp4", eimages)
 model.save2ply(args.output_path / "ckpt.ply")
 torch.save(model.state_dict(), args.output_path / "ckpt.pth")
 
-results = test_util.evaluate_and_save(model, train_cameras, test_cameras, args.output_path, args.tile_size, min_t)
+if args.render_train:
+    splits = zip(['train', 'test'], [train_cameras, test_cameras])
+else:
+    splits = zip(['test'], [test_cameras])
+results = test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t)
 
 with (args.output_path / "results.json").open("w") as f:
     all_data = dict(

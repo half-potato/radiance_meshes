@@ -49,7 +49,7 @@ class DelaunayRenderTest(parameterized.TestCase):
     def run_test(self, points, viewmat, tile_size):
         """Run rendering test with different sample counts and compare results."""
         indices = compute_delaunay(points)
-        vertex_colors = generate_color_palette(points.shape[0])[:, :3]
+        vertex_colors = generate_color_palette(indices.shape[0] * 4)[:, :3].reshape(-1, 4, 3)
         tet_density = torch.ones((len(indices),), device='cuda')
         results = test_tetrahedra_rendering(
             points, indices, vertex_colors, tet_density, viewmat,

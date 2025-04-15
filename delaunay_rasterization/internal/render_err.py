@@ -115,9 +115,10 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
     torch.cuda.synchronize()
     alpha = 1-output_img.permute(2,0,1)[3, ...]
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
-    l2_err = ((render_img - gt_image)**2).mean(dim=0)
-    ssim_err = 1-ssim(render_img, gt_image).mean(dim=0)
-    pixel_err = ((1-lambda_ssim) * l2_err + lambda_ssim * ssim_err).contiguous()
+    # l2_err = ((render_img - gt_image)**2).mean(dim=0)
+    l1_err = ((render_img - gt_image).abs()).mean(dim=0)
+    ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=0)
+    pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
 
@@ -169,6 +170,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, lambda_
         tet_count = tet_count,
         pixel_err = pixel_err,
         ssim_err = ssim_err,
-        l2_err = l2_err,
+        l1_err = l1_err,
         render_img = render_img
     )

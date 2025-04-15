@@ -34,7 +34,7 @@ def assert_valid_stepfun(t, y):
 @jax.jit
 def lossfun_distortion(t, mass):
   """Compute iint w[i] w[j] |t[i] - t[j]| di dj."""
-  w = mass
+  w = mass / jnp.clip(mass.sum(axis=-1), min=1e-8, max=None)
   assert_valid_stepfun(t, w)
 
   # The loss incurred between all pairs of intervals.
@@ -77,7 +77,7 @@ def render_quadrature(tdist, query_fn, return_extras=False):
     t_delta = jnp.diff(tdist)
     total_density, avg_colors = query_fn(t_avg)
     weights = compute_alpha_weights_helper(total_density * t_delta)
-    dist_loss = lossfun_distortion(tdist, weights)
+    dist_loss = lossfun_distortion(tdist, total_density)
     rendered_color = jnp.sum(
         weights[..., None] * avg_colors, axis=-2
     )  # Assuming the bg color is 0.
@@ -182,10 +182,11 @@ def query_tetrahedra_kernel(t_samples, ray_origins, ray_directions,
             lambda p: barycentric_coordinates_matrix(p, *[vertices[i] for i in tet_indices]))(
                 sample_points.reshape(-1, 3)).reshape(*batch_shape, 4)
         padding = [1]*(len(coords.shape)-1)
-        tet_color = vertex_color[tet_indices[0]].reshape(*padding, 3) * coords[..., 0].reshape(-1, 1) + \
-                    vertex_color[tet_indices[1]].reshape(*padding, 3) * coords[..., 1].reshape(-1, 1) + \
-                    vertex_color[tet_indices[2]].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
-                    vertex_color[tet_indices[3]].reshape(*padding, 3) * coords[..., 3].reshape(-1, 1)
+        vc = vertex_color.reshape(-1, 4, 3)
+        tet_color = vc[i, tet_indices[0]].reshape(*padding, 3) * coords[..., 0].reshape(-1, 1) + \
+                    vc[i, tet_indices[1]].reshape(*padding, 3) * coords[..., 1].reshape(-1, 1) + \
+                    vc[i, tet_indices[2]].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
+                    vc[i, tet_indices[3]].reshape(*padding, 3) * coords[..., 3].reshape(-1, 1)
         
         # Update density and color
         contrib_density = jnp.where(is_inside, tet_density, 0.0)

@@ -185,14 +185,15 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         if mask.sum() > 0:
             normed_cc, cell_values[mask] = model.get_cell_values(camera, mask, circumcenter[mask])
         else:
-            normed_cc, cell_values = model.get_cell_values(camera, circumcenter)
-        with torch.no_grad():
-            tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask],
-                                                                          vertices, normed_cc)
-            scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1)
-        vertices = train_util.ClippedGradients.apply(vertices, scaling)
-        extras['normed_cc'] = normed_cc
-        extras['cc_sensitivity'] = tet_sens
+            normed_cc, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+        if clip_multi is not None:
+            with torch.no_grad():
+                tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask],
+                                                                            vertices, normed_cc)
+                scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1)
+            vertices = train_util.ClippedGradients.apply(vertices, scaling)
+            extras['normed_cc'] = normed_cc
+            extras['cc_sensitivity'] = tet_sens
 
     image_rgb, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,

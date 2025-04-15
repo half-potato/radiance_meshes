@@ -115,20 +115,23 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
     model.tet_density = tet_density
     model.indices = indices
     model.scene_scaling = 1
-    def get_cell_values(camera, mask=None):
+    model.device = 'cuda'
+    def get_cell_values(camera, mask=None, all_circumcenters=None):
         if mask is not None:
-            return vertex_color, tet_density[mask]
+            return tet_density, vertex_color[mask]
         else:
-            return vertex_color, tet_density
+            return tet_density, vertex_color
     model.get_cell_values = get_cell_values
 
-    render_pkg = render(camera, model, tile_size=tile_size, min_t=tmin, ladder_p=1, pre_multi=1)
+    render_pkg = render(camera, model, tile_size=tile_size, min_t=tmin, ladder_p=1, pre_multi=1, clip_multi=None)
     torch_image = render_pkg['render'].permute(1, 2, 0)
     
+    vc = vertex_color[:, 1:]
+    td = vertex_color[:, :1]
     jax_image, extras = tetra_quad.render_camera(
         vertices.detach().cpu().numpy(), indices.cpu().numpy(),
-        vertex_color.detach().cpu().numpy(),
-        tet_density.detach().cpu().numpy(),
+        vc.detach().cpu().numpy(),
+        td.detach().cpu().numpy(),
         height, width, viewmat.cpu().numpy(),
         fx.item(), fy.item(), tmin, np.linspace(0, 1, n_samples))
 
@@ -170,8 +173,9 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
         # Store PyTorch gradients
         results['torch_vertex_grad'] = vertices.grad.clone().cpu().numpy()
         # ic(vertex_color.grad, tet_density.grad)
-        results['torch_vertex_color_grad'] = vertex_color.grad.clone().cpu().numpy()
-        results['torch_tet_density_grad'] = tet_density.grad.clone().cpu().numpy()
+        vc_grad = vertex_color.grad.clone().cpu().numpy()
+        results['torch_vertex_color_grad'] = vc_grad[:, 1:]
+        results['torch_tet_density_grad'] = vc_grad[:, :1]
         
         def render_fn(verts_and_rgbs):
             verts, vertex_colors, tet_density = verts_and_rgbs
@@ -191,8 +195,8 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
         # Compute JAX gradients using jacrev
         jax_verts_grad, jax_vertex_color_grad, jax_tet_density_grad = grad(render_fn)((
             vertices.detach().cpu().numpy(),
-            vertex_color.detach().cpu().numpy(),
-            tet_density.detach().cpu().numpy()
+            vc.detach().cpu().numpy(),
+            td.detach().cpu().numpy()
         ))
             
         # Compute JAX gradients (assuming tetra_quad.render_camera returns gradients)

@@ -39,18 +39,19 @@ class TetrahedraRenderingTest(parameterized.TestCase):
 
     def run_test(self, vertices, viewmat, tile_size):
         vertex_color = torch.tensor([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.5, 0.0, 0.5],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.0, 0.5],
         ]).cuda()
         tet_density = torch.tensor([[10.0]]).cuda()
+        vertex_color = torch.cat([tet_density.reshape(1, 1), vertex_color.reshape(1, -1)], dim=1)
 
-        results = test_tetrahedra_rendering(vertices, self.indices, vertex_color, tet_density, viewmat, 
-                                         height=self.height, width=self.width, tile_size=tile_size, n_samples=10000)
+        results1 = test_tetrahedra_rendering(vertices, self.indices, vertex_color, tet_density, viewmat, 
+                                             height=self.height, width=self.width, tile_size=tile_size, n_samples=10000)
         results2 = test_tetrahedra_rendering(vertices, self.indices, vertex_color, tet_density, viewmat, 
-                                         height=self.height, width=self.width, tile_size=tile_size, n_samples=5000)
-        compare_dict_values(results, results2, key_pairs, vertices, viewmat)
+                                             height=self.height, width=self.width, tile_size=tile_size, n_samples=5000)
+        compare_dict_values(results1, results2, key_pairs, vertices, viewmat)
 
 
     @parameterized.product(

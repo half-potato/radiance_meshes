@@ -1,5 +1,4 @@
 import torch
-import time
 import math
 from data.camera import Camera
 from utils import optim
@@ -7,24 +6,21 @@ from sh_slang.eval_sh import eval_sh
 from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
-from utils.train_util import RGB2SH
-from utils.topo_utils import calculate_circumcenters_torch, project_points_to_tetrahedra, fibonacci_spiral_on_sphere, calc_barycentric
-from utils.safe_math import safe_exp, safe_div, safe_sqrt, safe_pow, safe_cos, safe_sin, remove_zero, safe_arctan2
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric
+from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
-from utils.train_util import RGB2SH, safe_exp, get_expon_lr_func, sample_uniform_in_sphere
+from utils.train_util import safe_exp, get_expon_lr_func, sample_uniform_in_sphere
 from utils import topo_utils
 from utils.graphics_utils import l2_normalize_th
-from typing import List
 from utils import hashgrid
 from torch.utils.checkpoint import checkpoint
-from torch.cuda.amp import autocast
-from plyfile import PlyData, PlyElement
 from pathlib import Path
 import numpy as np
 from utils.args import Args
 import tinyplypy
-from utils.phong_shading import to_sphere, activate_lights, light_function, compute_tet_color
+from scipy.spatial import ConvexHull
+
 
 torch.set_float32_matmul_precision('high')
 
@@ -34,6 +30,15 @@ def init_weights(m, gain):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
+def expand_convex_hull(points: torch.Tensor, expand_distance: float, device='cpu'):
+    points_np = points.cpu().numpy()
+    hull = ConvexHull(points_np)
+    hull_vertices = points_np[hull.vertices]
+    centroid = hull_vertices.mean(axis=0, keepdims=True)
+    directions = hull_vertices - centroid
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    expanded_vertices = hull_vertices + expand_distance * directions
+    return torch.tensor(expanded_vertices, device=device)
 
 @torch.jit.script
 def pre_calc_cell_values(vertices, indices, center, scene_scaling: float):
@@ -60,7 +65,7 @@ def compute_vertex_colors_from_field(triangle_verts, field_samples, circumcenter
     - The next 6 coefficients (reshaped as (3,2)) define the gradients.
     """
     base = (field_samples[:, :3]) + 0.5  # shape (T, 3)
-    gradients = base.reshape(-1, 3, 1).clip(min=0) * torch.tanh(field_samples[:, 3:12].reshape(-1, 3, 3))  # shape (T, 3, 3)
+    gradients = base.reshape(-1, 3, 1).clip(min=0) * torch.tanh(0.1*field_samples[:, 3:12].reshape(-1, 3, 3))  # shape (T, 3, 3)
     offsets = triangle_verts - circumcenters[:, None, :]  # shape (T, 4, 3)
     offsets = l2_normalize_th(offsets)
     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
@@ -104,10 +109,8 @@ class iNGPDW(nn.Module):
 
         self.network = nn.Sequential(
             nn.Linear(self.encoding.n_output_dims, hidden_dim),
-            # nn.ReLU(inplace=True),
             nn.SELU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            # nn.ReLU(inplace=True),
             nn.SELU(inplace=True),
             nn.Linear(hidden_dim, 1+12)
         )
@@ -115,7 +118,6 @@ class iNGPDW(nn.Module):
         self.network.apply(lambda m: init_weights(m, gain))
 
     def forward(self, x, cr):
-        # output = checkpoint(self.encoding, x, use_reentrant=True).float()
         x = x.detach()
         output = self.encoding(x).float()
         output = output.reshape(-1, self.dim, self.L)
@@ -123,10 +125,8 @@ class iNGPDW(nn.Module):
         n = torch.arange(self.L, device=x.device).reshape(1, 1, -1)
         erf_x = safe_div(torch.tensor(1.0, device=x.device), safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
         scaling = torch.erf(erf_x)
-        # ic(scaling.mean(dim=0), output.mean(dim=0))
 
         output = output * scaling
-        # output = checkpoint(self.network, output.reshape(-1, self.L * self.dim), use_reentrant=True)
         output = self.network(output.reshape(-1, self.L * self.dim))
         return output
 
@@ -198,10 +198,6 @@ class Model(nn.Module):
             dvrgbs = activate_output(output, indices[start:end],
                                      vertex_color_raw, circumcenters,
                                      vertices, self.density_offset)
-            # ic(output.max(dim=0).values, output.min(dim=0).values, dvrgbs.max(dim=0).values, dvrgbs.min(dim=0).values,
-            #    vertex_color_raw.max(dim=0))
-
-            # ic(output.mean(dim=0), normalized.mean(dim=0), vertex_color_raw.mean(dim=0), dvrgbs.mean(dim=0))
             normed_cc.append(normalized)
             outputs.append(dvrgbs)
         features = torch.cat(outputs, dim=0)
@@ -219,14 +215,6 @@ class Model(nn.Module):
         center = ccenters.mean(dim=0)
         scaling = torch.linalg.norm(ccenters - center.reshape(1, 3), dim=1, ord=torch.inf).max()
 
-        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
-        # v = Del(vertices.shape[0])
-        # indices_np, prev = v.compute(vertices.detach().cpu())
-        # indices_np = indices_np.numpy()
-        # indices_np = indices_np[(indices_np < vertices.shape[0]).all(axis=1)]
-        # vertices = vertices[indices_np].mean(dim=1)
-        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
-
         repeats = 3
         vertices = vertices.reshape(-1, 1, 3).expand(-1, repeats, 3)
         vertices = vertices + torch.randn(*vertices.shape) * 1e-1
@@ -234,10 +222,12 @@ class Model(nn.Module):
 
         # add sphere
         pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
-        num_ext = 1000
-        # ext_vertices = l2_normalize_th(torch.randn((num_ext, 3))) * 2 * pcd_scaling.cpu() + center.reshape(1, 3).cpu()
 
-        ext_vertices = fibonacci_spiral_on_sphere(num_ext, 2* pcd_scaling.cpu(), device='cpu') + center.reshape(1, 3).cpu()
+        ext_vertices = expand_convex_hull(vertices, 5, device=vertices.device)
+        num_ext = ext_vertices.shape[0]
+
+        # num_ext = 1000
+        # ext_vertices = fibonacci_spiral_on_sphere(num_ext, 2* pcd_scaling.cpu(), device='cpu') + center.reshape(1, 3).cpu()
         vertex_lights = torch.zeros((vertices.shape[0] + num_ext, ((num_lights+1)**2-1)*3)).to(device)
 
         vertices = nn.Parameter(vertices.cuda())
@@ -282,7 +272,6 @@ class Model(nn.Module):
 
     @torch.no_grad
     def perturb_vertices(self, perturbation):
-        # if contracting vertices, must have the contraction accounted for
         self.contracted_vertices.data += perturbation[:self.contracted_vertices.shape[0]]
 
     def calc_vert_alpha(self):
@@ -298,12 +287,10 @@ class Model(nn.Module):
         return vertex_alpha
 
     def calc_tet_alpha(self):
-        # Compute the density mask in chunks
         alpha_list = []
         start = 0
         
         verts = self.vertices
-        # while start < self.indices.shape[0]:
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
@@ -323,7 +310,6 @@ class Model(nn.Module):
             alpha_list.append(alpha)
             del edge_lengths, density
         
-        # Concatenate mask and apply it
         alphas = torch.cat(alpha_list, dim=0)
         return alphas
 
@@ -357,7 +343,6 @@ class Model(nn.Module):
         inf_mask = (indices_np < verts.shape[0]).all(axis=1)
         indices_np = indices_np[inf_mask]
         
-        # Convert to tensor and move to CUDA
         self.indices = torch.as_tensor(indices_np).cuda()
         mask = self.calc_tet_alpha() > alpha_threshold
         
@@ -446,7 +431,6 @@ class Model(nn.Module):
         indices_np = indices_np.numpy()
         indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
         
-        # Convert to tensor and move to CUDA
         self.indices = torch.as_tensor(indices_np).cuda()
         
         if alpha_threshold > 0:
