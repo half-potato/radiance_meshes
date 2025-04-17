@@ -50,13 +50,23 @@ bool same_side_eps(
     return (sV4 * sP) >= 0;
 }
 
-bool point_in_tetrahedron(const Tetrahedra tet, const float3 point, float eps=1e-20)
+bool point_in_tetrahedron(const Tetrahedra tet, const float3 point, float eps=1e-10f)
 {
+    // Check if the point is extremely close to any vertex
+
+    for (int i = 0; i < 4; ++i) {
+        if (length(point - tet.verts[i]) < 1e-6) {
+            return true;  // Treat it as inside
+        }
+    }
+
+    // Same-side tests with relaxed epsilon
     return ( same_side_eps(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point, eps) &&
              same_side_eps(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point, eps) &&
              same_side_eps(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point, eps) &&
              same_side_eps(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point, eps) );
 }
+
 
 struct Tetrahedra : IDifferentiable
 {

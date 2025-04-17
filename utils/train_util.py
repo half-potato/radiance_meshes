@@ -14,36 +14,6 @@ import math
 from utils.contraction import contraction_jacobian
 from utils.graphics_utils import l2_normalize_th
 
-def sample_uniform_in_sphere(batch_size, dim, radius=1.0, device=None):
-    """
-    Generate samples uniformly distributed inside a sphere.
-
-    Parameters:
-        batch_size (int): Number of samples to generate.
-        dim (int): Dimensionality of the sphere.
-        radius (float): Radius of the sphere (default is 1.0).
-        device (torch.device, optional): Device to perform computation on.
-
-    Returns:
-        torch.Tensor: Tensor of shape (batch_size, dim) with samples from inside the sphere.
-    """
-    if device is None:
-        device = torch.device("cpu")
-
-    # Sample from a normal distribution
-    samples = torch.randn(batch_size, dim, device=device)
-    
-    # Normalize each vector to lie on the unit sphere
-    samples = samples / samples.norm(dim=1, keepdim=True)
-    
-    # Sample radii uniformly with proper weighting for volume
-    radii = torch.rand(batch_size, device=device).pow(1 / dim) * radius
-    
-    # Scale samples by the radii
-    samples = samples * radii.unsqueeze(1)
-
-    return samples
-
 class ClippedGradients(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, lr_matrix):

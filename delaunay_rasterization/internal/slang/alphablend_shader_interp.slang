@@ -234,6 +234,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     int32_t local_n_contrib = 0;
     // int32_t low = 0;
+    int countdown = 20;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
@@ -256,11 +257,22 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 1e-4) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, pre_multi, ladder_p);
                     ao = new_ao;
-                    tet_alive[collected_idx[j]] = true;
+                    // tet_alive[collected_idx[j]] = true;
+                    // if (pix_coord.x == 3 && pix_coord.y == 0) {
+                    //     printf("%f-%f (%f), (%f, %f, %f, %f, %f)\n", tetra_ctrl.dist.x, tetra_ctrl.dist.y, tetra_ctrl.density,
+                    //     new_ao.distortion_state.x, new_ao.distortion_state.y, new_ao.distortion_state.z, new_ao.distortion_state.w, new_ao.distortion_state.v);
+                    // }
 
                     if (new_ao.rgba.a < 1 / 255.f) {
-                        // This Splat never registred so we subtract it before we break.
-                        // local_n_contrib--;
+                        countdown--;
+                    }
+                    // if (new_ao.rgba.a < 1 / 255.f) {
+                    //     // This Splat never registred so we subtract it before we break.
+                    //     // local_n_contrib--;
+                    //     thread_active = false;
+                    //     break;
+                    // }
+                    if (countdown == 0) {
                         thread_active = false;
                         break;
                     }
@@ -532,6 +544,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     float surface = tetra_ctrl.dist.x;
                     float midpt = 0.5 * (tetra_ctrl.dist.x + tetra_ctrl.dist.y);
                     float contrib = tetra_ctrl.rgba.a * surface + (1 - tetra_ctrl.rgba.a) * midpt;
+                    if (contrib < 0.1) continue;
                     float3 contrib_pt = contrib * ray.d + ray.o;
                     // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
                     float old_val;

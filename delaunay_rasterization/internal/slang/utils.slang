@@ -194,7 +194,7 @@ float3 point2camspace(float3 point, Camera cam) {
 
 [Differentiable]
 float3 camspace2image_w_depth(float3 cam_space_nohomo, Camera cam) {
-    float3 pix_space = mul(cam.K, float3(safe_div(cam_space_nohomo.xy, abs(cam_space_nohomo.z) + eps), 1.f));
+    float3 pix_space = mul(cam.K, float3(safe_div(cam_space_nohomo.xy, abs(cam_space_nohomo.z)), 1.f));
     pix_space.z = cam_space_nohomo.z;
     return pix_space;
 }
@@ -377,19 +377,34 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) {
     float3 minv2 = float3(FLT_MAX, FLT_MAX, FLT_MAX);
     float3 maxv2 = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 
-    bool straddling = false;
+    float eps = 1e-3;
+    bool has_front = false;
+    bool has_back = false;
+
+    // First pass: Include vertices clearly in front (z > EPSILON)
     for (int i = 0; i < 4; i++) {
-        minv2 = min(minv2, tet.verts[i]);
-        maxv2 = max(maxv2, tet.verts[i]);
-        if (tet.verts[i].z < 0) {
-            straddling = true;
-            continue;
+        float3 v = tet.verts[i];
+        if (v.z > eps) {
+            has_front = true;
+            float3 pixel_vert = camspace2image_w_depth(v, cam);
+            minv = min(minv, pixel_vert);
+            maxv = max(maxv, pixel_vert);
+        } else if (v.z < -eps) {
+            has_back = true;
+        } else {
+            // Vertex exactly (or nearly) on plane; explicitly include it
+            float3 cv = { v.x, v.y, eps };
+            float3 pixel_vert = camspace2image_w_depth(cv, cam);
+            minv = min(minv, pixel_vert);
+            maxv = max(maxv, pixel_vert);
+            has_front = true; // Treat as front for extent
+            has_back = true;  // Also treat as back for intersection checks
         }
-        float3 pixel_vert = camspace2image_w_depth(tet.verts[i], cam);
-        minv = min(minv, pixel_vert);
-        maxv = max(maxv, pixel_vert);
     }
-    straddling = straddling && (maxv.z > 0); // must have an element lower than 0 and higher
+
+    bool straddling = has_front && has_back;
+
+    // printf("straddling: %i\n", straddling);
 
     if (straddling) {
         // Adjust bounds if tetrahedron straddles z=0
@@ -406,11 +421,12 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) {
                     vb = temp;
                 }
                 // vb = v back, vf = v front
-                if (vf.z > 1e-3 && vb.z < 1e-3) {
+                // we are drawing lines along the tetrahedra and intersecting them with z=1e-3
+                if (vf.z > eps && vb.z < eps) {
 
-                    float t = max((1e-3 - vb.z) / (vf.z - vb.z), 0);
+                    float t = max((eps - vb.z) / (vf.z - vb.z), 0);
                     float3 v_clip = vb + t * (vf - vb);
-                    v_clip.z = 1e-3;
+                    v_clip.z = eps;
                     float3 pixel_v_clip = camspace2image_w_depth(v_clip, cam);
                     pixel_v_clip.z = vb.z;
                     // printf("pixel_v_clip: %f, %f, %f\n", v_clip.x, v_clip.y, v_clip.z);

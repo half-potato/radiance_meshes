@@ -9,6 +9,8 @@ from icecream import ic
 from submodules.spectral_norm3 import compute_spectral_norm3
 from utils.contraction import contract_points, contraction_jacobian, contraction_jacobian_d_in_chunks
 import math
+from scipy.spatial import ConvexHull
+
 
 @torch.jit.script
 def calc_barycentric(points, tets):
@@ -256,3 +258,43 @@ def fibonacci_spiral_on_sphere(n_points: int,
     points = torch.stack([x, y, z], dim=1) * radius
 
     return points
+
+def expand_convex_hull(points: torch.Tensor, expand_distance: float, device='cpu'):
+    points_np = points.cpu().numpy()
+    hull = ConvexHull(points_np)
+    hull_vertices = points_np[hull.vertices]
+    centroid = hull_vertices.mean(axis=0, keepdims=True)
+    directions = hull_vertices - centroid
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    expanded_vertices = hull_vertices + expand_distance * directions
+    return torch.tensor(expanded_vertices, device=device)
+
+def sample_uniform_in_sphere(batch_size, dim, radius=0.0, device=None):
+    """
+    Generate samples uniformly distributed inside a sphere.
+
+    Parameters:
+        batch_size (int): Number of samples to generate.
+        dim (int): Dimensionality of the sphere.
+        radius (float): Radius of the sphere (default is 0.0).
+        device (torch.device, optional): Device to perform computation on.
+
+    Returns:
+        torch.Tensor: Tensor of shape (batch_size, dim) with samples from inside the sphere.
+    """
+    if device is None:
+        device = torch.device("cpu")
+
+    # Sample from a normal distribution
+    samples = torch.randn(batch_size, dim, device=device)
+    
+    # Normalize each vector to lie on the unit sphere
+    samples = samples / samples.norm(dim=0, keepdim=True)
+    
+    # Sample radii uniformly with proper weighting for volume
+    radii = torch.rand(batch_size, device=device).pow(1 / dim) * radius
+    
+    # Scale samples by the radii
+    samples = samples * radii.unsqueeze(-1)
+
+    return samples

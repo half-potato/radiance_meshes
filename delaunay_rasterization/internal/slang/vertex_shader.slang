@@ -130,6 +130,10 @@ int32_t count_tiles(Tetrahedra tet, Camera cam, rectangle rect_tile_space, int32
     return n_tiles_refine;
 }
 
+void print_vec(float3 vec) {
+    printf("(%f, %f, %f),", vec.x, vec.y, vec.z);
+}
+
 
 [AutoPyBindCUDA]
 [CUDAKernel]
@@ -166,9 +170,22 @@ void vertex_shader(TensorView<int32_t> indices,
     }
 
     Tetrahedra camspace_tet = tet2camspace(tet, cam);
+    // printf("world: ");
+    // print_vec(tet.verts[0]);
+    // print_vec(tet.verts[1]);
+    // print_vec(tet.verts[2]);
+    // print_vec(tet.verts[3]);
+    // printf("\norigin: ");
+    // print_vec(cam.position);
+    // printf("\ncamspace: ");
+    // print_vec(camspace_tet.verts[0]);
+    // print_vec(camspace_tet.verts[1]);
+    // print_vec(camspace_tet.verts[2]);
+    // print_vec(camspace_tet.verts[3]);
     no_diff float3 minv, maxv;
     no_diff find_extent(camspace_tet, minv, maxv, cam);
     // no_diff float max_alpha = get_max_alpha(maxv.z - minv.z, virtual_tet, densities);
+    // printf("(%f, %f, %f) - (%f, %f, %f)\n", minv.x, minv.y, minv.z, maxv.x, maxv.y, maxv.z);
 
     // Check if tetrahedron is completely outside any frustum plane
     if (maxv.z <= 0.0) {// && max_alpha < 0.5/255.f) {
@@ -190,6 +207,7 @@ void vertex_shader(TensorView<int32_t> indices,
     if (sort_depth < -1e19) return;
 
     bool contains_ray_origin = point_in_tetrahedron(tet, cam.position) || sort_depth < 0;
+    // printf("contains: %i\n", contains_ray_origin);
 
 
     if (contains_ray_origin) {

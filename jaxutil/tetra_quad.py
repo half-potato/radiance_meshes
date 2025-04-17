@@ -182,11 +182,11 @@ def query_tetrahedra_kernel(t_samples, ray_origins, ray_directions,
             lambda p: barycentric_coordinates_matrix(p, *[vertices[i] for i in tet_indices]))(
                 sample_points.reshape(-1, 3)).reshape(*batch_shape, 4)
         padding = [1]*(len(coords.shape)-1)
-        vc = vertex_color.reshape(-1, 4, 3)
-        tet_color = vc[i, tet_indices[0]].reshape(*padding, 3) * coords[..., 0].reshape(-1, 1) + \
-                    vc[i, tet_indices[1]].reshape(*padding, 3) * coords[..., 1].reshape(-1, 1) + \
-                    vc[i, tet_indices[2]].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
-                    vc[i, tet_indices[3]].reshape(*padding, 3) * coords[..., 3].reshape(-1, 1)
+        # vc = vertex_color.reshape(-1, 4, 3)
+        tet_color = vertex_color[i, 0].reshape(*padding, 3) * coords[..., 0].reshape(-1, 1) + \
+                    vertex_color[i, 1].reshape(*padding, 3) * coords[..., 1].reshape(-1, 1) + \
+                    vertex_color[i, 2].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
+                    vertex_color[i, 3].reshape(*padding, 3) * coords[..., 3].reshape(-1, 1)
         
         # Update density and color
         contrib_density = jnp.where(is_inside, tet_density, 0.0)

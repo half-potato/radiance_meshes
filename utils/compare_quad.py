@@ -126,7 +126,7 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
     render_pkg = render(camera, model, tile_size=tile_size, min_t=tmin, ladder_p=1, pre_multi=1, clip_multi=None)
     torch_image = render_pkg['render'].permute(1, 2, 0)
     
-    vc = vertex_color[:, 1:]
+    vc = vertex_color[:, 1:].reshape(-1, 4, 3)
     td = vertex_color[:, :1]
     jax_image, extras = tetra_quad.render_camera(
         vertices.detach().cpu().numpy(), indices.cpu().numpy(),
@@ -201,7 +201,7 @@ def test_tetrahedra_rendering(vertices, indices, vertex_color, tet_density, view
             
         # Compute JAX gradients (assuming tetra_quad.render_camera returns gradients)
         results['jax_vertex_grad'] = np.array(jax_verts_grad)
-        results['jax_vertex_color_grad'] = np.array(jax_vertex_color_grad)
+        results['jax_vertex_color_grad'] = np.array(jax_vertex_color_grad).reshape(-1, 12)
         results['jax_tet_density_grad'] = np.array(jax_tet_density_grad)
 
         results['dist_loss_err'] = np.abs(results['torch_dist_loss'] - results['jax_dist_loss'])

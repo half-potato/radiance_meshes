@@ -6,11 +6,11 @@ from sh_slang.eval_sh import eval_sh
 from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere
 from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
-from utils.train_util import safe_exp, get_expon_lr_func, sample_uniform_in_sphere
+from utils.train_util import safe_exp, get_expon_lr_func
 from utils import topo_utils
 from utils.graphics_utils import l2_normalize_th
 from utils import hashgrid
@@ -29,16 +29,6 @@ def init_weights(m, gain):
         nn.init.xavier_uniform_(m.weight, gain)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
-
-def expand_convex_hull(points: torch.Tensor, expand_distance: float, device='cpu'):
-    points_np = points.cpu().numpy()
-    hull = ConvexHull(points_np)
-    hull_vertices = points_np[hull.vertices]
-    centroid = hull_vertices.mean(axis=0, keepdims=True)
-    directions = hull_vertices - centroid
-    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
-    expanded_vertices = hull_vertices + expand_distance * directions
-    return torch.tensor(expanded_vertices, device=device)
 
 @torch.jit.script
 def pre_calc_cell_values(vertices, indices, center, scene_scaling: float):
@@ -205,7 +195,7 @@ class Model(nn.Module):
         return normed_cc, features
 
     @staticmethod
-    def init_from_pcd(point_cloud, cameras, device, num_lights, **kwargs):
+    def init_from_pcd(point_cloud, cameras, device, num_lights, ext_convex_hull, **kwargs):
         torch.manual_seed(2)
         N = point_cloud.points.shape[0]
         # N = 1000
@@ -223,7 +213,15 @@ class Model(nn.Module):
         # add sphere
         pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
 
-        ext_vertices = expand_convex_hull(vertices, 5, device=vertices.device)
+        if ext_convex_hull:
+            ext_vertices = expand_convex_hull(vertices, 5, device=vertices.device)
+            num_ext = ext_vertices.shape[0]
+        else:
+            new_radius = 2* pcd_scaling.cpu()
+            within_sphere = sample_uniform_in_sphere(1000, 3, radius=new_radius.item(), device='cpu') + center.reshape(1, 3).cpu()
+            vertices = torch.cat([vertices, within_sphere], dim=0)
+            num_ext = 1000
+            ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
         num_ext = ext_vertices.shape[0]
 
         # num_ext = 1000
