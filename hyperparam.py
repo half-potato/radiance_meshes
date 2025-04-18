@@ -7,6 +7,7 @@ import argparse
 import threading
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run nerf_test.py experiments from a CSV queue.")
@@ -28,6 +29,10 @@ def generate_folder_name(test_params, base_dir="output"):
     # Iterate in the order provided by test_params (csv.DictReader preserves header order)
     for key, value in test_params.items():
         if key == "output_path":
+            continue
+        if key == "dataset_path":
+            initials = key
+            parts.append(f"{Path(value).name}")
             continue
         # Split the key by '_' and take the first letter of each non-empty piece
         initials = ''.join(piece[0] for piece in key.split('_') if piece)

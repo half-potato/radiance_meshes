@@ -61,6 +61,7 @@ def vertex_and_tile_shader(indices,
         fovy,
         fovx,
         render_grid)
+    # ic((vs_tetra[:, 1] == 1).sum())
 
     with torch.no_grad():
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
@@ -170,6 +171,14 @@ class VertexShader(torch.autograd.Function):
                 blockSize=(256, 1, 1),
                 gridSize=(ceil_div(n_tetra, 256), 1, 1)
         )
+
+        inds, = torch.where(vs_tetra[:, 1] == 1)
+        if len(inds) > 1:
+            j = vs_tetra[inds, 2].argmin()
+            mask = torch.tensor([ind for i, ind in enumerate(inds) if i != j], device=vs_tetra.device)
+            tiles_touched[mask] = 0
+            rect_tile_space[mask] = 0
+            vs_tetra[mask, 1] = 0
 
         ctx.save_for_backward(indices, vertices, world_view_transform, K, cam_pos,
                               tiles_touched, rect_tile_space, vs_tetra, circumcenter, tet_area)

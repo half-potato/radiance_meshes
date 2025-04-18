@@ -1,0 +1,2 @@
+dataset_path,error,output_folder,gpu_id
+/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,output/dp/optane/nerf_datasets/360/bicycle,0
