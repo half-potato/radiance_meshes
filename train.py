@@ -146,6 +146,7 @@ args.base_min_t = 0.05
 args.sample_cam = 0
 args.data_device = 'cpu'
 args.lambda_alpha = 0.0
+args.lambda_density = 0.0
 args.lambda_color = 1e-4
 
 # Bilateral grid arguments
@@ -327,7 +328,10 @@ for iteration in progress_bar:
     cc = render_pkg['normed_cc']
     st = time.time()
     alphas = compute_alpha(model.indices, model.vertices, render_pkg['density'], mask)
-    loss += args.lambda_alpha * alphas.mean()
+    # loss += args.lambda_alpha * (-4 * alphas * (alphas-1)).mean()
+    loss += args.lambda_alpha * - ((alphas * safe_math.safe_log(alphas) + (1-alphas) * safe_math.safe_log(1-alphas))).mean()
+    x = render_pkg['density'][mask]
+    loss += args.lambda_density * (x * (-x**2).exp()).mean()
     loss.backward()
     # tet_optim.clip_gradient(args.grad_clip)
 

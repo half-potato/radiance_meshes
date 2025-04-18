@@ -101,7 +101,7 @@ DistortionState5 update_distortion_state(
     float start = dist.x;//tukey_power_ladder(dist.x*pre_multi, ladder_p);
     float end = dist.y;  // tukey_power_ladder(dist.y*pre_multi, ladder_p);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
-    float d = density;
+    float d = log(1+density);
 
     float m0 = moment_0_int(start, end, d, T); // just weight
     float m1 = moment_1_int(start, end, d, T);
@@ -134,7 +134,8 @@ DistortionState5 undo_distortion_state(
     float end = dist.y;//tukey_power_ladder(dist.y*pre_multi, ladder_p);
     // float scaling = scale_dist((dist.x+dist.y)*0.5);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
-    float d = density;
+    //float d = density;
+    float d = log(1+density);
 
     float m0 = moment_0_int(start, end, d, T);
     float m1 = moment_1_int(start, end, d, T);

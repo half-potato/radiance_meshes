@@ -216,7 +216,7 @@ def compute_alpha(indices, vertices, density, mask):
     edge_lengths = torch.stack([
         torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
         torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
-    ], dim=0).max(dim=0)[0]
+    ], dim=0).mean(dim=0)[0].detach()
     
     # Compute the maximum possible alpha using the largest edge length
     alpha = 1 - torch.exp(-density[mask].reshape(-1, 1) * edge_lengths.reshape(-1, 1))

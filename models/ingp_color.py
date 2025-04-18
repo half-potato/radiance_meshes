@@ -218,7 +218,7 @@ class Model(nn.Module):
             num_ext = ext_vertices.shape[0]
         else:
             new_radius = 2* pcd_scaling.cpu()
-            within_sphere = sample_uniform_in_sphere(1000, 3, radius=new_radius.item(), device='cpu') + center.reshape(1, 3).cpu()
+            within_sphere = sample_uniform_in_sphere(10000, 3, radius=new_radius.item(), device='cpu') + center.reshape(1, 3).cpu()
             vertices = torch.cat([vertices, within_sphere], dim=0)
             num_ext = 1000
             ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
@@ -274,7 +274,7 @@ class Model(nn.Module):
 
     def calc_vert_alpha(self):
         tet_alphas = self.calc_tet_alpha()
-        vertex_alpha = torch.full((self.vertices.shape[0],), 0.0, device=self.device)
+        vertex_alpha = torch.zeros((self.vertices.shape[0],), device=self.device)
         indices = self.indices.long()
 
         reduce_type = "amax"
@@ -283,6 +283,24 @@ class Model(nn.Module):
         vertex_alpha.scatter_reduce_(dim=0, index=indices[..., 2], src=tet_alphas, reduce=reduce_type)
         vertex_alpha.scatter_reduce_(dim=0, index=indices[..., 3], src=tet_alphas, reduce=reduce_type)
         return vertex_alpha
+
+    def calc_vert_density(self):
+        verts = self.vertices
+        vertex_density = torch.zeros((verts.shape[0],), device=self.device)
+        indices = self.indices.long()
+        for start in range(0, self.indices.shape[0], self.chunk_size):
+            end = min(start + self.chunk_size, self.indices.shape[0])
+            
+            _, _, output = self.compute_batch_features(verts, self.indices, start, end)
+
+            density = safe_exp(output[:, 0]+self.density_offset)
+            indices_chunk = indices[start:end]
+            reduce_type = "amax"
+            vertex_density.scatter_reduce_(dim=0, index=indices_chunk[..., 0], src=density, reduce=reduce_type)
+            vertex_density.scatter_reduce_(dim=0, index=indices_chunk[..., 1], src=density, reduce=reduce_type)
+            vertex_density.scatter_reduce_(dim=0, index=indices_chunk[..., 2], src=density, reduce=reduce_type)
+            vertex_density.scatter_reduce_(dim=0, index=indices_chunk[..., 3], src=density, reduce=reduce_type)
+        return vertex_density
 
     def calc_tet_alpha(self):
         alpha_list = []
@@ -301,7 +319,7 @@ class Model(nn.Module):
             edge_lengths = torch.stack([
                 torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
                 torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
-            ], dim=0).max(dim=0)[0]
+            ], dim=0).min(dim=0)[0]
             
             # Compute the maximum possible alpha using the largest edge length
             alpha = 1 - torch.exp(-density * edge_lengths)
@@ -421,7 +439,7 @@ class Model(nn.Module):
         self.max_lights = min(self.num_lights, self.max_lights+1)
 
     @torch.no_grad()
-    def update_triangulation(self, high_precision=False, alpha_threshold=0.05/255):
+    def update_triangulation(self, high_precision=False, alpha_threshold=0.00/255):
         torch.cuda.empty_cache()
         verts = self.vertices
         if high_precision:
@@ -552,7 +570,7 @@ class TetOptimizer:
         self.model.update_triangulation()
 
     @torch.no_grad()
-    def split(self, clone_indices, split_point, split_mode, alpha_threshold):
+    def split(self, clone_indices, split_point, split_mode, density_threshold):
         device = self.model.device
         clone_vertices = self.model.vertices[clone_indices]
 
@@ -581,10 +599,10 @@ class TetOptimizer:
         else:
             raise Exception(f"Split mode: {split_mode} not supported")
         self.add_points(new_vertex_location, new_vertex_lights)
-        mask = self.model.calc_vert_alpha() < alpha_threshold
+        mask = self.model.calc_vert_density() < density_threshold
         print(f"Pruned: {mask.sum()} points")
         self.remove_points(~mask)
-        del mask, alpha_threshold
+        del mask
 
     def main_step(self):
         self.optim.step()
