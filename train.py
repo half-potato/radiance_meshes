@@ -122,7 +122,7 @@ args.freeze_start = 25000
 args.ext_convex_hull = False
 
 # Distortion Settings
-args.lambda_dist = 1e-4
+args.lambda_dist = 1e-7
 args.ladder_p = -0.25
 args.pre_multi = 10000
 

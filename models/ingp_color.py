@@ -599,10 +599,10 @@ class TetOptimizer:
         else:
             raise Exception(f"Split mode: {split_mode} not supported")
         self.add_points(new_vertex_location, new_vertex_lights)
-        mask = self.model.calc_vert_density() < density_threshold
-        print(f"Pruned: {mask.sum()} points")
-        self.remove_points(~mask)
-        del mask
+        # mask = self.model.calc_vert_density() < density_threshold
+        # print(f"Pruned: {mask.sum()} points")
+        # self.remove_points(~mask)
+        # del mask
 
     def main_step(self):
         self.optim.step()
