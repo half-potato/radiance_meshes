@@ -6,13 +6,14 @@ from sh_slang.eval_sh import eval_sh
 from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
+
 from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
 from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
+
 from utils.train_util import get_expon_lr_func, SpikingLR
 from utils.graphics_utils import l2_normalize_th
-from utils import hashgrid
 from torch.utils.checkpoint import checkpoint
 from pathlib import Path
 import numpy as np
@@ -24,116 +25,10 @@ import open3d as o3d
 from data.types import BasicPointCloud
 from simple_knn._C import distCUDA2
 from utils import mesh_util
+from utils.model_util import *
 
 torch.set_float32_matmul_precision('high')
 
-def init_linear(m, gain):
-    """Standard Xavier-uniform + zero bias for any Linear layer."""
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight, gain)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-
-@torch.jit.script
-def pre_calc_cell_values(vertices, indices, center, scene_scaling: float):
-    device = vertices.device
-    tets = vertices[indices]
-    circumcenter, radius = calculate_circumcenters_torch(tets.double())
-    # clipped_circumcenter = project_points_to_tetrahedra(circumcenter.float(), tets)
-    clipped_circumcenter = circumcenter
-    normalized = (clipped_circumcenter - center) / scene_scaling
-    cv, cr = contract_mean_std(normalized, radius / scene_scaling)
-    return clipped_circumcenter, cv.float(), cr, normalized
-
-@torch.jit.script
-def compute_vertex_colors_from_field(triangle_verts, field_samples, circumcenters):
-    """
-    Compute per-vertex colors for each triangle.
-    
-    For each vertex:
-      color = base + dot(gradient, (vertex - circumcenter))
-    
-    - The first 3 coefficients of field_samples provide the base color.
-    - The next 6 coefficients (reshaped as (3,2)) define the gradients.
-    """
-    base = (field_samples[:, :3]) + 0.5  # shape (T, 3)
-    gradients = base.reshape(-1, 3, 1) * torch.tanh(field_samples[:, 3:12].reshape(-1, 3, 3))  # shape (T, 3, 3)
-    offsets = triangle_verts - circumcenters[:, None, :]  # shape (T, 4, 3)
-    offsets = l2_normalize_th(offsets)
-    grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
-    vertex_colors = base[:, None, :] + grad_contrib
-    return vertex_colors, gradients
-
-def activate_output(camera_center, output, indices, circumcenters, vertices, current_sh_deg, max_sh_deg, density_offset:float):
-    density = safe_exp(output[:, 0:1]+density_offset)
-    field_samples = output[:, 1:12+1]
-    sh_coeffs = output[:, 13:]
-    # subtract 0.5 to remove 0th order spherical harmonic
-    tet_color_raw = eval_sh(
-        circumcenters,
-        torch.zeros((output.shape[0], 3), device=vertices.device),
-        sh_coeffs.reshape(-1, (max_sh_deg+1)**2 - 1, 3),
-        camera_center,
-        current_sh_deg) - 0.5
-    vcolors, _ = compute_vertex_colors_from_field(
-        vertices[indices].detach(), field_samples.float(), circumcenters.float().detach())
-    vcolors = torch.nn.functional.softplus(vcolors + tet_color_raw.reshape(-1, 1, 3), beta=10)
-    vcolors = vcolors.reshape(-1, 12)
-    features = torch.cat([density, vcolors], dim=1)
-    return features
-
-class iNGPDW(nn.Module):
-    def __init__(self, 
-                 sh_dim=0,
-                 scale_multi=0.5,
-                 log2_hashmap_size=16,
-                 base_resolution=16,
-                 per_level_scale=2,
-                 L=10,
-                 hashmap_dim=4,
-                 hidden_dim=64,
-                 **kwargs):
-        super().__init__()
-
-        self.scale_multi = scale_multi
-        self.L = L
-        self.dim = hashmap_dim
-        self.per_level_scale = per_level_scale
-        self.base_resolution = base_resolution
-
-        self.encoding = hashgrid.HashEmbedderOptimized(
-            [torch.zeros((3)), torch.ones((3))],
-            self.L, n_features_per_level=self.dim,
-            log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
-            finest_resolution=base_resolution*per_level_scale**self.L)
-
-        self.network = nn.Sequential(
-            nn.Linear(self.encoding.n_output_dims, hidden_dim),
-            nn.SELU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SELU(inplace=True),
-            nn.Linear(hidden_dim, 1+12+sh_dim)
-        )
-        gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
-        self.network.apply(lambda m: init_linear(m, gain))
-        last = self.network[-1]
-        with torch.no_grad():
-            last.weight[4:, :].zero_()
-            last.bias[4:].zero_()
-
-    def forward(self, x, cr):
-        x = x.detach()
-        output = self.encoding(x).float()
-        output = output.reshape(-1, self.dim, self.L)
-        cr = cr.float() * self.scale_multi
-        n = torch.arange(self.L, device=x.device).reshape(1, 1, -1)
-        erf_x = safe_div(torch.tensor(1.0, device=x.device), safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
-        scaling = torch.erf(erf_x)
-        output = output * scaling
-        # sphere_area = 4/3*math.pi*cr**3
-        # scaling = safe_div(base_resolution * per_level_scale**n, sphere_area.reshape(-1, 1, 1)).clip(max=1)
-        output = self.network(output.reshape(-1, self.L * self.dim))
-        return output
 
 class Model(nn.Module):
     def __init__(self,
@@ -158,7 +53,7 @@ class Model(nn.Module):
             [math.pi, 0],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
-        self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
+        self.backbone = torch.compile(iNGPDW2(sh_dim, **kwargs)).to(self.device)
         self.chunk_size = 408576
 
 
@@ -198,9 +93,10 @@ class Model(nn.Module):
         start = 0
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
-            circumcenters, normalized, output = self.compute_batch_features(vertices, indices, start, end, circumcenters=all_circumcenters)
+            circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
+                vertices, indices, start, end, circumcenters=all_circumcenters)
             dvrgbs = activate_output(camera.camera_center.to(self.device),
-                                     output, indices[start:end],
+                                     density, rgb, grd, sh, indices[start:end],
                                      circumcenters,
                                      vertices, self.current_sh_deg, self.max_sh_deg,
                                      self.density_offset)
@@ -279,8 +175,8 @@ class Model(nn.Module):
             radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
             cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
-        output = checkpoint(self.backbone, x, cr, use_reentrant=True).float()
-        return circumcenter, normalized, output
+        output = checkpoint(self.backbone, x, cr, use_reentrant=True)
+        return circumcenter, normalized, *output
 
     def load_ckpt(path: Path, device):
         data_dict = tinyplypy.read_ply(str(path / "ckpt.ply"))
@@ -337,9 +233,9 @@ class Model(nn.Module):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, _, output = self.compute_batch_features(verts, self.indices, start, end)
+            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
 
-            density = safe_exp(output[:, 0]+self.density_offset)
+            density = density.reshape(-1)
             indices_chunk = indices[start:end]
             reduce_type = "amax"
             vertex_density.scatter_reduce_(dim=0, index=indices_chunk[..., 0], src=density, reduce=reduce_type)
@@ -356,9 +252,8 @@ class Model(nn.Module):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, _, output = self.compute_batch_features(verts, self.indices, start, end)
+            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
 
-            density = safe_exp(output[:, 0]+self.density_offset)
             indices_chunk = self.indices[start:end]
             v0, v1, v2, v3 = verts[indices_chunk[:, 0]], verts[indices_chunk[:, 1]], verts[indices_chunk[:, 2]], verts[indices_chunk[:, 3]]
             
@@ -368,7 +263,7 @@ class Model(nn.Module):
             ], dim=0).max(dim=0)[0]
             
             # Compute the maximum possible alpha using the largest edge length
-            alpha = 1 - torch.exp(-density * edge_lengths)
+            alpha = 1 - torch.exp(-density.reshape(-1) * edge_lengths.reshape(-1))
             alpha_list.append(alpha)
             del edge_lengths, density
         
@@ -382,14 +277,9 @@ class Model(nn.Module):
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
 
-            circumcenters, _, output = self.compute_batch_features(vertices, indices, start, end)
+            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
             radius = torch.linalg.norm(circumcenters - vertices[indices[start:end, 0]], dim=-1)
-            density = safe_exp(output[:, 0:1]+self.density_offset)
-            field_samples = output[:, 1:]
-            base = (field_samples[:, :3]) + 0.5  # shape (T, 3)
-            base = base.reshape(-1, 3, 1).clip(min=0)
-            gradients = base * torch.tanh(field_samples[:, 3:12].reshape(-1, 3, 3))  # shape (T, 3, 3)
-            clipped_gradients = (base+gradients).clip(min=0, max=1) - base
+            clipped_gradients = (rgb+grd).clip(min=0, max=1) - base
             # tet_var[start:end] = torch.linalg.norm(
             #     torch.linalg.norm(clipped_gradients, dim=-1), dim=-1, ord=torch.inf)
             # tet_var[start:end] = torch.linalg.norm(clipped_gradients, dim=-1).min(dim=-1).values
@@ -402,10 +292,9 @@ class Model(nn.Module):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, _, output = self.compute_batch_features(verts, self.indices, start, end)
+            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
 
-            density = safe_exp(output[:, 0]+self.density_offset)
-            densities.append(density)
+            densities.append(density.reshape(-1))
         return torch.cat(densities)
 
     @torch.no_grad
@@ -444,14 +333,12 @@ class Model(nn.Module):
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
 
-            circumcenters, _, output = self.compute_batch_features(vertices, indices, start, end)
-            density = safe_exp(output[:, 0:1]+self.density_offset)
-            field_samples = output[:, 1:]
+            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
             vcolors, _ = compute_vertex_colors_from_field(
-                vertices[indices[start:end]].detach(), field_samples.float(), circumcenters.float().detach())
+                vertices[indices[start:end]].detach(), rgb.float(), grd.float(), circumcenters.float().detach())
             vcolors = vcolors.cpu().numpy().astype(np.float32)
             density = density.cpu().numpy().astype(np.float32)
-            sh_coeff = output[:, 13:].reshape(-1, sh_dim, 3)
+            sh_coeff = sh.reshape(-1, sh_dim, 3)
             sh_coeffs[start:end] = sh_coeff.cpu().numpy()
             lights[start:end] = vcolors
             densities[start:end] = density.reshape(-1)
@@ -550,6 +437,12 @@ class TetOptimizer:
                  densify_start: int = 2500,
                  densify_interval: int = 500,
                  densify_end: int = 15000,
+
+                 density_lr:  float = 1e-3,
+                 color_lr:    float = 1e-3,
+                 gradient_lr: float = 1e-3,
+                 sh_lr:       float = 1e-3,
+
                  **kwargs):
         self.weight_decay = weight_decay
         self.lambda_color = lambda_color
@@ -560,7 +453,11 @@ class TetOptimizer:
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99], eps=1e-15)
         self.net_optim = optim.CustomAdam([
             {"params": model.backbone.network.parameters(), "lr": network_lr, "name": "network"},
-        ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.99])
+            {"params": model.backbone.density_net.parameters(),   "lr": density_lr,  "name": "density"},
+            {"params": model.backbone.color_net.parameters(),     "lr": color_lr,    "name": "color"},
+            {"params": model.backbone.gradient_net.parameters(),  "lr": gradient_lr, "name": "gradient"},
+            {"params": model.backbone.sh_net.parameters(),        "lr": sh_lr,       "name": "sh"},
+        ], ignore_param_list=[], betas=[0.9, 0.99])
         self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
@@ -619,9 +516,9 @@ class TetOptimizer:
         ''' Learning rate scheduling per step '''
         self.iteration = iteration
         for param_group in self.net_optim.param_groups:
-            if param_group["name"] == "network":
-                lr = self.net_scheduler_args(iteration)
-                param_group['lr'] = lr
+            # if param_group["name"] == "network":
+            lr = self.net_scheduler_args(iteration)
+            param_group['lr'] = lr
         for param_group in self.optim.param_groups:
             if param_group["name"] == "encoding":
                 lr = self.encoder_scheduler_args(iteration)

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import random;
 import utils;
 import safe_math;
 import interp_version;
@@ -488,6 +489,12 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     uint32_t block_size = tile_height * tile_width;
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
 
+    uint seed = hash_wang(pix_coord.x);
+    seed = hash_wang(seed ^ pix_coord.y);
+    seed = hash_wang(seed ^ tile_idx_end);
+    seed = hash_wang(seed ^ tile_idx_start);
+    RNG rng = {seed};
+
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
 
@@ -506,6 +513,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
 
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
+    bool thread_active = true;
     for (int i = 0; i < rounds; i++)
     {
         // Collectively fetch per-Gaussian data from global to shared
@@ -537,19 +545,29 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
                     float midpt = 0.5 * (tetra_ctrl.dist.x + tetra_ctrl.dist.y);
                     float grad_scale = min(1, midpt*midpt);// / scene_scaling / scene_scaling);
-                    float err = current_pixel_state.a * tetra_ctrl.rgba.a * pixel_err * grad_scale;
-                    float surface = tetra_ctrl.dist.x;
-                    float endpt = tetra_ctrl.dist.y;
-                    float contrib = tetra_ctrl.rgba.a * surface + (1 - tetra_ctrl.rgba.a) * endpt;
-                    float3 contrib_pt = contrib * ray.d + ray.o;
-                    // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
-                    float old_val;
-                    int32_t old_ival;
-                    tet_err.InterlockedAdd(uint2(g_idx, 0), err * contrib_pt.x, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 1), err * contrib_pt.y, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 2), err * contrib_pt.z, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 3), err, old_val);
-                    tet_count.InterlockedAdd(g_idx, 1, old_ival);
+                    // Why mul by T? Because we are moving backwards, so there is no occlusion
+                    float weight = grad_scale * current_pixel_state.a * tetra_ctrl.rgba.a;
+                    float p = rng_f32(rng);
+                    if (p < weight && thread_active) {
+                    //float err = pow(weight, 1.f/8.f) * pixel_err * grad_scale;
+                    //float err = weight * pixel_err * grad_scale;
+                        float err = pixel_err * grad_scale;
+                        float surface = tetra_ctrl.dist.x;
+                        float endpt = tetra_ctrl.dist.y;
+                        float contrib = tetra_ctrl.rgba.a * surface + (1 - tetra_ctrl.rgba.a) * endpt;
+                        float3 contrib_pt = contrib * ray.d + ray.o;
+                        // printf("(%i: %f, %f, %f)", g_idx, current_pixel_state.a, tetra_ctrl.rgba.a, pixel_err);
+                        float old_val;
+                        int32_t old_ival;
+                        tet_err.InterlockedAdd(uint2(g_idx, 0), err * contrib_pt.x, old_val);
+                        tet_err.InterlockedAdd(uint2(g_idx, 1), err * contrib_pt.y, old_val);
+                        tet_err.InterlockedAdd(uint2(g_idx, 2), err * contrib_pt.z, old_val);
+                        tet_err.InterlockedAdd(uint2(g_idx, 3), err, old_val);
+                        tet_count.InterlockedAdd(g_idx, 1, old_ival);
+
+                        // Russian roulette
+                        thread_active = false;
+                    }
                 }
             }
         }

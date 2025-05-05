@@ -109,6 +109,13 @@ args.weight_decay = 0.01
 args.hashmap_dim = 4
 args.grad_clip = 1e-2
 args.spike_duration = 150
+args.k_samples = 1
+args.trunc_sigma = 0.3
+
+args.density_lr = 5e-5
+args.color_lr = 5e-5
+args.gradient_lr = 5e-5
+args.sh_lr = 5e-5
 
 # Vertex Settings
 args.lr_delay = 50
@@ -145,6 +152,7 @@ args.perturb_t = 1-0.005
 args.noise_start = 2000
 args.clone_velocity = 0.1
 args.speed_mul = 100
+args.clone_min_alpha = 1/255
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
@@ -416,7 +424,7 @@ for iteration in progress_bar:
                 target = camera.original_image.cuda()
                 tet_err, extras = render_err(target, camera, model, scene_scaling=model.scene_scaling, tile_size=args.tile_size, lambda_ssim=args.clone_lambda_ssim)
                 norm = extras['tet_count'].clip(min=1).reshape(-1, 1).sqrt()
-                tet_err = tet_err / norm
+                # tet_err = tet_err / norm
                 visible = extras['tet_count'] > args.min_tet_count
                 if args.p_norm > 10:
                     replace = (tet_err[:, 3] > tet_moments[:, 3]) & visible
@@ -429,8 +437,11 @@ for iteration in progress_bar:
         if args.p_norm < 10:
             tet_moments = tet_moments / tet_count.clip(min=1)
 
+        alpha_mask = model.calc_tet_alpha() < args.clone_min_alpha
+        tet_moments[alpha_mask] = 0
+
         with torch.no_grad():
-            tet_err_weight = tet_moments[:, 3] + 0.1*model.tet_variability()
+            tet_err_weight = tet_moments[:, 3]# + 0.1*model.tet_variability()
             render_tensor = tet_err_weight
             tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
             normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
