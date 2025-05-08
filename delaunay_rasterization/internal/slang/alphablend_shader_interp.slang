@@ -561,7 +561,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     float weight = grad_scale * tetra_ctrl.rgba.a;
                     float p = rng_f32(rng);
                     //if (p < weight && thread_active) {
-                    if (new_ao.rgba.a < 0.8 && thread_active) {
+                    if (new_ao.rgba.a < 1-0.9 && thread_active) {
                     //float err = pow(weight, 1.f/8.f) * pixel_err * grad_scale;
                     //float err = weight * pixel_err * grad_scale;
                         float err = pixel_err * grad_scale;

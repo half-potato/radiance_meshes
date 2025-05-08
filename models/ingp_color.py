@@ -278,7 +278,7 @@ class Model(nn.Module):
             end = min(start + self.chunk_size, indices.shape[0])
 
             circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
-            vcolors, _ = compute_vertex_colors_from_field(
+            vcolors = compute_vertex_colors_from_field(
                 vertices[indices[start:end]].detach(), rgb.float(), grd.float(),
                 circumcenters.float().detach())
             vcolors = torch.nn.functional.softplus(vcolors, beta=10)
@@ -334,7 +334,7 @@ class Model(nn.Module):
             end = min(start + self.chunk_size, indices.shape[0])
 
             circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
-            vcolors, _ = compute_vertex_colors_from_field(
+            vcolors = compute_vertex_colors_from_field(
                 vertices[indices[start:end]].detach(), rgb.float(), grd.float(), circumcenters.float().detach())
             vcolors = vcolors.cpu().numpy().astype(np.float32)
             density = density.cpu().numpy().astype(np.float32)

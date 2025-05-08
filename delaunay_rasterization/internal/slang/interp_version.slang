@@ -59,6 +59,13 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
 }
 
 [Differentiable]
+inline float3 linear_color(float4x3 grad, float3 v)
+{
+    return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
+}
+
+
+[Differentiable]
 bool evaluate_tetra_interp(
     in SplatTetrahedra_interp g, 
     in float3 ray_o,
@@ -95,6 +102,13 @@ bool evaluate_tetra_interp(
         float3 c_enter = mix_color(g.vertex_color, b_enter);
         float3 c_exit = mix_color(g.vertex_color, b_exit);
 
+        /*
+        float3 v_enter = enter * ray_d + ray_o - verts[0];
+        float3 v_exit = exit * ray_d + ray_o - verts[0];
+        float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
+        float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
+        */
+
         float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
         float3 final_color = compute_integral(c_exit, c_enter, dt, g.density);
 
@@ -119,7 +133,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     TensorView<int32_t> indices,
     DiffTensorView tet_density)
 {
-    uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
+    no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
     // Here we assume each tetrahedron has a single scalar density in tet_density:
