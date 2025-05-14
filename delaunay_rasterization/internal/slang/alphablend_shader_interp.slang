@@ -465,6 +465,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
 
 struct VarInfo {
     float S0, S1, S2;
+    float2 dist;
     int g_idx;
 };
 
@@ -520,7 +521,6 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     float max_split_alpha = 0.f;
     float max_grow_alpha = 0.f;
     VarInfo split_info = {0.f, 0.f, 0.f, -1};
-    VarInfo grow_info = {0.f, 0.f, 0.f, -1};
 
     int32_t local_n_contrib = 0;
     // int32_t low = 0;
@@ -565,48 +565,20 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
                     float old_val;
                     int32_t old_ival;
-                    // float f = g.density;
-                    // float f = grad_scale * tetra_ctrl.rgba.a;
                     float f = T;
                     if (f > max_split_alpha) {
-                        // printf("(%f,%f,%f,%f,%f),", ao.rgba.a, g.density, tetra_ctrl.rgba.r, tetra_ctrl.rgba.a, T);
                         split_info.S0 = T;
                         split_info.S1 = T * mismatch;
                         split_info.S2 = T * mismatch * mismatch;
                         split_info.g_idx = g_idx;
+                        split_info.dist = tetra_ctrl.dist;
                         max_split_alpha = f;
                     }
-                    if (T_p > max_grow_alpha) {
-                        grow_info.S0 = T_p;
-                        grow_info.S1 = T_p * err;
-                        grow_info.S2 = T_p * err * err;
-                        grow_info.g_idx = g_idx;
-                        max_grow_alpha = T_p;
-                    }
+                    tet_err.InterlockedAdd(uint2(g_idx, 3), T, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 4), T * mismatch, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 5), T * mismatch * mismatch, old_val);
+
                     tet_count.InterlockedAdd(g_idx, 1, old_ival);
-                    /*
-                    if (g.density > density_t) {
-                    //if (tetra_ctrl.rgba.a > density_t) {
-                        tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
-                        tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
-                        tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
-                        //tet_err.InterlockedAdd(uint2(g_idx, 0), T * mismatch, old_val);
-                        //tet_err.InterlockedAdd(uint2(g_idx, 1), T * (1-mismatch), old_val);
-                    } else {
-                        tet_err.InterlockedAdd(uint2(g_idx, 3), T_p, old_val);
-                        tet_err.InterlockedAdd(uint2(g_idx, 4), T_p * err, old_val);
-                        tet_err.InterlockedAdd(uint2(g_idx, 5), T_p * err * err, old_val);
-                        //tet_err.InterlockedAdd(uint2(g_idx, 2), T_p * err, old_val);
-                        // tet_err.InterlockedAdd(uint2(g_idx, 3), T_p * (1-err), old_val);
-                    }
-                    tet_count.InterlockedAdd(g_idx, 1, old_ival);
-                    //*/
-                    /*
-                    tet_err.InterlockedAdd(uint2(g_idx, 0), T * mismatch, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 1), T * (1-mismatch), old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 2), T_p * err, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 3), T_p * (1-err), old_val);
-                    //*/
 
                     ao = new_ao;
                     if (new_ao.rgba.a < 1 / 255.f) {
@@ -626,13 +598,18 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         tet_err.InterlockedAdd(uint2(split_info.g_idx, 0), split_info.S0, old_val);
         tet_err.InterlockedAdd(uint2(split_info.g_idx, 1), split_info.S1, old_val);
         tet_err.InterlockedAdd(uint2(split_info.g_idx, 2), split_info.S2, old_val);
+
+        float w = split_info.S1;
+        float3 p1 = split_info.dist.x * ray.d + ray.o;
+        float3 p2 = split_info.dist.y * ray.d + ray.o;
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 6), w * p1.x, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 7), w * p1.y, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 8), w * p1.z, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 9), w * p2.x, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 10), w * p2.y, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 11), w * p2.z, old_val);
+        tet_err.InterlockedAdd(uint2(split_info.g_idx, 12), w, old_val);
         // tet_count.InterlockedAdd(split_info.g_idx, 1, old_ival);
-    }
-    if (grow_info.g_idx >= 0) {
-        tet_err.InterlockedAdd(uint2(grow_info.g_idx, 3), grow_info.S0, old_val);
-        tet_err.InterlockedAdd(uint2(grow_info.g_idx, 4), grow_info.S1, old_val);
-        tet_err.InterlockedAdd(uint2(grow_info.g_idx, 5), grow_info.S2, old_val);
-        // tet_count.InterlockedAdd(grow_info.g_idx, 1, old_ival);
     }
     return split_info;
 }

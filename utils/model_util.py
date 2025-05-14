@@ -9,6 +9,7 @@ from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
 from sh_slang.eval_sh import eval_sh
 from utils.hashgrid import HashEmbedderOptimized
+from icecream import ic
 
 def gaussian_in_circumsphere(cc: torch.Tensor,       # (T,3)
                              r:  torch.Tensor,       # (T,1)

@@ -124,7 +124,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
 
-    tet_err = torch.zeros((tet_vertices.shape[0], 6), dtype=torch.float, device=device)
+    tet_err = torch.zeros((tet_vertices.shape[0], 13), dtype=torch.float, device=device)
     tet_count = torch.zeros((tet_vertices.shape[0]), dtype=torch.int32, device=device)
 
     debug_img = torch.zeros((render_grid.image_height, 

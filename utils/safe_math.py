@@ -147,7 +147,7 @@ def safe_arctan2(x1, x2):
 # -------------------------------------------------------------------
 class _SafeDiv(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, n, d):
+    def forward(ctx, n, d) -> torch.Tensor:
         d_nozero = remove_zero(d)
         r = torch.clamp(n / d_nozero, min_val, max_val)
         # if |d| < tiny_val => 0
@@ -170,7 +170,7 @@ class _SafeDiv(torch.autograd.Function):
 
         return dn, dd
 
-def safe_div(n, d):
+def safe_div(n, d) -> torch.Tensor:
     return _SafeDiv.apply(n, d)
 
 # -------------------------------------------------------------------

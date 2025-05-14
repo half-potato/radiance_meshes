@@ -171,7 +171,6 @@ class Model(nn.Module):
         else:
             circumcenter = circumcenters[start:end]
             normalized = (circumcenter - self.center) / self.scene_scaling
-            # ic(circumcenter.shape, vertices[indices[start:end, 0]].shape, circumcenters.shape, start, end)
             radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
             cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
@@ -507,11 +506,17 @@ class TetOptimizer:
             encoding_lr, final_encoding_lr)
 
         self.vertex_lr = self.vert_lr_multi*vertices_lr
-        self.vertex_scheduler_args = get_expon_lr_func(lr_init=self.vertex_lr,
+        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
                                                 max_steps=max_steps,
                                                 lr_delay_steps=vert_lr_delay)
+
+        self.vertex_scheduler_args = SpikingLR(
+            spike_duration, max_steps, base_vertex_scheduler,
+            densify_start, densify_interval, densify_end,
+            self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
+        # self.vertex_scheduler_args = base_vertex_scheduler
         self.iteration = 0
         self.clip_multi_scheduler_args = get_expon_lr_func(lr_init=start_clip_multi,
                                                 lr_final=end_clip_multi,
@@ -582,6 +587,11 @@ class TetOptimizer:
             barycentric_weights = calc_barycentric(split_point, clone_vertices)
             barycentric_weights = barycentric_weights / (1e-3+barycentric_weights.sum(dim=1, keepdim=True))
             # new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
+        elif split_mode == "split_point_c":
+            barycentric_weights = calc_barycentric(split_point, clone_vertices)
+            barycentric_weights = barycentric_weights / (1e-3+barycentric_weights.sum(dim=1, keepdim=True))
+            barycentric_weights += 1e-4*torch.randn(*barycentric_weights.shape, device=self.model.device)
+            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
         else:
             raise Exception(f"Split mode: {split_mode} not supported")
         self.add_points(new_vertex_location)
@@ -608,10 +618,6 @@ class TetOptimizer:
 
     def regularizer(self, render_pkg):
         weight_decay = self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
-
-        # m = render_pkg['mask']
-        # ic(m.shape, self.model.indices.shape)
-        # density = torch.zeros((m.shape[0]), device='cuda')
 
         if self.lambda_density > 0 or self.lambda_tv > 0:
             density = self.model.calc_tet_density()

@@ -133,6 +133,7 @@ args.ext_convex_hull = False
 args.lambda_dist = 1e-5
 
 # Clone Settings
+args.num_samples = 200
 args.p_norm = 100
 args.clone_lambda_ssim = 0.2
 args.split_std = 0.1
@@ -142,7 +143,6 @@ args.min_tet_count = 4
 args.prune_density_threshold = 0.0
 args.densify_start = 3000
 args.densify_end = 15000
-args.num_samples = 200
 args.densify_interval = 500
 args.budget = 2_000_000
 args.lambda_noise = 0.0
@@ -420,10 +420,13 @@ for iteration in progress_bar:
             sampled_cameras = [train_cameras[i] for i in densification_sampler.nextids()]
             tet_moments = torch.zeros((model.indices.shape[0], 4), device=device)
             tet_votes = torch.zeros((model.indices.shape[0], 4), device=device)
-            tet_count = torch.zeros((model.indices.shape[0], 1), device=device)
+            tet_count = torch.zeros((model.indices.shape[0]), device=device)
+            tet_size = torch.zeros((model.indices.shape[0]), device=device)
 
             total_split_votes = torch.zeros((model.indices.shape[0], 2), device=device)
+            total_grow_moments = torch.zeros((model.indices.shape[0], 3), device=device)
             total_grow_votes = torch.zeros((model.indices.shape[0], 2), device=device)
+            split_rays = torch.zeros((model.indices.shape[0], 2, 6), device=device)
             for camera in sampled_cameras:
                 target = camera.original_image.cuda()
                 image_votes, extras = render_err(target, camera, model,
@@ -433,58 +436,76 @@ for iteration in progress_bar:
                                              lambda_ssim=args.clone_lambda_ssim)
                 density = extras['cell_values'][:, 0]
                 tc = extras['tet_count']
-                grow_mask = tc > 4000
-                avg_alpha = image_votes[:, 0] / tc.clip(min=1)
+                # num_votes = extras['pixel_err'].sum()
 
-                num_votes = extras['pixel_err'].sum()
+                # -----------------------------------------------------------------------
+                # Split
+                # -----------------------------------------------------------------------
+                split_mask = (tc > 2000) | (tc < 4)
                 s0 = image_votes[:, 0] 
                 s1 = image_votes[:, 1]
                 s2 = image_votes[:, 2]
                 split_mu = safe_math.safe_div(s1, s0)
                 split_std = safe_math.safe_div(s2, s0) - split_mu**2
                 split_std[s0 < 1e-4] = 0
-                split_std[grow_mask] = 0
-                # split_std[avg_alpha < 1e-2] = 0
+                split_std[split_mask] = 0
 
-                s0 = image_votes[:, 3] 
-                s1 = image_votes[:, 4]
-                s2 = image_votes[:, 5]
-                grow_mu = safe_math.safe_div(s1, s0)
-                grow_std = safe_math.safe_div(s2, s0) - grow_mu**2
-                grow_std[s0 < 1e-4] = 0
+                split_votes = s0 * split_std
 
-                # split_votes = split_std * (density / tc.clip(min=1))
-                # split_votes = split_std * avg_alpha# / tc.clip(min=1)
-                split_votes = split_std# * image_votes[:, 1] / tc.clip(min=1)
-                # split_votes[(density / tc) < 1e-3] = 0
-                # split_votes[(tc > 10**2) & (density < 0.01)] = 0
-                grow_votes = grow_std
-                grow_votes[grow_mask] = 0
-                # split_votes = split_votes / split_votes.sum() * num_votes
-                # grow_votes = grow_votes / grow_votes.sum() * num_votes
+                w = image_votes[:, 12:13]
+                seg_exit = safe_math.safe_div(image_votes[:, 9:12], w)
+                seg_enter = safe_math.safe_div(image_votes[:, 6:9], w)
+                rays = torch.cat([ seg_enter, seg_exit ], dim=1)
 
-                # keep top two votes because we need two votes to densify a tet
-                # but we don't want to bias towards a primitive just because many views
-                # see it
-                total_split_votes = torch.sort(torch.cat([
-                    total_split_votes, split_votes.reshape(-1, 1)
-                ], dim=1), dim=1).values[:, 1:]
-                total_grow_votes = torch.sort(torch.cat([
-                    total_grow_votes, grow_votes.reshape(-1, 1)
-                ], dim=1), dim=1).values[:, 1:]
+                # ---------- keep the *three* candidates then drop the worst -----------
+                # votes: shape (N, 3)   rays: shape (N, 3, 3)
+                votes_3 = torch.cat([total_split_votes, split_votes.unsqueeze(1)], dim=1)
+                rays_3  = torch.cat([split_rays,    rays.unsqueeze(1)],    dim=1)
+
+                votes_sorted, idx_sorted = votes_3.sort(dim=1, descending=True)
+                total_split_votes = votes_sorted[:, :2]
+                split_rays    = torch.gather(
+                    rays_3,
+                    dim=1,
+                    index=idx_sorted[:, :2].unsqueeze(-1).expand(-1, -1, 6)
+                )
+
+                # -----------------------------------------------------------------------
+                # Grow
+                # -----------------------------------------------------------------------
+                grow_mask = (tc < 2000) & (tc > 20)
+                total_grow_moments[grow_mask] += image_votes[grow_mask, 3:6]
+                # s0 = image_votes[:, 3] 
+                # s1 = image_votes[:, 4]
+                # s2 = image_votes[:, 5]
+                # grow_mu = safe_math.safe_div(s1, s0)
+                # grow_std = safe_math.safe_div(s2, s0) - grow_mu**2
+                # grow_std[s0 < 1e-4] = 0
+                # grow_votes = grow_std
+                # grow_votes[grow_mask] = 0
+                # total_grow_votes = torch.sort(torch.cat([
+                #     total_grow_votes, grow_votes.reshape(-1, 1)
+                # ], dim=1), dim=1).values[:, 1:]
+                tet_count += tc > 0
+                tet_size += tc
             torch.cuda.empty_cache()
+            tet_size = tet_size / tet_count.clip(min=1)
 
-            grow_score = total_grow_votes.sum(dim=1)
             split_score = total_split_votes.sum(dim=1)
 
-            split_ratio_img = render_debug(split_score.reshape(-1, 1), model, sample_camera)
-            grow_ratio_img = render_debug(grow_score.reshape(-1, 1), model, sample_camera)
-            imageio.imwrite(args.output_path / f'split{iteration}.png', split_ratio_img)
-            imageio.imwrite(args.output_path / f'grow{iteration}.png', grow_ratio_img)
-            imageio.imwrite(args.output_path / f'im{iteration}.png', cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
-            # di = render_pkg['distortion_img'].detach().cpu().numpy().reshape
-            # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
-            # imageio.imwrite(args.output_path / f'di{iteration}.png', di)
+            s0 = total_grow_moments[:, 0] 
+            s1 = total_grow_moments[:, 1]
+            s2 = total_grow_moments[:, 2]
+            grow_mu = safe_math.safe_div(s1, s0)
+            grow_std = safe_math.safe_div(s2, s0) - grow_mu**2
+            grow_std[s0 < 1] = 0
+            grow_score = s0 * grow_std
+            alphas = compute_alpha(model.indices, model.vertices, model.calc_tet_density()).reshape(-1)
+            grow_score[alphas < 0.1] = 0
+            split_score[alphas < 0.1] = 0
+            # grow_score[tet_size < 20] = 0
+            # grow_score[tet_size > 8000] = 0
+
 
             target = target_num((iteration - args.densify_start) // args.densify_interval + 1)
             target_addition = target - model.vertices.shape[0]
@@ -495,6 +516,7 @@ for iteration in progress_bar:
                 grow_mask = torch.zeros((split_score.shape[0]), device=device, dtype=bool)
                 split_mask[torch.topk(split_score, int(target_split))[1]] = True
                 split_mask &= split_score > 0
+                # grow_score[split_mask] = 0
                 grow_mask[torch.topk(grow_score, int(target_grow))[1]] = True
                 grow_mask &= grow_score > 0
                 clone_mask = split_mask | grow_mask
@@ -506,7 +528,17 @@ for iteration in progress_bar:
                 imageio.imwrite(args.output_path / f'densify{iteration}.png', binary_im)
                 clone_indices = model.indices[clone_mask]
 
-                split_point = safe_math.safe_div(tet_moments[:, :3], tet_moments[:, 3:4])[clone_mask]
+                split_ratio_img = render_debug(split_score.reshape(-1, 1), model, sample_camera)
+                grow_ratio_img = render_debug(grow_score.reshape(-1, 1), model, sample_camera)
+                imageio.imwrite(args.output_path / f'split{iteration}.png', split_ratio_img)
+                imageio.imwrite(args.output_path / f'grow{iteration}.png', grow_ratio_img)
+                imageio.imwrite(args.output_path / f'im{iteration}.png', cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+                # di = render_pkg['distortion_img'].detach().cpu().numpy().reshape
+                # di = (cmap(di / di.max())*255).clip(min=0, max=255).astype(np.uint8)
+                # imageio.imwrite(args.output_path / f'di{iteration}.png', di)
+
+                # split_point = safe_math.safe_div(tet_moments[:, :3], tet_moments[:, 3:4])[clone_mask]
+                split_point = get_approx_ray_intersections(split_rays)[clone_mask]
                 tet_optim.split(clone_indices, split_point, args.split_mode, args.prune_density_threshold)
 
 

@@ -212,9 +212,10 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
     }
     return render_pkg
 
-@torch.jit.script
-def compute_alpha(indices, vertices, density, mask):
-    inds = indices[mask]
+def compute_alpha(inds, vertices, density, mask=None):
+    if mask is not None:
+        inds = inds[mask]
+        density = density[mask]
     verts = vertices
     device = verts.device
     v0, v1, v2, v3 = verts[inds[:, 0]], verts[inds[:, 1]], verts[inds[:, 2]], verts[inds[:, 3]]
@@ -222,10 +223,10 @@ def compute_alpha(indices, vertices, density, mask):
     edge_lengths = torch.stack([
         torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
         torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
-    ], dim=0).mean(dim=0)[0].detach()
+    ], dim=0).max(dim=0)[0].detach()
     
     # Compute the maximum possible alpha using the largest edge length
-    alpha = 1 - torch.exp(-density[mask].reshape(-1, 1) * edge_lengths.reshape(-1, 1))
+    alpha = 1 - torch.exp(-density.reshape(-1, 1) * edge_lengths.reshape(-1, 1))
     return alpha
 
 # @torch.jit.script
@@ -368,3 +369,89 @@ def select_n(tet_err_weight, N):
     rgbs_threshold = torch.sort(tet_err_weight).values[-min(int(N), tet_err_weight.shape[0])]
     clone_mask = (tet_err_weight > rgbs_threshold)
     return clone_mask
+
+def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
+    """
+    Calculates the approximate intersection point for pairs of line segments.
+
+    The intersection is defined as the midpoint of the shortest segment
+    connecting the two input line segments.
+
+    Args:
+        split_rays_data (torch.Tensor): Tensor of shape (N, 2, 6).
+            - N: Number of segment pairs.
+            - 2: Represents the two segments in a pair.
+            - 6: Contains [Ax, Ay, Az, Bx, By, Bz] for each segment,
+                 where A and B are the segment endpoints.
+                 Based on current Python code:
+                 A = average_P_exit, B = average_P_entry
+        epsilon (float): Small value to handle parallel lines and avoid
+                         division by zero if a segment has zero length.
+
+    Returns:
+        torch.Tensor: Tensor of shape (N, 3) representing the approximate
+                      "intersection" points (midpoints of closest approach).
+    """
+    # Segment 1 endpoints
+    p1_a = split_rays_data[:, 0, 0:3]  # Endpoint A of first segments (N, 3)
+    p1_b = split_rays_data[:, 0, 3:6]  # Endpoint B of first segments (N, 3)
+    # Segment 2 endpoints
+    p2_a = split_rays_data[:, 1, 0:3]  # Endpoint A of second segments (N, 3)
+    p2_b = split_rays_data[:, 1, 3:6]  # Endpoint B of second segments (N, 3)
+
+    # Define segment origins and direction vectors
+    # Segment S1: o1 + s * d1, for s in [0, 1]
+    # Segment S2: o2 + t * d2, for t in [0, 1]
+    o1 = p1_a
+    d1 = p1_b - p1_a  # Direction vector for segment 1 (from A to B)
+    o2 = p2_a
+    d2 = p2_b - p2_a  # Direction vector for segment 2 (from A to B)
+
+    # Calculate terms for finding closest points on the infinite lines
+    # containing the segments (based on standard formulas, e.g., Christer Ericson's "Real-Time Collision Detection")
+    v_o = o1 - o2 # Vector from origin of line 2 to origin of line 1
+
+    a = torch.sum(d1 * d1, dim=1)  # Squared length of d1
+    b = torch.sum(d1 * d2, dim=1)  # Dot product of d1 and d2
+    c = torch.sum(d2 * d2, dim=1)  # Squared length of d2
+    d = torch.sum(d1 * v_o, dim=1) # d1 dot (o1 - o2)
+    e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
+
+    denom = a * c - b * b
+    
+    # Parameters for closest points on the *infinite lines*
+    # s_line = (b*e - c*d) / denom
+    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
+    # The t_line should be for the parameterization o2 + t*d2.
+    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
+    # by setting derivatives w.r.t s and t to 0, we get:
+    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
+    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
+    # Solving this system:
+    # s_line = (d*c - e*b) / denom
+    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
+    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
+    
+    s_line_num = (b * e) - (c * d)
+    t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
+
+    # Handle near-zero denominator (lines are parallel or one segment is a point)
+    # We compute with a safe denominator, then clamp. Clamping is key for segments.
+    denom_safe = torch.where(denom.abs() < epsilon, torch.ones_like(denom), denom)
+    
+    s_line = s_line_num / denom_safe
+    t_line = t_line_num / denom_safe # Note: This t_line is for the parameter of d2 (from o2)
+
+    # Clamp parameters to [0, 1] to stay within the segments
+    # s_seg = torch.clamp(s_line, 0.0, 1.0)
+    # t_seg = torch.clamp(t_line, 0.0, 1.0)
+    s_seg = s_line.clip(min=0)
+    t_seg = t_line.clip(min=0)
+
+    # Points of closest approach on the segments
+    pc1 = o1 + s_seg.unsqueeze(1) * d1
+    pc2 = o2 + t_seg.unsqueeze(1) * d2
+    
+    p_int = (pc1 + pc2) / 2.0
+                        
+    return p_int
