@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from utils import hashgrid
+import math
 
 from utils.graphics_utils import l2_normalize_th
 from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
@@ -58,36 +59,6 @@ def pre_calc_cell_values(vertices, indices, center, scene_scaling: float):
     return clipped_circumcenter, cv.float(), cr, normalized
 
 @torch.jit.script
-def compute_vertex_colors_from_field(
-    element_verts: torch.Tensor,   # (T, 4, 3) - Renamed for clarity (V=4, D=3)
-    base:           torch.Tensor,   # (T, 3)    - (T, C)
-    gradients:      torch.Tensor,   # (T, 3, 3) - (T, C, D_grad=3)
-    circumcenters:  torch.Tensor    # (T, 3)    - (T, D=3)
-) -> torch.Tensor: # Returns vertex_colors (T, 4, 3)
-    """
-    Compute per-vertex colors for each element (e.g., tetrahedron).
-    
-    For each vertex:
-      color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
-    """
-    offsets = element_verts - circumcenters[:, None, :]
-    normalized_offsets = l2_normalize_th(offsets, dim=-1)
-
-    # grad_contrib: (T, V, C)
-    # gradients: (T, C, D) = (T, 3, 3)
-    # normalized_offsets: (T, V, D) = (T, 4, 3)
-    # einsum: 'tcd,tvd->tvc'
-    # t: batch (Elements)
-    # c: color channels (of gradient)
-    # d: spatial dimensions (of gradient and offset)
-    # v: vertices
-    # Output: for each element, for each vertex, for each color channel
-    grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, normalized_offsets)
-    vertex_colors = base[:, None, :] + grad_contrib 
-    
-    return vertex_colors
-
-@torch.jit.script
 def compute_gradient_from_vertex_colors(
     vcolors:        torch.Tensor,   # (T, 4, 3) - (T, V, C)
     element_verts:  torch.Tensor,   # (T, 4, 3) - (T, V, D)
@@ -117,6 +88,59 @@ def compute_gradient_from_vertex_colors(
 
     return base_recovered, gradients_recovered
 
+@torch.jit.script
+def compute_vertex_colors_from_field(
+    element_verts: torch.Tensor,   # (T, 4, 3) - Renamed for clarity (V=4, D=3)
+    base:           torch.Tensor,   # (T, 3)    - (T, C)
+    gradients:      torch.Tensor,   # (T, 3, 3) - (T, C, D_grad=3)
+    circumcenters:  torch.Tensor    # (T, 3)    - (T, D=3)
+) -> torch.Tensor: # Returns vertex_colors (T, 4, 3)
+    """
+    Compute per-vertex colors for each element (e.g., tetrahedron).
+    
+    For each vertex:
+      color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
+    """
+    offsets = element_verts - circumcenters[:, None, :]
+    normalized_offsets = l2_normalize_th(offsets, dim=-1)
+
+    # grad_contrib: (T, V, C)
+    # gradients: (T, C, D) = (T, 3, 3)
+    # normalized_offsets: (T, V, D) = (T, 4, 3)
+    # einsum: 'tcd,tvd->tvc'
+    # t: batch (Elements)
+    # c: color channels (of gradient)
+    # d: spatial dimensions (of gradient and offset)
+    # v: vertices
+    # Output: for each element, for each vertex, for each color channel
+    grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, normalized_offsets)
+    vertex_colors = base[:, None, :] + grad_contrib 
+    
+    return vertex_colors
+
+def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg, density_offset:float):
+    # subtract 0.5 to remove 0th order spherical harmonic
+    tets = vertices[indices]
+    tet_color_raw = eval_sh(
+        tets.mean(dim=1),
+        rgb.float(),
+        sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3),
+        camera_center,
+        current_sh_deg) - 0.5
+    base_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+    grd = grd * base_color
+
+    vcolors = compute_vertex_colors_from_field(
+        tets.detach(), base_color.reshape(-1, 3), grd.float(), circumcenters.float().detach())
+    vcolors = vcolors.reshape(-1, 12)
+    features = torch.cat([density, vcolors], dim=1)
+    return features
+
+    # base_hat, grd_hat = compute_gradient_from_vertex_colors(
+    #     vcolors, tets, circumcenters.float().detach())
+    # features = torch.cat([density, base_hat.reshape(-1, 3), grd_hat.reshape(-1, 9)], dim=1)
+    # return features
+
 # def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg, density_offset:float):
 #     # subtract 0.5 to remove 0th order spherical harmonic
 #     tets = vertices[indices]
@@ -133,29 +157,6 @@ def compute_gradient_from_vertex_colors(
 #     vcolors = vcolors.reshape(-1, 12)
 #     features = torch.cat([density, vcolors], dim=1)
 #     return features
-
-def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg, density_offset:float):
-    # subtract 0.5 to remove 0th order spherical harmonic
-    tets = vertices[indices]
-    tet_color_raw = eval_sh(
-        tets.mean(dim=1),
-        rgb.float(),
-        sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3),
-        camera_center,
-        current_sh_deg) - 0.5
-    base_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 1, 3), beta=10)
-    grd = grd * base_color
-
-    vcolors = compute_vertex_colors_from_field(
-        tets.detach(), tet_color_raw.reshape(-1, 3), grd.float(), circumcenters.float().detach())
-    vcolors = vcolors.reshape(-1, 12)
-    features = torch.cat([density, vcolors], dim=1)
-    return features
-
-    # base_hat, grd_hat = compute_gradient_from_vertex_colors(
-    #     vcolors, tets, circumcenters.float().detach())
-    # features = torch.cat([density, base_hat.reshape(-1, 3), grd_hat.reshape(-1, 9)], dim=1)
-    # return features
 
 class iNGPDW(nn.Module):
     def __init__(self, 
@@ -209,14 +210,15 @@ class iNGPDW(nn.Module):
         with torch.no_grad():
             last.weight[4:, :].zero_()
             last.bias[4:].zero_()
-        for network, eps in zip(
-            [self.gradient_net, self.sh_net, self.density_net], 
-            [5e-1, 1e-2, 0.1]):
-            last = network[-1]
-            with torch.no_grad():
-                init.uniform(last.weight.data, a=-eps, b=eps)
-                # last.weight.zero_()
-                last.bias.zero_()
+            for network, eps in zip(
+                [self.gradient_net, self.sh_net, self.density_net], 
+                [5e-2, 1e-4, 0.1]):
+                last = network[-1]
+                with torch.no_grad():
+                    init.uniform(last.weight.data, a=-eps, b=eps)
+                    # last.weight.zero_()
+                    last.bias.zero_()
+                # self.gradient_net[-1].weight.data.fill_(5e-1)
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):
         x = x.detach()
         output = self.encoding(x).float()
@@ -265,6 +267,6 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 1, 3) + 0.5
         density = safe_exp(sigma+self.density_offset)
-        grd = torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
+        grd =  torch.tanh(field_samples.reshape(-1, 3, 3)) / math.sqrt(3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh
