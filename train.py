@@ -22,6 +22,7 @@ from utils import cam_util
 from utils.train_util import *
 # from models.vertex_color import Model, TetOptimizer
 from models.ingp_color import Model, TetOptimizer
+from models.frozen import freeze_model
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -74,7 +75,7 @@ args = Args()
 args.tile_size = 16
 args.image_folder = "images_4"
 args.eval = False
-args.dataset_path = Path("/data/nerf_datasets/360/garden")
+args.dataset_path = Path("/data/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
 args.iterations = 10000
 args.max_steps = 20000
@@ -90,7 +91,7 @@ args.sh_step = 1
 args.encoding_lr = 6e-3
 args.final_encoding_lr = 6e-4
 args.network_lr = 1e-3
-args.final_network_lr = 1e-3
+args.final_network_lr = 1e-4
 args.hidden_dim = 64
 args.scale_multi = 1.0
 args.log2_hashmap_size = 22
@@ -100,9 +101,14 @@ args.density_offset = -4
 args.weight_decay = 0.01
 args.hashmap_dim = 4
 args.grad_clip = 1e-2
-args.spike_duration = 150
+args.spike_duration = 350
 args.k_samples = 1
 args.trunc_sigma = 0.3
+
+args.g_init=1.0
+args.s_init=1e-4
+args.d_init=0.1
+args.c_init=0.8
 
 args.density_lr = 5e-5
 args.color_lr = 5e-5
@@ -110,13 +116,13 @@ args.gradient_lr = 5e-5
 args.sh_lr = 5e-5
 
 # Vertex Settings
-args.lr_delay = 50
+args.lr_delay = 0
 args.vert_lr_delay = 50
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 5e-8
 args.vertices_lr_delay_multi = 1e-8
 args.vertices_beta = [0.9, 0.99]
-args.contract_vertices = True
+args.contract_vertices = False
 args.start_clip_multi = 1e-3
 args.end_clip_multi = 1e-3
 args.delaunay_start = 17000
@@ -132,18 +138,18 @@ args.clone_lambda_ssim = 0.2
 args.split_std = 0.1
 args.split_mode = "split_point"
 args.clone_schedule = "quadratic"
-args.min_tet_count = 4
+args.min_tet_count = 16
 args.prune_density_threshold = 0.0
-args.densify_start = 3000
+args.densify_start = 1000
 args.densify_end = 15000
 args.densify_interval = 500
 args.budget = 2_000_000
 args.clone_velocity = 0.1
-args.speed_mul = 100
-args.clone_min_alpha = 1/255
+args.speed_mul = 10
+args.clone_min_alpha = 0.05
 args.clone_min_density = 1e-3
 args.normalize_err = False
-args.percent_split = 0.9
+args.percent_split = 1
 args.density_t = 1.0
 
 args.lambda_noise = 0.0
@@ -159,7 +165,7 @@ args.lambda_color = 0.0
 args.lambda_tv = 0.0
 args.density_threshold = 0.0
 args.voxel_size = 0.05
-args.init_repeat = 10
+args.init_repeat = 1
 
 # Bilateral grid arguments
 # Bilateral grid parameters
@@ -279,6 +285,15 @@ for iteration in progress_bar:
     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
     do_sh_step = iteration % args.sh_step == 0
 
+    if do_delaunay or do_freeze:
+        st = time.time()
+        tet_optim.update_triangulation(density_threshold=args.density_threshold, high_precision=do_freeze)
+        if do_freeze:
+            del tet_optim
+            model, tet_optim = freeze_model(model, **args.as_dict())
+            gc.collect()
+            torch.cuda.empty_cache()
+
     if len(inds) == 0:
         inds = list(range(len(train_cameras)))
         random.shuffle(inds)
@@ -340,7 +355,7 @@ for iteration in progress_bar:
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
-           tet_optim.lambda_dist(iteration) * dl_loss
+           args.lambda_dist * dl_loss
 
     # ----- Add total variation loss for bilateral grid if enabled -----
     tvloss = None
@@ -403,7 +418,7 @@ for iteration in progress_bar:
             sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
             video_writer.write(pad_image2even(sample_image))
 
-    if do_cloning:
+    if do_cloning and not model.frozen:
         with torch.no_grad():
             # collect data
             # print(f"Culling {(~vert_alive).sum()} dead vertices")
@@ -576,10 +591,6 @@ for iteration in progress_bar:
         "#T": model.indices.shape[0],
         "DL": repr(f"{dl_loss:>5.2f}"),
     })
-
-    if do_delaunay:
-        st = time.time()
-        tet_optim.update_triangulation(density_threshold=args.density_threshold, high_precision=do_freeze)
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 video_writer.release()

@@ -53,7 +53,8 @@ class Model(nn.Module):
         sh_dim = ((1+max_sh_deg)**2-1)*3
         self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
         self.chunk_size = 408576
-
+        self.mask_values = True
+        self.frozen = False
 
         self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
@@ -192,8 +193,8 @@ class Model(nn.Module):
         model.load_state_dict(ckpt)
         model.contract_vertices = temp
         model.min_t = model.scene_scaling * config.base_min_t
-        model.indices = torch.as_tensor(indices).cuda()
-        model.boundary_tets = torch.zeros((indices.shape[0]), dtype=bool, device='cuda')
+        # model.indices = torch.as_tensor(indices).cuda()
+        # model.boundary_tets = torch.zeros((indices.shape[0]), dtype=bool, device='cuda')
         return model
 
     @torch.no_grad
@@ -382,25 +383,20 @@ class Model(nn.Module):
         torch.cuda.empty_cache()
         verts = self.vertices
         if high_precision:
-            simplices = Delaunay(verts.detach().cpu().numpy()).simplices
-            self.indices = torch.tensor(simplices, device=verts.device).int().cuda()
-
+            indices_np = Delaunay(verts.detach().cpu().numpy()).simplices.astype(int)
+            # self.indices = torch.tensor(indices_np, device=verts.device).int().cuda()
         else:
             v = Del(verts.shape[0])
             indices_np, prev = v.compute(verts.detach().cpu().double())
             indices_np = indices_np.numpy()
             indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
+            del prev
         
         self.indices = torch.as_tensor(indices_np).cuda()
         if density_threshold > 0:
             mask = self.calc_tet_density() > density_threshold
             self.indices = self.indices[mask]
             
-            del prev, mask
-        else:
-            del prev
-        torch.cuda.empty_cache()
-        
         torch.cuda.empty_cache()
 
     def __len__(self):

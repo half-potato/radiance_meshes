@@ -99,8 +99,8 @@ class CustomAdam:
         """
         self.optimizer.step()
 
-    def zero_grad(self):
+    def zero_grad(self, **kwargs):
         """
         Zero out the gradients for all optimized parameters.
         """
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(**kwargs)

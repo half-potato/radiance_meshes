@@ -159,6 +159,10 @@ class iNGPDW(nn.Module):
                  L=10,
                  hashmap_dim=4,
                  hidden_dim=64,
+                 g_init=1,
+                 s_init=1e-4,
+                 d_init=0.1,
+                 c_init=0.6,
                  density_offset=-4,
                  **kwargs):
         super().__init__()
@@ -200,11 +204,12 @@ class iNGPDW(nn.Module):
             last.weight[4:, :].zero_()
             last.bias[4:].zero_()
             for network, eps in zip(
-                [self.gradient_net, self.sh_net, self.density_net], 
-                [1e-0, 1e-4, 0.1]):
+                [self.gradient_net, self.sh_net, self.density_net, self.color_net], 
+                [g_init, s_init, d_init, c_init]):
                 last = network[-1]
                 with torch.no_grad():
                     init.uniform(last.weight.data, a=-eps, b=eps)
+                    # nn.init.xavier_uniform_(m.weight, gain)
                     # last.weight.zero_()
                     last.bias.zero_()
                 # self.gradient_net[-1].weight.data.fill_(5e-1)
@@ -256,6 +261,7 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
+        # grd = torch.tanh(field_samples.reshape(-1, 1, 3).expand(-1, 3, 3)) / math.sqrt(3)
         grd = torch.tanh(field_samples.reshape(-1, 1, 3).expand(-1, 3, 3)) / math.sqrt(3)
         # grd = torch.tanh(field_samples.reshape(-1, 3, 3)) / math.sqrt(3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
