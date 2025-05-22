@@ -161,7 +161,7 @@ def render(camera: Camera, model, bg=0, cell_values=None, tile_size=16, min_t=0.
         render_grid)
     extras = {}
     if cell_values is None:
-        cell_values = torch.zeros((mask.shape[0], 13), device=circumcenter.device)
+        cell_values = torch.zeros((mask.shape[0], 7), device=circumcenter.device)
         if mask.sum() > 0 and model.mask_values:
             normed_cc, cell_values[mask] = model.get_cell_values(camera, mask, circumcenter[mask])
         else:

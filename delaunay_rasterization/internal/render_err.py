@@ -55,7 +55,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         vs_tetra.retain_grad()
     except:
         pass
-    cell_values = torch.zeros((mask.shape[0], 13), device=circumcenter.device)
+    cell_values = torch.zeros((mask.shape[0], 7), device=circumcenter.device)
     vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
     # vertex_color, cell_values = model.get_cell_values(camera)
 

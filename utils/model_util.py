@@ -102,7 +102,6 @@ def compute_vertex_colors_from_field(
       color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
     """
     offsets = element_verts - circumcenters[:, None, :]
-    normalized_offsets = l2_normalize_th(offsets, dim=-1)
 
     # grad_contrib: (T, V, C)
     # gradients: (T, C, D) = (T, 3, 3)
@@ -113,7 +112,7 @@ def compute_vertex_colors_from_field(
     # d: spatial dimensions (of gradient and offset)
     # v: vertices
     # Output: for each element, for each vertex, for each color channel
-    grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, normalized_offsets)
+    grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
     vertex_colors = base[:, None, :] + grad_contrib 
     
     return vertex_colors
@@ -128,24 +127,18 @@ def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters
         camera_center,
         current_sh_deg) - 0.5
     base_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
-    grd = grd * base_color
-
-    vcolors = compute_vertex_colors_from_field(
-        tets.detach(), base_color.reshape(-1, 3), grd.float(), circumcenters.float().detach())
-    # vcolors = vcolors.reshape(-1, 12)
-    # features = torch.cat([density, vcolors], dim=1)
-    # return features
-    base_color_v0 = vcolors[:, 0]
-    # base_color_v0 = torch.rand_like(base_color_v0)
+    # grd = grd.reshape(-1, 1, 3) * base_color.min(dim=1, keepdim=True).values.detach()
+    grd = grd.reshape(-1, 1, 3) * base_color.mean(dim=1, keepdim=True).detach()
     radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
     normed_grd = safe_div(grd, radius)
-    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 9)], dim=1)
-    return features.float()
 
-    base_hat, grd_orig, grd_hat = compute_gradient_from_vertex_colors(
-        vcolors, tets, circumcenters.float().detach())
-    features = torch.cat([density, base_hat.reshape(-1, 3), grd_hat.reshape(-1, 9)], dim=1)
-    return features
+    vcolors = compute_vertex_colors_from_field(
+        tets.detach(), base_color.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
+
+    base_color_v0 = vcolors[:, 0]
+    # base_color_v0 = torch.rand_like(base_color_v0)
+    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
+    return features.float()
 
 class iNGPDW(nn.Module):
     def __init__(self, 
@@ -261,8 +254,8 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
-        # grd = torch.tanh(field_samples.reshape(-1, 1, 3).expand(-1, 3, 3)) / math.sqrt(3)
-        grd = torch.tanh(field_samples.reshape(-1, 1, 3).expand(-1, 3, 3)) / math.sqrt(3)
+        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
+        # grd = torch.tanh(field_samples) / math.sqrt(3)
         # grd = torch.tanh(field_samples.reshape(-1, 3, 3)) / math.sqrt(3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh

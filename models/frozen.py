@@ -107,7 +107,7 @@ class FrozenTetModel(nn.Module):
         grd      = self.gradient[start:end]
         sh       = self.sh[start:end]
 
-        return circumcenter, normalized, density, rgb, grd.expand(-1, 3, 3), sh
+        return circumcenter, normalized, density, rgb, grd, sh
 
     # ------------------------------------------------------------------
     # public renderer interface
@@ -285,7 +285,7 @@ def bake_from_model(base_model: "Model", *, detach: bool = True, chunk_size: int
         )
         d_list.append(density)
         rgb_list.append(rgb)
-        grd_list.append(grd[:, 0:1])
+        grd_list.append(grd)
         sh_list.append(sh)
 
     density  = torch.cat(d_list, 0)

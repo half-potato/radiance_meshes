@@ -5,7 +5,9 @@ import safe_math;
 struct SplatTetrahedra_interp : IDifferentiable
 {
     Tetrahedra tet;
-    float4x3 vertex_color; // Per-vertex color to be barycentrically interpolated
+    // float4x3 vertex_color; // Per-vertex color to be barycentrically interpolated
+    float3 base_color;
+    float3 grd;
     float density;          // Single scalar density for the entire tetrahedron
 };
 
@@ -58,15 +60,23 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
     return max(vertex_color[0] * bary.x + vertex_color[1] * bary.y + vertex_color[2] * bary.z + vertex_color[3] * bary.w, 0.f);
 }
 
+// [Differentiable]
+// inline float3 linear_color(float4x3 grad, float3 v)
+// {
+//     // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
+//     return {
+//         max(grad[0].r + dot(grad[1], v), 0.f),
+//         max(grad[0].g + dot(grad[2], v), 0.f),
+//         max(grad[0].b + dot(grad[3], v), 0.f),
+//     };
+// }
+
 [Differentiable]
-inline float3 linear_color(float4x3 grad, float3 v)
+inline float3 linear_color(float3 grad, float3 v)
 {
     // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
-    return {
-        max(grad[0].r + dot(grad[1], v), 0.f),
-        max(grad[0].g + dot(grad[2], v), 0.f),
-        max(grad[0].b + dot(grad[3], v), 0.f),
-    };
+    float f = max(dot(grad, v), 0.f);
+    return {f, f, f};
 }
 
 
@@ -112,8 +122,10 @@ bool evaluate_tetra_interp(
         //*
         float3 v_enter = enter * ray_d + ray_o - verts[0];
         float3 v_exit = exit * ray_d + ray_o - verts[0];
-        float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
-        float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
+        // float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
+        // float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
+        float3 c_enter = max(linear_color(g.grd, v_enter) + g.base_color, 0.f);
+        float3 c_exit = max(linear_color(g.grd, v_exit) + g.base_color, 0.f);
         //*/
 
         float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
@@ -145,29 +157,19 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
 
     // Here we assume each tetrahedron has a single scalar density in tet_density:
     float density = float(tet_density[g_idx, 0]);
-    float3 c0 = {
+    float3 base_color = {
         float(tet_density[g_idx, 1]),
         float(tet_density[g_idx, 2]),
         float(tet_density[g_idx, 3]),
     };
-    float3 c1 = {
+    float3 grd = {
         float(tet_density[g_idx, 4]),
         float(tet_density[g_idx, 5]),
         float(tet_density[g_idx, 6]),
     };
-    float3 c2 = {
-        float(tet_density[g_idx, 7]),
-        float(tet_density[g_idx, 8]),
-        float(tet_density[g_idx, 9]),
-    };
-    float3 c3 = {
-        float(tet_density[g_idx, 10]),
-        float(tet_density[g_idx, 11]),
-        float(tet_density[g_idx, 12]),
-    };
 
     SplatTetrahedra_interp result = {
-        tet, {c0, c1, c2, c3}, density
+        tet, base_color, grd, density
     };
     return result;
 }
@@ -183,33 +185,18 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
     float density = float(tet_density[g_idx, 0]);
-    float3 c0 = {
+    SplatTetrahedra_interp result;
+    result.tet       = tet;
+    result.density   = density;
+    result.base_color = {
         float(tet_density[g_idx, 1]),
         float(tet_density[g_idx, 2]),
         float(tet_density[g_idx, 3]),
     };
-    float3 c1 = {
+    result.grd = {
         float(tet_density[g_idx, 4]),
         float(tet_density[g_idx, 5]),
         float(tet_density[g_idx, 6]),
     };
-    float3 c2 = {
-        float(tet_density[g_idx, 7]),
-        float(tet_density[g_idx, 8]),
-        float(tet_density[g_idx, 9]),
-    };
-    float3 c3 = {
-        float(tet_density[g_idx, 10]),
-        float(tet_density[g_idx, 11]),
-        float(tet_density[g_idx, 12]),
-    };
-
-    SplatTetrahedra_interp result;
-    result.tet       = tet;
-    result.density   = density;
-    result.vertex_color[0] = c0;
-    result.vertex_color[1] = c1;
-    result.vertex_color[2] = c2;
-    result.vertex_color[3] = c3;
     return result;
 }
