@@ -12,6 +12,7 @@ from utils.topo_utils import (
 from utils.model_util import activate_output
 from utils import optim
 from utils.model_util import *
+from utils.safe_math import safe_log, safe_exp
 
 
 class FrozenTetModel(nn.Module):
@@ -54,9 +55,9 @@ class FrozenTetModel(nn.Module):
         self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
 
         # learnable per‑tet parameters -------------------------------------------
-        self.density   = nn.Parameter(density)    # (T, 1)
+        self.density   = nn.Parameter(safe_log(density))    # (T, 1)
         self.rgb       = nn.Parameter(rgb)        # (T, 3)
-        self.gradient  = nn.Parameter(gradient)   # (T, 3, 3)
+        self.gradient  = nn.Parameter(torch.atanh(gradient.clip(min=-0.99, max=0.99)))   # (T, 3, 3)
         self.sh        = nn.Parameter(sh)         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
@@ -87,9 +88,6 @@ class FrozenTetModel(nn.Module):
         self,
         vertices: torch.Tensor,
         indices: torch.Tensor,
-        start: int,
-        end: int,
-        *,
         circumcenters: Optional[torch.Tensor] = None,
     ):
         if circumcenters is None:
@@ -100,10 +98,10 @@ class FrozenTetModel(nn.Module):
             circumcenter = circumcenters[start:end]
         normalized = (circumcenter - self.center) / self.scene_scaling
 
-        density  = self.density[start:end]
-        rgb      = self.rgb[start:end]
-        grd      = self.gradient[start:end]
-        sh       = self.sh[start:end]
+        density  = safe_exp(self.density)
+        rgb      = self.rgb
+        grd      = torch.tanh(self.gradient)
+        sh       = self.sh
 
         return circumcenter, normalized, density, rgb, grd, sh
 
@@ -119,22 +117,16 @@ class FrozenTetModel(nn.Module):
     ):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-
-        normed_cc_list, out_list = [], []
-        for start in range(0, indices.shape[0], self.chunk_size):
-            end = min(start + self.chunk_size, indices.shape[0])
-            cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
-                vertices, indices, start, end, circumcenters=all_circumcenters
-            )
-            cell_output = activate_output(
-                camera.camera_center.to(self.device),
-                density, rgb, grd, sh, indices[start:end],
-                cc, vertices,
-                self.current_sh_deg, self.max_sh_deg,
-            )
-            normed_cc_list.append(normalized)
-            out_list.append(cell_output)
-        return torch.cat(normed_cc_list, 0), torch.cat(out_list, 0)
+        cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
+            vertices, indices, circumcenters=all_circumcenters
+        )
+        cell_output = activate_output(
+            camera.camera_center.to(self.device),
+            density, rgb, grd, sh, indices,
+            cc, vertices,
+            self.current_sh_deg, self.max_sh_deg,
+        )
+        return normalized, cell_output
 
     # ------------------------------------------------------------------
     # geometry is frozen

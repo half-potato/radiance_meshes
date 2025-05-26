@@ -618,6 +618,7 @@ def render_with_slangpy(
 
 
     slang_device.submit_command_buffer(command_encoder.finish())
+    print("Sorting")
 
     command_encoder = slang_device.create_command_encoder()
     with command_encoder.begin_compute_pass() as pass_encoder:
@@ -630,8 +631,10 @@ def render_with_slangpy(
         processor["rayOrigin"] = ray_origin_scene_np
         pass_encoder.dispatch([(num_tets + 63) // 64, 1, 1])
     slang_device.submit_command_buffer(command_encoder.finish())
+    print("Sorted")
 
     sort_pairs_np = sort_pairs_buffer.to_numpy().view(np.uint32).reshape((num_tets, 2))
+    print(sort_pairs_np)
     
     # Sort by the key (first element of uint2)
     sorted_indices_cpu = np.argsort(sort_pairs_np[:, 0])
@@ -643,6 +646,7 @@ def render_with_slangpy(
     # For now, create a new buffer with sorted data
     del sort_pairs_buffer # Release old one
     sorted_sort_pairs_buffer = slang_device.create_buffer(data=sorted_sort_pairs_np, usage=spy.BufferUsage.shader_resource)
+    print("created buffer. starting render pass")
 
     with command_encoder.begin_render_pass(
         {"color_attachments": [
@@ -651,30 +655,16 @@ def render_with_slangpy(
                 'store_op': spy.StoreOp.store,
                 'clear_value': [bg_color_rgb[0], bg_color_rgb[1], bg_color_rgb[2], 1.0] # Clear alpha to 1.0 for transmittance accumulation
         }]}) as pass_encoder:
-        
+        mesh_render_shader_object = pass_encoder.bind_pipeline(mesh_render_pipeline)
+        processor = spy.ShaderCursor(mesh_render_shader_object)
+        processor["scene"] = scene_params_dict
+        processor["sortBuffer"] = sorted_sort_pairs_buffer
+        processor["rayOrigin"] = ray_origin_scene_np
+        processor['tetColors'] = vertex_colors_after_sh_eval_buffer
+        processor["viewProjection"] = view_projection_np @ extracted_data["scene_transform"], # Apply scene transform here
 
         # e. Render Mesh
-        num_tets_to_draw = int(num_tets * mesh_percent_tets_to_draw)
-        # Create a derivative of scene_params_dict for rendering, including the evaluated colors
-        scene_params_for_render = scene_params_dict.copy()
-        # The VS/FS will expect the evaluated colors via the scene block, e.g. scene.evaluatedVertexColors
-        scene_params_for_render["evaluatedVertexColors"] = vertex_colors_after_sh_eval_buffer
-
-        # Dummy index buffer for instanced drawing: 12 indices (0-11) for 4 triangles per tet
-        # These SV_VertexID values (0-11) will be used by VS to map to the correct vertex data for the instance.
-        dummy_indices_for_instanced_draw_np = np.arange(12, dtype=np.uint32)
-        dummy_index_buffer = slang_device.create_buffer(data=dummy_indices_for_instanced_draw_np, usage=spy.BufferUsage.index_buffer)
-
         pass_encoder.bind_pipeline(mesh_render_pipeline)
-        
-        render_pass_params = {
-            "scene": scene_params_for_render, # Contains most static scene data + evaluated colors
-            "sortBuffer": sorted_sort_pairs_buffer, # RWStructuredBuffer<uint2> sortBuffer;
-            "viewProjection": view_projection_np @ extracted_data["scene_transform"], # Apply scene transform here
-            "rayOrigin": ray_origin_scene_np, # uniform float3 rayOrigin;
-            "densityThreshold": extracted_data["max_density"] * density_threshold_factor * extracted_data["density_scale_from_model"] # uniform float densityThreshold;
-        }
-        pass_encoder.bind_params(render_pass_params)
 
         pass_encoder.bind_index_buffer(dummy_index_buffer, spy.Format.r32_uint, 0)
         
@@ -683,34 +673,34 @@ def render_with_slangpy(
 
         # Draw 12 vertices per instance (tet), for num_tets_to_draw instances.
         # VS uses SV_InstanceID to get tet_idx from sortBuffer, and SV_VertexID (0-11) to generate tri verts.
+        num_tets_to_draw = int(num_tets * mesh_percent_tets_to_draw)
         pass_encoder.draw_indexed(index_count=12, instance_count=num_tets_to_draw, start_index_location=0, base_vertex_location=0, start_instance_location=0)
+        slang_device.submit_command_buffer(pass_encoder.finish())
 
-    pass_encoder.resource_barrier(textures=[output_texture]) # Ensure render pass writes are visible to compute
-
-    # f. Invert Alpha
-    invert_alpha_shader_object = pass_encoder.bind_pipeline(invert_alpha_pipeline)
-    params_invert_alpha = {
-        "image": output_texture.create_view(format=output_image_format),
-        "dim": np.array([camera.image_width, camera.image_height], dtype=np.uint32)
-    }
-    invert_alpha_shader_object.set_params(params_invert_alpha)
-    pass_encoder.dispatch_compute((camera.image_width + 7)//8, (camera.image_height + 7)//8, 1)
-
-    # --- 7. Submit and Retrieve ---
-    slang_device.submit_command_buffer(pass_encoder.finish())
-    slang_device.wait_for_idle()
-
-    output_texture_data = output_texture.read_data()
-    
-    # Data is flat, reshape. Format is rgba32_float.
-    image_data_np = np.frombuffer(output_texture_data, dtype=np.float32).reshape((camera.image_height, camera.image_width, 4))
-    
-    final_image_rgb = image_data_np[:, :, :3]
-    final_image_alpha = image_data_np[:, :, 3]
-
-    # Convert to CHW for PyTorch if needed by calling code.
-    # render_pkg['render'] expects (3, H, W)
-    final_image_rgb_chw = final_image_rgb.transpose(2,0,1)
+        # f. Invert Alpha
+        # invert_alpha_shader_object = pass_encoder.bind_pipeline(invert_alpha_pipeline)
+        # params_invert_alpha = {
+        #     "image": output_texture.create_view(format=output_image_format),
+        #     "dim": np.array([camera.image_width, camera.image_height], dtype=np.uint32)
+        # }
+        # invert_alpha_shader_object.set_params(params_invert_alpha)
+        # pass_encoder.dispatch_compute((camera.image_width + 7)//8, (camera.image_height + 7)//8, 1)
+        #
+        # # --- 7. Submit and Retrieve ---
+        # slang_device.submit_command_buffer(pass_encoder.finish())
+        # slang_device.wait_for_idle()
+        #
+        # output_texture_data = output_texture.read_data()
+        # 
+        # # Data is flat, reshape. Format is rgba32_float.
+        # image_data_np = np.frombuffer(output_texture_data, dtype=np.float32).reshape((camera.image_height, camera.image_width, 4))
+        # 
+        # final_image_rgb = image_data_np[:, :, :3]
+        # final_image_alpha = image_data_np[:, :, 3]
+        #
+        # # Convert to CHW for PyTorch if needed by calling code.
+        # # render_pkg['render'] expects (3, H, W)
+        # final_image_rgb_chw = final_image_rgb.transpose(2,0,1)
 
     # Clean up slangpy objects if they are not reused
     # (slang_device.close() will do this, or manually del buffers/textures/pipelines)
@@ -726,8 +716,6 @@ def render_with_slangpy(
     # sort_pairs_buffer was already deleted and replaced by sorted_sort_pairs_buffer
     del sorted_sort_pairs_buffer
     del vertex_colors_after_sh_eval_buffer # formerly evaluated_tet_colors_buffer
-    if num_tets_to_draw > 0:
-        del dummy_index_buffer
     del output_texture
 
     return {

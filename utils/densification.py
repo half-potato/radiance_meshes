@@ -212,5 +212,6 @@ def apply_densification(
         f"#T_Grow: {target_grow:4d}  "
         f"Grow Avg: {grow_score[grow_mask].mean():.4f}  "
         f"Split Avg: {split_score[split_mask].mean():.4f}  "
+        f"By Vel: {new_verts.shape[0]}  "
         f"Added: {target_addition}"
     )

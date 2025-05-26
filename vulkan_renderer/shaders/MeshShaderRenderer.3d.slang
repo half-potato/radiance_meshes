@@ -15,7 +15,6 @@ Buffer<float4> tetColors; // precomputed vertex SH
 
 uniform float4x4 viewProjection;
 uniform float3   rayOrigin;
-uniform float    densityThreshold;
 
 struct v2f {
     float4 pos : SV_Position;

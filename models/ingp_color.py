@@ -179,15 +179,16 @@ class Model(nn.Module):
 
     @staticmethod
     def load_ckpt(path: Path, device):
-        data_dict = tinyplypy.read_ply(str(path / "ckpt.ply"))
-        tet_data = data_dict["tetrahedron"]
-        indices = tet_data["vertex_indices"]  # shape (N,4)
+        # data_dict = tinyplypy.read_ply(str(path / "ckpt.ply"))
+        # tet_data = data_dict["tetrahedron"]
+        # indices = tet_data["vertex_indices"]  # shape (N,4)
         ckpt_path = path / "ckpt.pth"
         config_path = path / "alldata.json"
         config = Args.load_from_json(str(config_path))
         ckpt = torch.load(ckpt_path)
         vertices = ckpt['contracted_vertices']
-        # indices = ckpt["indices"]  # shape (N,4)
+        indices = ckpt["indices"]  # shape (N,4)
+        del ckpt["indices"]
         print(f"Loaded {vertices.shape[0]} vertices")
         temp = config.contract_vertices
         config.contract_vertices = False
@@ -341,7 +342,7 @@ class Model(nn.Module):
             density = density.cpu().numpy().astype(np.float32)
             sh_coeff = sh.reshape(-1, sh_dim, 3)
             sh_coeffs[start:end] = sh_coeff.cpu().numpy()
-            grds[start:end] = normed_grd
+            grds[start:end] = normed_grd.reshape(-1, 3)
             densities[start:end] = density.reshape(-1)
 
         tetra_dict = {}
