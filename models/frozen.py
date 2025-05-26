@@ -13,6 +13,8 @@ from utils.model_util import activate_output
 from utils import optim
 from utils.model_util import *
 from utils.safe_math import safe_log, safe_exp
+from utils.train_util import get_expon_lr_func, SpikingLR
+from utils import mesh_util
 
 
 class FrozenTetModel(nn.Module):
@@ -92,10 +94,10 @@ class FrozenTetModel(nn.Module):
     ):
         if circumcenters is None:
             circumcenter = pre_calc_cell_values(
-                vertices, indices[start:end]
+                vertices, indices
             )
         else:
-            circumcenter = circumcenters[start:end]
+            circumcenter = circumcenters
         normalized = (circumcenter - self.center) / self.scene_scaling
 
         density  = safe_exp(self.density)
@@ -197,7 +199,7 @@ class FrozenTetModel(nn.Module):
     def get_circumcenters(self):
         circumcenter =  pre_calc_cell_values(
             self.vertices, self.indices, self.center, self.scene_scaling)
-        return cv
+        return circumcenter
 
     def calc_vert_alpha(self):
         tet_alphas = self.calc_tet_alpha()
@@ -307,7 +309,7 @@ class FrozenTetModel(nn.Module):
 # =============================================================================
 
 @torch.no_grad()
-def bake_from_model(base_model: "Model", *, detach: bool = True, chunk_size: int = 408_576) -> FrozenTetModel:
+def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only
     `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
     network and stored explicitly so that no backbone is needed afterwards."""
@@ -378,6 +380,10 @@ class FrozenTetOptimizer:
         weight_decay: float = 1e-10,
         lambda_tv:    float = 0.0,
         lambda_density: float = 0.0,
+        lr_delay_multi=1e-8,
+        lr_delay=0,
+        freeze_start: int = 15000,
+        iterations: int = 30000,
     ) -> None:
         self.model = model
         self.weight_decay   = weight_decay
@@ -387,7 +393,8 @@ class FrozenTetOptimizer:
         # ------------------------------------------------------------------
         # single optimiser with four parameter groups
         # ------------------------------------------------------------------
-        self.optim = torch.optim.RMSprop([
+        # self.optim = torch.optim.RMSprop([
+        self.optim = torch.optim.Adam([
             {"params": [model.density],  "lr": density_lr,  "name": "density"},
             {"params": [model.rgb],      "lr": color_lr,    "name": "color"},
             {"params": [model.gradient], "lr": gradient_lr, "name": "gradient"},
@@ -400,10 +407,11 @@ class FrozenTetOptimizer:
             gradient = gradient_lr / density_lr,
             sh = sh_lr / density_lr,
         )
+        self.freeze_start = freeze_start
         self.scheduler = get_expon_lr_func(lr_init=density_lr,
                                            lr_final=final_density_lr,
                                            lr_delay_mult=lr_delay_multi,
-                                           max_steps=max_steps,
+                                           max_steps=iterations - self.freeze_start,
                                            lr_delay_steps=lr_delay)
 
         # alias for external training scripts that expected these names
@@ -438,7 +446,7 @@ class FrozenTetOptimizer:
         for param_group in self.optim.param_groups:
             # if param_group["name"] == "network":
             ratio = self.ratios[param_group["name"]]
-            lr = self.net_scheduler_args(iteration)
+            lr = self.scheduler(iteration - self.freeze_start)
             param_group['lr'] = ratio * lr
 
     @torch.no_grad()
@@ -481,7 +489,7 @@ def _offload_model_to_cpu(model: nn.Module):
 
 @torch.no_grad()
 def freeze_model(
-    base_model: "Model",
+    base_model,
     *,
     density_lr:   float = 1e-4,
     color_lr:     float = 1e-4,

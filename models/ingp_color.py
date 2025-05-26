@@ -507,11 +507,11 @@ class TetOptimizer:
                                                 max_steps=max_steps,
                                                 lr_delay_steps=vert_lr_delay)
 
-        self.vertex_scheduler_args = SpikingLR(
-            spike_duration, max_steps, base_vertex_scheduler,
-            densify_start, densify_interval, densify_end,
-            self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
-        # self.vertex_scheduler_args = base_vertex_scheduler
+        # self.vertex_scheduler_args = SpikingLR(
+        #     spike_duration, max_steps, base_vertex_scheduler,
+        #     densify_start, densify_interval, densify_end,
+        #     self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
+        self.vertex_scheduler_args = base_vertex_scheduler
         self.iteration = 0
 
     def lambda_dist(self, iteration):
