@@ -485,8 +485,8 @@ class TetOptimizer:
         self.net_scheduler_args = SpikingLR(
             spike_duration, max_steps, base_net_scheduler,
             densify_start, densify_interval, densify_end,
-            # network_lr, network_lr)
-            network_lr, final_network_lr)
+            network_lr, network_lr)
+            # network_lr, final_network_lr)
 
         base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
@@ -497,8 +497,8 @@ class TetOptimizer:
         self.encoder_scheduler_args = SpikingLR(
             spike_duration, max_steps, base_encoder_scheduler,
             densify_start, densify_interval, densify_end,
-            # encoding_lr, encoding_lr)
-            encoding_lr, final_encoding_lr)
+            encoding_lr, encoding_lr)
+            # encoding_lr, final_encoding_lr)
 
         self.vertex_lr = self.vert_lr_multi*vertices_lr
         base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
@@ -511,7 +511,7 @@ class TetOptimizer:
             spike_duration, max_steps, base_vertex_scheduler,
             densify_start, densify_interval, densify_end,
             self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
-        self.vertex_scheduler_args = base_vertex_scheduler
+        # self.vertex_scheduler_args = base_vertex_scheduler
         self.iteration = 0
 
     def lambda_dist(self, iteration):

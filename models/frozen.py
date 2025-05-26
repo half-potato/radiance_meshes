@@ -371,6 +371,7 @@ class FrozenTetOptimizer:
         model: FrozenTetModel,
         *,
         density_lr:   float = 1e-3,
+        final_density_lr:   float = 1e-4,
         color_lr:     float = 1e-3,
         gradient_lr:  float = 1e-3,
         sh_lr:        float = 1e-3,
@@ -393,6 +394,17 @@ class FrozenTetOptimizer:
             {"params": [model.sh],       "lr": sh_lr,       "name": "sh"},
         ])
         self.sh_optim = None
+        self.ratios = dict(
+            density = 1,
+            color = color_lr / density_lr,
+            gradient = gradient_lr / density_lr,
+            sh = sh_lr / density_lr,
+        )
+        self.scheduler = get_expon_lr_func(lr_init=density_lr,
+                                           lr_final=final_density_lr,
+                                           lr_delay_mult=lr_delay_multi,
+                                           max_steps=max_steps,
+                                           lr_delay_steps=lr_delay)
 
         # alias for external training scripts that expected these names
         self.net_optim   = self.optim
@@ -420,9 +432,14 @@ class FrozenTetOptimizer:
     def main_zero_grad(self):
         self.zero_grad()
 
-    # no LR schedule by default; hook for user logic --------------------
-    def update_learning_rate(self, *_, **__):
-        pass
+    def update_learning_rate(self, iteration):
+        ''' Learning rate scheduling per step '''
+        self.iteration = iteration
+        for param_group in self.optim.param_groups:
+            # if param_group["name"] == "network":
+            ratio = self.ratios[param_group["name"]]
+            lr = self.net_scheduler_args(iteration)
+            param_group['lr'] = ratio * lr
 
     @torch.no_grad()
     def split(self, clone_indices, split_point, split_mode):

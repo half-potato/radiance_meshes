@@ -111,10 +111,10 @@ args.s_init=1e-4
 args.d_init=0.1
 args.c_init=0.8
 
-args.density_lr = 5e-5
-args.color_lr = 5e-5
-args.gradient_lr = 5e-5
-args.sh_lr = 5e-5
+args.density_lr = 1e-3
+args.color_lr = 1e-3
+args.gradient_lr = 1e-3
+args.sh_lr = 1e-3
 
 # Vertex Settings
 args.lr_delay = 0
