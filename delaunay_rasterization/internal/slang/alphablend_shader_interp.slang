@@ -197,17 +197,11 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                    TensorView<int32_t> n_contributors,
                    TensorView<bool> tet_alive,
                    no_diff Camera cam,
-                   no_diff float min_t,
                    no_diff float ray_jitter_x,
                    no_diff float ray_jitter_y,
-                   no_diff float scene_scaling,
                    uint32_t2 pix_coord,
                    uint32_t tile_idx_start,
-                   uint32_t tile_idx_end,
-                   uint32_t tile_height,
-                   uint32_t tile_width,
-                   uint32_t H,
-                   uint32_t W)
+                   uint32_t tile_idx_end)
 {
     float2 center_pix_coord = {pix_coord.x+ray_jitter_x, pix_coord.y+ray_jitter_y};
     float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 1.f);
@@ -215,8 +209,8 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = {
         curr_pixel_state, curr_distortion_state
     };
-    uint32_t block_size = tile_height * tile_width;
-    bool is_inside = (pix_coord.x < W && pix_coord.y < H);
+    uint32_t block_size = cam.tile_height * cam.tile_width;
+    bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     bool thread_active = is_inside;
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
@@ -225,7 +219,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool print = false;
 
 
-    Ray ray = get_ray(cam, center_pix_coord, min_t);
+    Ray ray = get_ray(cam, center_pix_coord);
     // if (print) {
     //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
     // }
@@ -252,7 +246,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 local_n_contrib++;
                 SplatTetrahedra_interp g = collected_splats[j];
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     ao = new_ao;
                     // tet_alive[collected_idx[j]] = true;
@@ -289,23 +283,17 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      TensorView<int32_t> n_contributors,
                      TensorView<bool> tet_alive,
                      no_diff Camera cam,
-                     no_diff float min_t,
                      no_diff float ray_jitter_x,
                      no_diff float ray_jitter_y,
-                     no_diff float scene_scaling,
                      uint32_t2 pix_coord,
                      uint32_t tile_idx_start,
                      uint32_t tile_idx_end,
-                     uint32_t tile_height,
-                     uint32_t tile_width,
-                     uint32_t H,
-                     uint32_t W,
                      AlphaOut d_ao)
 {
     float2 center_pix_coord = {pix_coord.x+ray_jitter_x, pix_coord.y+ray_jitter_y};
     // Load the final pixel state.
-    bool is_inside = (pix_coord.x < W && pix_coord.y < H);
-    uint32_t block_size = tile_height * tile_width;
+    bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
+    uint32_t block_size = cam.tile_height * cam.tile_width;
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
 
     bool print = false;//pix_coord.x == 0 && pix_coord.y == 0;
@@ -330,7 +318,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     }
     AlphaOut ao = {current_pixel_state, curr_distortion_state};
 
-    Ray ray = get_ray(cam, center_pix_coord, min_t);
+    Ray ray = get_ray(cam, center_pix_coord);
 
     DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
 
@@ -357,7 +345,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra_interp g = collected_splats[j];
 
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
                     // if (tetra_ctrl.rgba.a < 1 / 255.f) {
                     //     printf("Continue\n");
@@ -377,14 +365,14 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                     bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
                     float midpt = tetra_ctrl.dist.x;
-                    float grad_scale = 1;//min(1, midpt*midpt);// / scene_scaling / scene_scaling);
+                    float grad_scale = min(1, midpt*midpt);// / scene_scaling / scene_scaling);
                     //float grad_scale = midpt*midpt / scene_scaling / scene_scaling;
                     CtrlPt.Differential d_tetra_scale = {
                         grad_scale * dp_tetra_ctrl.d.rgba,
                         grad_scale * dp_tetra_ctrl.d.dist,
                         grad_scale * dp_tetra_ctrl.d.density,
                     };
-                    bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, min_t, d_tetra_scale);
+                    bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, cam.min_t, d_tetra_scale);
                     // bwd_diff(evaluate_tetra_2D)(dp_g, cam, min_t, dp_center_pix_coord, dp_tetra_ctrl.d);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, dp_g.d);
 
@@ -407,33 +395,19 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  DiffTensorView distortion_img,
                  TensorView<int32_t> n_contributors,
                  TensorView<bool> tet_alive,
-                 int grid_height,
-                 int grid_width,
-
-                 int image_height,
-                 int image_width,
-                 TensorView<float> world_view_transform,
-                 TensorView<float> K,
-                 TensorView<float> cam_pos,
                  TensorView<float> ray_jitter,
-                 no_diff float min_t,
-                 no_diff float scene_scaling,
-                 no_diff float fovy,
-                 no_diff float fovx,
-                 int tile_height,
-                 int tile_width)
+                 TensorCamera tcam)
 {
     uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
 
     uint32_t2 pix_coord = globalIdx.xy;
+    Camera cam = no_diff load_tensor_camera(tcam);
 
-    uint32_t tile_idx = cudaBlockIdx().y * grid_width + cudaBlockIdx().x;
+    uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
     uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
     bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
-
-    Camera cam = no_diff load_camera(world_view_transform, K, cam_pos, fovy, fovx, image_height, image_width);
 
     float rjx = 0;
     float rjy = 0;
@@ -452,17 +426,11 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
         n_contributors,
         tet_alive,
         cam,
-        min_t, 
         rjx,
         rjy,
-        scene_scaling,
         pix_coord,
         tile_idx_start,
-        tile_idx_end,
-        tile_height,
-        tile_width,
-        output_img.size(0),
-        output_img.size(1));
+        tile_idx_end);
                                     
     if (is_inside) {
       output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.rgba.r);
@@ -492,16 +460,9 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   TensorView<int32_t> tet_count,
                   TensorView<int32_t> n_contributors,
                   Camera cam,
-                  no_diff float min_t,
-                  no_diff float scene_scaling,
-                  no_diff float density_t,
                   uint32_t2 pix_coord,
                   uint32_t tile_idx_start,
                   uint32_t tile_idx_end,
-                  uint32_t tile_height,
-                  uint32_t tile_width,
-                  uint32_t H,
-                  uint32_t W,
                   float pixel_err,
                   float3 gt_pixel)
 {
@@ -517,8 +478,8 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = {
         curr_pixel_state, curr_distortion_state
     };
-    uint32_t block_size = tile_height * tile_width;
-    bool is_inside = (pix_coord.x < W && pix_coord.y < H);
+    uint32_t block_size = cam.tile_height * cam.tile_width;
+    bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     bool thread_active = is_inside;
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
@@ -527,7 +488,7 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     bool print = false;
 
 
-    Ray ray = get_ray(cam, center_pix_coord, min_t);
+    Ray ray = get_ray(cam, center_pix_coord);
     // if (print) {
     //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
     // }
@@ -559,15 +520,14 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra_interp g = collected_splats[j];
                 uint32_t g_idx = collected_idx[j];
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray.o, ray.d, min_t, tetra_ctrl)) {
+                if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl)) {
                     //if (tetra_ctrl.rgba.a < 1/255.f) continue;
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
                     // calc grad scale to remove floaters
-                    float grad_scale = 1;//min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);// / scene_scaling / scene_scaling);
+                    float grad_scale = min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);// / scene_scaling / scene_scaling);
 
                     float T = grad_scale * ao.rgba.a * tetra_ctrl.rgba.a;
-                    // float T = grad_scale * tetra_ctrl.rgba.a;
                     float T_p = grad_scale * ao.rgba.a;
 
                     // grow and split quantities
@@ -639,33 +599,19 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                  TensorView<float> debug_img,
                  TensorView<int32_t> tet_count,
                  TensorView<int32_t> n_contributors,
-                 int grid_height,
-                 int grid_width,
-
-                 int image_height,
-                 int image_width,
-                 TensorView<float> world_view_transform,
-                 TensorView<float> K,
-                 TensorView<float> cam_pos,
-                 no_diff float min_t,
-                 no_diff float scene_scaling,
-                 no_diff float density_t,
-                 no_diff float fovy,
-                 no_diff float fovx,
-                 int tile_height,
-                 int tile_width)
+                 TensorCamera tcam)
 {
     uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
 
     uint32_t2 pix_coord = globalIdx.xy;
 
-    uint32_t tile_idx = cudaBlockIdx().y * grid_width + cudaBlockIdx().x;
+    Camera cam = load_tensor_camera(tcam);
+    uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
     uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
     bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
 
-    Camera cam = load_camera(world_view_transform, K, cam_pos, fovy, fovx, image_height, image_width);
 
     float this_pixel_err = 0;
     float3 this_gt = {0.f, 0.f, 0.f};
@@ -688,16 +634,9 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         tet_count,
         n_contributors,
         cam,
-        min_t,
-        scene_scaling,
-        density_t,
         pix_coord,
         tile_idx_start,
         tile_idx_end,
-        tile_height,
-        tile_width,
-        output_img.size(0),
-        output_img.size(1), 
         this_pixel_err,
         this_gt);
     if (is_inside) {

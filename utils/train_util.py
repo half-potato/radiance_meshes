@@ -15,6 +15,7 @@ from utils.contraction import contraction_jacobian
 from utils.graphics_utils import l2_normalize_th
 import matplotlib.pyplot as plt
 from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
+from data.camera import focal2fov
 
 cmap = plt.get_cmap("jet")
 
@@ -44,12 +45,6 @@ class ScaledGradients(torch.autograd.Function):
     def backward(ctx, grad_output):
         lr_matrix, = ctx.saved_tensors
         return grad_output * lr_matrix, None
-
-def fov2focal(fov, pixels):
-    return pixels / (2 * math.tan(fov / 2))
-
-def focal2fov(focal, pixels):
-    return 2*math.atan(pixels/(2*focal))
 
 def get_slang_projection_matrix(znear, zfar, fy, fx, height, width, device):
     tanHalfFovX = width/(2*fx)
@@ -123,34 +118,24 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         assert(ray_jitter.shape[0] == camera.image_height)
         assert(ray_jitter.shape[1] == camera.image_width)
         assert(ray_jitter.shape[2] == 2)
-    fy = fov2focal(camera.fovy, camera.image_height)
-    fx = fov2focal(camera.fovx, camera.image_width)
-    K = torch.tensor([
-        [fx, 0, camera.image_width/2],
-        [0, fy, camera.image_height/2],
-        [0, 0, 1],
-    ]).to(device)
-    cam_pos = camera.camera_center.to(device)
     vertices = model.vertices
-    world_view_transform = camera.world_view_transform.T.to(device)
-
-    assert(model.indices.device == model.vertices.device)
-    assert(model.indices.device == world_view_transform.device)
-    assert(model.indices.device == K.device)
-    assert(model.indices.device == cam_pos.device)
     
     render_grid = RenderGrid(camera.image_height,
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
+    tcam = dict(
+        tile_height=tile_size,
+        tile_width=tile_size,
+        grid_height=render_grid.grid_height,
+        grid_width=render_grid.grid_width,
+        min_t=min_t,
+        **camera.to_dict(device)
+    )
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         model.indices,
         vertices,
-        world_view_transform,
-        K,
-        cam_pos,
-        camera.fovy,
-        camera.fovx,
+        tcam,
         render_grid)
     extras = {}
     if cell_values is None:
@@ -174,13 +159,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         vertices,
         cell_values,
         render_grid,
-        world_view_transform,
-        K,
-        cam_pos,
-        scene_scaling,
-        min_t,
-        camera.fovy,
-        camera.fovx,
+        tcam,
         ray_jitter)
     alpha = image_rgb.permute(2,0,1)[3, ...]
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)

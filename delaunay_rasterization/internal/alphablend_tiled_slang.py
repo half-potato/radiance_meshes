@@ -5,6 +5,7 @@ from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_sh
 from icecream import ic
 import time
 import math
+from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
@@ -17,35 +18,23 @@ def render_constant_color(indices, vertices,
                                        camera,
                                        cell_values=None, tile_size=16, min_t=0.1):
     device = indices.device
-    fy = fov2focal(camera.fovy, camera.image_height)
-    fx = fov2focal(camera.fovx, camera.image_width)
-    K = torch.tensor([
-        [fx, 0, camera.image_width/2],
-        [0, fy, camera.image_height/2],
-        [0, 0, 1],
-    ]).to(device)
-    cam_pos = camera.camera_center.to(device)
-    world_view_transform = camera.world_view_transform.T.to(device)
-    torch.cuda.synchronize()
-    assert(indices.device == vertices.device)
-    assert(indices.device == world_view_transform.device)
-    assert(indices.device == K.device)
-    assert(indices.device == cam_pos.device)
-    st = time.time()
     
     render_grid = RenderGrid(camera.image_height,
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
-    st = time.time()
+    tcam = dict(
+        tile_height=tile_size,
+        tile_width=tile_size,
+        grid_height=render_grid.grid_height,
+        grid_width=render_grid.grid_width,
+        min_t=min_t,
+        **camera.to_dict(device)
+    )
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
         indices,
         vertices,
-        world_view_transform,
-        K,
-        cam_pos,
-        camera.fovy,
-        camera.fovx,
+        tcam,
         render_grid)
    
     # torch.cuda.synchronize()
@@ -75,14 +64,9 @@ def render_constant_color(indices, vertices,
         vertices,
         rgbs,
         render_grid,
-        world_view_transform,
-        K,
-        cam_pos,
+        tcam,
         100,
-        -0.1,
-        min_t,
-        camera.fovy,
-        camera.fovx)
+        -0.1)
     # torch.cuda.synchronize()
     
     render_pkg = {
@@ -103,8 +87,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
     def forward(ctx, 
                 sorted_tetra_idx, tile_ranges,
                 indices, vertices, rgbs, render_grid,
-                world_view_transform, K, cam_pos, pre_multi, ladder_p, min_t,
-                fovy, fovx, device="cuda"):
+                tcam, pre_multi, ladder_p, 
+                device="cuda"):
         distortion_img = torch.zeros((render_grid.image_height, 
                                   render_grid.image_width, 4), 
                                  device=device)
@@ -132,20 +116,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             output_img=output_img,
             distortion_img=distortion_img,
             n_contributors=n_contributors,
-            image_height=render_grid.image_height,
-            image_width=render_grid.image_width,
-            grid_height=render_grid.grid_height,
-            grid_width=render_grid.grid_width,
-            world_view_transform=world_view_transform,
-            K=K,
-            cam_pos=cam_pos,
+            tcam=tcam,
             pre_multi=pre_multi,
             ladder_p=ladder_p,
-            min_t=min_t,
-            fovy=fovy,
-            fovx=fovx,
-            tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width
         )
         splat_kernel_with_args.launchRaw(
             blockSize=(render_grid.tile_width, 
@@ -157,15 +130,16 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         # ic("ab", time.time()-st)
         # ic(n_contributors.float().mean(), n_contributors.max())
 
-        ctx.save_for_backward(sorted_tetra_idx, tile_ranges,
-                              indices, vertices, rgbs, 
-                              output_img, distortion_img, n_contributors,
-                              world_view_transform, K, cam_pos)
+        tensors = [
+            sorted_tetra_idx, tile_ranges,
+            indices, vertices, rgbs, 
+            output_img, distortion_img, n_contributors]
+        non_tensor_data, tensor_data = split_tensors(tcam)
+        ctx.save_for_backward(*tensors, *tensor_data)
+        ctx.non_tensor_data = non_tensor_data
+        ctx.len_tensors = len(tensors)
 
         ctx.render_grid = render_grid
-        ctx.fovy = fovy
-        ctx.fovx = fovx
-        ctx.min_t = min_t
         ctx.ladder_p = ladder_p
         ctx.pre_multi = pre_multi
 
@@ -173,14 +147,11 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output_img, grad_distortion_img):
-        (sorted_tetra_idx, tile_ranges, 
-         indices, vertices, rgbs, 
-         output_img, distortion_img, n_contributors,
-         world_view_transform, K, cam_pos) = ctx.saved_tensors
+        (sorted_tetra_idx, tile_ranges,
+            indices, vertices, rgbs, 
+            output_img, distortion_img, n_contributors) = ctx.saved_tensors[:ctx.len_tensors]
+        tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
-        fovy = ctx.fovy
-        fovx = ctx.fovx
-        min_t = ctx.min_t
         ladder_p = ctx.ladder_p
         pre_multi = ctx.pre_multi
 
@@ -205,20 +176,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             output_img=(output_img, grad_output_img),
             distortion_img=(distortion_img, grad_distortion_img),
             n_contributors=n_contributors,
-            grid_height=render_grid.grid_height,
-            grid_width=render_grid.grid_width,
-            image_height=render_grid.image_height,
-            image_width=render_grid.image_width,
-            world_view_transform=world_view_transform,
-            K=K,
-            cam_pos=cam_pos,
+            tcam=tcam,
             pre_multi=pre_multi,
-            ladder_p=ladder_p,
-            min_t=min_t,
-            fovy=fovy,
-            fovx=fovx,
-            tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width)
+            ladder_p=ladder_p)
         # ic(rgbs, rgbs_grad)
         
         kernel_with_args.launchRaw(
@@ -231,4 +191,4 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         # ic("abb", time.time()-st)
         
         return (None, None, None, vertices_grad, rgbs_grad, 
-                None, None, None, None, None, None, None, None, None)
+                None, None, None, None)

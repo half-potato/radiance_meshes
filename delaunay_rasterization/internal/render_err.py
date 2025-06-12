@@ -4,7 +4,6 @@ import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
-from utils.train_util import fov2focal
 from data.camera import Camera
 from utils.ssim import ssim
 import torch.nn.functional as F
@@ -37,39 +36,24 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     device = model.device
     indices = model.indices
     vertices = model.vertices
-    fy = fov2focal(camera.fovy, camera.image_height)
-    fx = fov2focal(camera.fovx, camera.image_width)
-    K = torch.tensor([
-    [fx, 0, camera.image_width/2],
-    [0, fy, camera.image_height/2],
-    [0, 0, 1],
-    ]).to(device)
-    world_view_transform = camera.world_view_transform.T.to(device)
-
-    cam_pos = camera.world_view_transform.T.inverse()[:3, 3].to(device)
-    fovy = camera.fovy
-    fovx = camera.fovx
     torch.cuda.synchronize()
-    assert(indices.device == vertices.device)
-    assert(indices.device == world_view_transform.device)
-    assert(indices.device == K.device)
-    assert(indices.device == cam_pos.device)
     st = time.time()
     device = indices.device
     render_grid = RenderGrid(camera.image_height,
                              camera.image_width,
                              tile_height=tile_size,
                              tile_width=tile_size)
+    tcam = dict(
+        tile_height=tile_size,
+        tile_width=tile_size,
+        grid_height=render_grid.grid_height,
+        grid_width=render_grid.grid_width,
+        min_t=min_t,
+        **camera.to_dict(device)
+    )
     st = time.time()
     sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _, tet_area = vertex_and_tile_shader(
-        indices,
-        vertices,
-        world_view_transform,
-        K,
-        cam_pos,
-        fovy,
-        fovx,
-        render_grid)
+        indices, vertices, tcam, render_grid)
    
     # torch.cuda.synchronize()
     # ic("vt", time.time()-st)
@@ -115,20 +99,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         distortion_img=distortion_img,
         n_contributors=n_contributors,
         tet_alive=tet_alive,
-        image_height=render_grid.image_height,
-        image_width=render_grid.image_width,
-        grid_height=render_grid.grid_height,
-        grid_width=render_grid.grid_width,
-        world_view_transform=world_view_transform,
-        K=K,
-        cam_pos=cam_pos,
-        scene_scaling=scene_scaling,
-        min_t=min_t,
+        tcam=tcam,
         ray_jitter=ray_jitter,
-        fovy=fovy,
-        fovx=fovx,
-        tile_height=render_grid.tile_height,
-        tile_width=render_grid.tile_width
     )
     splat_kernel_with_args.launchRaw(
         blockSize=(render_grid.tile_width, 
@@ -142,13 +114,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     l1_err = ((render_img - gt_image).abs()).mean(dim=0)
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
     pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
-
-    # blur_render = gaussian_blur(render_img, kernel_size=5, sigma=1.0)
-    # blur_gt     = gaussian_blur(gt_image,   kernel_size=5, sigma=1.0)
-    #
-    # l1_err   = (blur_render - blur_gt).abs().mean(dim=0)
-    # ssim_err = (1 - ssim(blur_render, blur_gt).mean(dim=0)).clamp(0, 1)
-    # pixel_err = ((1 - lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
 
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
@@ -172,31 +137,13 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         tet_err=tet_err,
         tet_count=tet_count,
         n_contributors=n_contributors,
-        image_height=render_grid.image_height,
-        image_width=render_grid.image_width,
-        grid_height=render_grid.grid_height,
-        grid_width=render_grid.grid_width,
-        world_view_transform=world_view_transform,
-        K=K,
-        cam_pos=cam_pos,
-        scene_scaling=scene_scaling,
-        density_t=0,
-        min_t=min_t,
-        fovy=fovy,
-        fovx=fovx,
-        tile_height=render_grid.tile_height,
-        tile_width=render_grid.tile_width
+        tcam=tcam,
     ).launchRaw(
         blockSize=(render_grid.tile_width, 
                     render_grid.tile_height, 1),
         gridSize=(render_grid.grid_width, 
                     render_grid.grid_height, 1)
     )
-
-    # weight = tet_err[:, 3:4]
-    # weight_clip = weight.clip(max=pixel_err.max())
-    # ratio = weight_clip / weight.clip(min=1e-5)
-    # tet_err = tet_err * ratio
 
     torch.cuda.synchronize()
     return tet_err, dict(

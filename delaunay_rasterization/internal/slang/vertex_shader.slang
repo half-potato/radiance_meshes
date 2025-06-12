@@ -140,29 +140,19 @@ void print_vec(float3 vec) {
 [Differentiable]
 void vertex_shader(TensorView<int32_t> indices,
                    DiffTensorView vertices,
-                   TensorView<float> world_view_transform,
-                   TensorView<float> K,
-                   TensorView<float> cam_pos,
+                   TensorCamera tcam,
                    TensorView<float> out_tet_area,
                    TensorView<int32_t> out_tiles_touched,
                    TensorView<int32_t> out_rect_tile_space,
                    DiffTensorView out_vs,
-                   DiffTensorView out_circumcenter,
-                   no_diff float fovy,
-                   no_diff float fovx,
-                   uint image_height,
-                   uint image_width,
-                   uint grid_height,
-                   uint grid_width,
-                   uint tile_height,
-                   uint tile_width)
+                   DiffTensorView out_circumcenter)
 {
     uint32_t g_idx = cudaBlockIdx().x * cudaBlockDim().x + cudaThreadIdx().x;
 
     if (g_idx >= indices.size(0))
         return;
 
-    Camera cam = no_diff load_camera(world_view_transform, K, cam_pos, fovy, fovx, image_height, image_width);
+    Camera cam = no_diff load_tensor_camera(tcam);
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet = load_tetrahedra(vertices, virtual_tet);
     if (is_planar(tet)) {
@@ -212,15 +202,15 @@ void vertex_shader(TensorView<int32_t> indices,
 
     if (contains_ray_origin) {
         rect_tile_space.min_x = 0;
-        rect_tile_space.max_x = grid_width;
+        rect_tile_space.max_x = cam.grid_width;
         rect_tile_space.min_y = 0;
-        rect_tile_space.max_y = grid_height;
+        rect_tile_space.max_y = cam.grid_height;
         out_vs.storeOnce(uint2(g_idx, 1), 1);
     } else {
-        rect_tile_space.min_x = int32_t(floor(clip(minv.x / tile_width, 0, grid_width)));
-        rect_tile_space.min_y = int32_t(floor(clip(minv.y / tile_height, 0, grid_height)));
-        rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / tile_width, 0, grid_width)));
-        rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / tile_height, 0, grid_height)));
+        rect_tile_space.min_x = int32_t(floor(clip(minv.x / cam.tile_width, 0, cam.grid_width)));
+        rect_tile_space.min_y = int32_t(floor(clip(minv.y / cam.tile_height, 0, cam.grid_height)));
+        rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / cam.tile_width, 0, cam.grid_width)));
+        rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / cam.tile_height, 0, cam.grid_height)));
     }
     int32_t n_tiles = (rect_tile_space.max_x - rect_tile_space.min_x) * (rect_tile_space.max_y - rect_tile_space.min_y);
 
@@ -231,9 +221,9 @@ void vertex_shader(TensorView<int32_t> indices,
     // if (contains_ray_origin) {
     //     out_tiles_touched[g_idx] = n_tiles;
     // } else {
-    //     out_tiles_touched[g_idx] = count_tiles(tet, cam, rect_tile_space, tile_width, tile_height);
+    //     out_tiles_touched[g_idx] = count_tiles(tet, cam, rect_tile_space, cam.tile_width, cam.tile_height);
     // }
-    Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 }, 0);
+    Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 });
     Tetrahedra image_tet = camspace_tet2image_w_depth(camspace_tet, cam);
     float area = tet_area(image_tet, center_ray.d, cam);
 

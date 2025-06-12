@@ -15,6 +15,13 @@ import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 from data.types import ProjectionType
 from icecream import ic
+import math
+
+def fov2focal(fov, pixels):
+    return pixels / (2 * math.tan(fov / 2))
+
+def focal2fov(focal, pixels):
+    return 2*math.atan(pixels/(2*focal))
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, fovx, fovy, image, gt_alpha_mask=None,
@@ -34,7 +41,7 @@ class Camera(nn.Module):
         self.cy = cy
         self.image_name = image_name
         self.model = model
-        self.distortion_params = distortion_params
+        self.distortion_params = distortion_params if distortion_params is not None else torch.zeros((8))
         self.glo_vector = None
         self.exposure = exposure
         self.iso = iso
@@ -69,6 +76,27 @@ class Camera(nn.Module):
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.fovx, fovY=self.fovy).transpose(0,1).to(self.data_device)
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+
+    def to_dict(self, device):
+        fy = fov2focal(self.fovy, self.image_height)
+        fx = fov2focal(self.fovx, self.image_width)
+        return dict(
+            world_view_transform=self.world_view_transform.T.to(device),
+            cam_pos=self.camera_center.to(device),
+            # fx=fx,
+            # fy=fy,
+            K = torch.tensor([
+                [fx, 0, self.image_width/2],
+                [0, fy, self.image_height/2],
+                [0, 0, 1],
+            ]).to(device),
+            image_height=self.image_height,
+            image_width=self.image_width,
+            fovy=self.fovy,
+            fovx=self.fovx,
+            distortion_params=self.distortion_params.to(device),
+            camera_type=self.model.value,
+        )
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):

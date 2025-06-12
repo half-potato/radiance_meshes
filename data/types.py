@@ -10,10 +10,10 @@ class BasicPointCloud(NamedTuple):
 class ProjectionType(enum.Enum):
   """Camera projection type (perspective pinhole, fisheye, or 360 pano)."""
 
-  PERSPECTIVE = 'perspective'
-  FISHEYE = 'fisheye'
-  PANORAMIC = 'pano'
-  SIMPLE_RADIAL = 'simple_radial'
+  PERSPECTIVE = 0
+  FISHEYE = 1
+  PANORAMIC = 2
+  SIMPLE_RADIAL = 3
 
 
 class CameraInfo(NamedTuple):

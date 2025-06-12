@@ -4,14 +4,14 @@ import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
+from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
 
 class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
     def forward(ctx, 
                 sorted_tetra_idx, tile_ranges,
                 indices, vertices, tet_density, render_grid,
-                world_view_transform, K, cam_pos, scene_scaling, min_t,
-                fovy, fovx, ray_jitter, device="cuda") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                tcam, ray_jitter, device="cuda") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         distortion_img = torch.zeros((render_grid.image_height, 
                                   render_grid.image_width, 5), 
                                  device=device)
@@ -41,20 +41,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             distortion_img=distortion_img,
             n_contributors=n_contributors,
             tet_alive=tet_alive,
-            image_height=render_grid.image_height,
-            image_width=render_grid.image_width,
-            grid_height=render_grid.grid_height,
-            grid_width=render_grid.grid_width,
-            world_view_transform=world_view_transform,
-            K=K,
-            cam_pos=cam_pos,
+            tcam=tcam,
             ray_jitter=ray_jitter,
-            scene_scaling=scene_scaling,
-            min_t=min_t,
-            fovy=fovy,
-            fovx=fovx,
-            tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width
         )
         splat_kernel_with_args.launchRaw(
             blockSize=(render_grid.tile_width, 
@@ -62,20 +50,19 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             gridSize=(render_grid.grid_width, 
                       render_grid.grid_height, 1)
         )
-        # torch.cuda.synchronize()
-        # ic("ab", time.time()-st)
-        # ic(n_contributors.float().mean(), n_contributors.max())
 
-        ctx.save_for_backward(sorted_tetra_idx, tile_ranges,
-                              indices, vertices, tet_density, 
-                              output_img, distortion_img, n_contributors,
-                              world_view_transform, K, cam_pos, ray_jitter)
+        tensors = [
+            sorted_tetra_idx, tile_ranges,
+            indices, vertices, tet_density, 
+            output_img, distortion_img, n_contributors,
+            ray_jitter
+        ]
+        non_tensor_data, tensor_data = split_tensors(tcam)
+        ctx.save_for_backward(*tensors, *tensor_data)
+        ctx.non_tensor_data = non_tensor_data
+        ctx.len_tensors = len(tensors)
 
         ctx.render_grid = render_grid
-        ctx.fovy = fovy
-        ctx.fovx = fovx
-        ctx.min_t = min_t
-        ctx.scene_scaling = scene_scaling
 
         return output_img, distortion_img, tet_alive
 
@@ -84,12 +71,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         (sorted_tetra_idx, tile_ranges, 
          indices, vertices, tet_density,
          output_img, distortion_img, n_contributors,
-         world_view_transform, K, cam_pos, ray_jitter) = ctx.saved_tensors
+            ray_jitter) = ctx.saved_tensors[:ctx.len_tensors]
+        tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
-        fovy = ctx.fovy
-        fovx = ctx.fovx
-        min_t = ctx.min_t
-        scene_scaling = ctx.scene_scaling
 
         vertices_grad = torch.zeros_like(vertices)
         tet_density_grad = torch.zeros_like(tet_density)
@@ -109,27 +93,13 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             tile_ranges=tile_ranges,
             indices=indices,
             vertices=(vertices, vertices_grad),
-            # rgbs=(rgbs, rgbs_grad),
+            tcam=tcam,
             tet_density=(tet_density, tet_density_grad),
             output_img=(output_img, grad_output_img),
             distortion_img=(distortion_img, grad_distortion_img),
             n_contributors=n_contributors,
             tet_alive=tet_alive,
-            grid_height=render_grid.grid_height,
-            grid_width=render_grid.grid_width,
-            image_height=render_grid.image_height,
-            image_width=render_grid.image_width,
-            world_view_transform=world_view_transform,
-            K=K,
-            cam_pos=cam_pos,
-            min_t=min_t,
-            ray_jitter=ray_jitter,
-            scene_scaling=scene_scaling,
-            fovy=fovy,
-            fovx=fovx,
-            tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width)
-        # ic(rgbs, rgbs_grad)
+            ray_jitter=ray_jitter)
         
         kernel_with_args.launchRaw(
             blockSize=(render_grid.tile_width, 
@@ -137,8 +107,6 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             gridSize=(render_grid.grid_width, 
                       render_grid.grid_height, 1)
         )
-        # torch.cuda.synchronize()
-        # ic("abb", time.time()-st)
-        
+
         return (None, None, None, vertices_grad, tet_density_grad, 
-                None, None, None, None, None, None, None, None, None)
+                None, None, None)
