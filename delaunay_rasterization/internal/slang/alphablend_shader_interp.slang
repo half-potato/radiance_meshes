@@ -525,16 +525,13 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
                     // calc grad scale to remove floaters
-                    float grad_scale = min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);// / scene_scaling / scene_scaling);
+                    float grad_scale = min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);
 
                     float T = grad_scale * ao.rgba.a * tetra_ctrl.rgba.a;
                     float T_p = grad_scale * ao.rgba.a;
 
                     // grow and split quantities
                     float err = pixel_err;
-                    float3 mismatch_rgb = abs(gt_pixel - tetra_ctrl.rgba.rgb);
-                    //float mismatch = grad_scale * (mismatch_rgb.r + mismatch_rgb.g + mismatch_rgb.b) / 3.f;
-                    //mismatch *= pixel_err;
                     float mismatch = pixel_err;
 
                     float old_val;

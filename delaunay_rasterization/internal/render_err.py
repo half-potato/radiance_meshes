@@ -111,7 +111,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     torch.cuda.synchronize()
     alpha = 1-output_img.permute(2,0,1)[3, ...]
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
-    l1_err = ((render_img - gt_image).abs()).mean(dim=0)
+    l1_err = ((render_img - gt_image)).mean(dim=0)
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
     pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
 

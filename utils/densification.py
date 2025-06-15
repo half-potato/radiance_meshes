@@ -167,10 +167,8 @@ def apply_densification(
     # total_var += within_var
 
     # --- Masking and target calculation --------------------------------------
-    density = model.calc_tet_density()
-    alphas = model.calc_tet_alpha(mode="max", density=density)
-    mask_alive = (alphas >= args.clone_min_alpha) | (density > args.clone_min_density)
-    total_var = (total_var - between_var).clip(min=0)
+    alphas = model.calc_tet_alpha(mode="max")
+    mask_alive = alphas >= args.clone_min_alpha
     total_var[~mask_alive] = 0
     within_var[~mask_alive] = 0
     between_var[~mask_alive] = 0
@@ -239,15 +237,12 @@ def apply_densification(
         stats.tet_moments[:, :3],
         stats.tet_moments[:, 3:4]
     )
-    split_point[bad] = grow_point[bad]    # fall back
-
     split_point = split_point[clone_mask]
     bad = bad[clone_mask]
-
-    # barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
-    # barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
-    # random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-    # split_point[bad] = random_locations[bad]    # fall back
+    barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
+    barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
+    random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
+    split_point[bad] = random_locations[bad]    # fall back
 
     tet_optim.split(clone_indices,
                     split_point,
@@ -281,5 +276,4 @@ def apply_densification(
         f"T_Total: {target_total:4d} T_Within: {target_within:4d} T_Between: {target_between:4d} | "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} Between Avg: {between_var.mean():.4f}  | "
         f"By Vel: {num_cloned}"
-        f"Alpha: {alphas.min():.2f} - {alphas.mean():.2f} - {alphas.max():.2f}"
     )
