@@ -192,9 +192,10 @@ def apply_densification(
     # within_var = safe_math.safe_div(stats.total_within_var, total_T)
     # total_var += within_var
     vertices = model.vertices
-    circumcenters, _, tet_density, rgb, grd, sh = model.compute_batch_features(vertices, model.indices, 0, model.indices.shape[0])
+    # circumcenters, _, tet_density, rgb, grd, sh = model.compute_batch_features(vertices, model.indices, 0, model.indices.shape[0])
 
     # --- Masking and target calculation --------------------------------------
+    tet_density = model.calc_tet_density()
     alphas = model.calc_tet_alpha(mode="max", density=tet_density)
     # mask_alive = alphas >= args.clone_min_alpha
     # mask_alive = (alphas >= args.clone_min_alpha) & (stats.peak_contrib >= args.clone_min_density)
@@ -245,7 +246,8 @@ def apply_densification(
     if args.output_path is not None:
 
         f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
-        color = rgb + 0.5#torch.rand_like(f[:, :3])
+        color = torch.rand_like(f[:, :3])
+        # color = rgb + 0.5#torch.rand_like(f[:, :3])
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
         imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
