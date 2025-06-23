@@ -65,8 +65,8 @@ args.image_folder = "images_4"
 args.eval = False
 args.dataset_path = Path("/data/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
-args.iterations = 10000
-args.max_steps = 20000
+args.iterations = 40000
+args.max_steps = 30000
 args.ckpt = ""
 args.render_train = False
 
@@ -91,7 +91,7 @@ args.weight_decay = 0.01
 args.hashmap_dim = 4
 
 args.grad_clip = 1e-2
-args.spike_duration = 350
+args.spike_duration = 1000
 
 args.k_samples = 1
 args.trunc_sigma = 0.3
@@ -111,40 +111,40 @@ args.sh_lr = 1e-3
 args.lr_delay = 0
 args.vert_lr_delay = 50
 args.vertices_lr = 1e-4
-args.final_vertices_lr = 1e-6
+args.final_vertices_lr = 1e-7
 args.vertices_lr_delay_multi = 1e-8
 args.vertices_beta = [0.9, 0.99]
 args.contract_vertices = False
 args.clip_multi = 1e-2
-args.delaunay_start = 17000
-args.freeze_start = 17000
+args.delaunay_start = 40000
+args.freeze_start = 30000
 
 # Distortion Settings
-args.lambda_dist = 1e-5
+args.lambda_dist = 1e-4
 
 # Clone Settings
 args.num_samples = 200
-args.clone_lambda_ssim = 0.2
-args.split_std = 1e-4
+args.clone_lambda_ssim = 0.0
+args.split_std = 1e-3
 args.split_mode = "split_point"
 args.clone_schedule = "quadratic"
-args.min_tet_count = 16
+args.min_tet_count = 9
 args.densify_start = 1000
-args.densify_end = 15000
-args.densify_interval = 500
+args.densify_end = 20000
+args.densify_interval = 1000
 args.budget = 2_000_000
-args.clone_velocity = 0.1
-args.speed_mul = 100
-args.percent_within = 0.0
-args.percent_total = 1.0
+args.clone_velocity = 0.0
+args.speed_mul = 10
+args.percent_within = 0.99
+args.percent_total = 0.01
 args.diff_threshold = 0.0
-args.midpoint = 2000
-args.clone_min_alpha = 0.05
-args.clone_min_density = 100.0
+args.midpoint = 1000
+args.clone_min_alpha = 0.1
+args.clone_min_density = 0.1
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
-args.sample_cam = 10
+args.sample_cam = 4
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
 args.density_threshold = 0.0

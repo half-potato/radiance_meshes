@@ -182,7 +182,7 @@ def apply_densification(
 
     # 3. Within-Image Variance Score (for splitting)
     within_var = stats.total_within_var_votes[:, 0]
-    within_var = stats.total_ssim# / N_b.clip(min=1)
+    within_var = stats.total_ssim / stats.tet_size.clip(min=1).sqrt()
 
     between_var = stats.total_T * between_var_std # Weighted by summed s0
     total_var = stats.total_err * total_var_std
