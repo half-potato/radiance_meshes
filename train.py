@@ -138,17 +138,16 @@ args.speed_mul = 10
 args.percent_within = 0.99
 args.percent_total = 0.01
 args.diff_threshold = 0.0
-args.midpoint = 1000
-args.clone_min_alpha = 0.1
-args.clone_min_density = 0.1
+args.clone_min_alpha = 0.025
+args.clone_min_density = 0.025
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
-args.sample_cam = 4
+args.sample_cam = 8
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
-args.density_threshold = 0.0
-args.alpha_threshold = 0.0
+args.density_threshold = 0.001
+args.alpha_threshold = 0.001
 
 args.voxel_size = 0.05
 args.init_repeat = 1
@@ -251,7 +250,6 @@ def densify_schedule(start: int,
 #                             N,
 #                             mode="linear")
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
-dschedule = list(range(args.densify_start, args.midpoint, 50)) + list(range(args.midpoint, args.densify_end, args.densify_interval))
 targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
 fig = tpl.figure()
 fig.plot(dschedule, targets, width=100, height=20)

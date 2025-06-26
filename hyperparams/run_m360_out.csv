@@ -1,8 +1,3 @@
-psnr,test_SSIM,test_PSNR,test_LPIPS,output_folder,dataset_path,gpu_id,error
-35.19485670168625,0.9287599325180054,30.586381912231445,0.17115820944309235,output/room,/optane/nerf_datasets/360/room,2,
-23.345007187323944,0.6260722875595093,23.245073318481445,0.41596755385398865,output/bicycle,/optane/nerf_datasets/360/bicycle,0,
-32.16405884209397,0.8967011570930481,28.028255462646484,0.17254529893398285,output/counter,/optane/nerf_datasets/360/counter,3,
-27.425640706078294,0.7722466588020325,24.75029945373535,0.25857993960380554,output/garden,/optane/nerf_datasets/360/garden,1,
-,,,,output/bonsai,/optane/nerf_datasets/360/bonsai,2,Process failed and no JSON output file found
-,,,,output/treehill,/optane/nerf_datasets/360/treehill,3,Process failed and no JSON output file found
-,,,,output/stump,/optane/nerf_datasets/360/stump,1,Process failed and no JSON output file found
+dataset_path,gpu_id,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/room,3,output/room_r21_avgtop2ssim_adt1e-3,32.267064781726575,0.17996753752231598,31.46988868713379,0.937925398349762
+/optane/nerf_datasets/360/bicycle,1,output/bicycle_r21_avgtop2ssim_adt1e-3,23.44493415550265,0.3372824490070343,24.560598373413086,0.7190683484077454

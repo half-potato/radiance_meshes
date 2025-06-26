@@ -27,6 +27,8 @@ class RenderStats(NamedTuple):
     total_err: torch.Tensor
     total_ssim: torch.Tensor
     max_ssim: torch.Tensor
+    top_ssim: torch.Tensor
+    top_size: torch.Tensor
 
 
 @torch.no_grad()
@@ -48,6 +50,8 @@ def collect_render_stats(
     total_within_var = torch.zeros((n_tets), device=device)
     max_ssim = torch.zeros((n_tets), device=device)
     total_ssim = torch.zeros((n_tets), device=device)
+    top_ssim = torch.zeros((n_tets, 2), device=device)
+    top_size = torch.zeros((n_tets, 2), device=device)
     total_T = torch.zeros((n_tets), device=device)
     total_err = torch.zeros((n_tets), device=device)
     peak_contrib = torch.zeros((n_tets), device=device)
@@ -101,14 +105,20 @@ def collect_render_stats(
 
         # keep top-2 candidates per tet across all views
         total_within_var += within_var_votes
-        votes_3 = torch.cat([total_within_var_votes, within_var_votes[:, None]], dim=1)
         rays_3 = torch.cat([within_var_rays, rays[:, None]], dim=1)
+        votes_3 = torch.cat([total_within_var_votes, within_var_votes[:, None]], dim=1)
         votes_sorted, idx_sorted = votes_3.sort(1, descending=True)
 
         total_within_var_votes = votes_sorted[:, :2]
         within_var_rays = torch.gather(
             rays_3, 1,
             idx_sorted[:, :2, None].expand(-1, -1, 6)
+        )
+
+        top_ssim, idx_sorted = torch.cat([top_ssim[:, :2], image_ssim.reshape(-1, 1)], dim=1).sort(1, descending=True)
+        top_size = torch.gather(
+            torch.cat([top_size, tc.reshape(-1, 1)], dim=1), 1,
+            idx_sorted[:, :2]
         )
 
         # -------- Total Variance (accumulated across images) ------------------
@@ -150,6 +160,8 @@ def collect_render_stats(
         total_err = total_err,
         total_ssim = total_ssim,
         max_ssim = max_ssim,
+        top_ssim = top_ssim[:, :2],
+        top_size = top_size[:, :2],
     )
 
 @torch.no_grad()
@@ -182,7 +194,9 @@ def apply_densification(
 
     # 3. Within-Image Variance Score (for splitting)
     within_var = stats.total_within_var_votes[:, 0]
-    within_var = stats.total_ssim / stats.tet_size.clip(min=1).sqrt()
+    # within_var = stats.total_ssim / stats.tet_size.clip(min=1).sqrt()
+    within_var = stats.top_ssim.sum(dim=1) / stats.top_size.sum(dim=1).clip(min=1).sqrt()
+    # within_var = stats.top_ssim[:, 0] / stats.tet_size.clip(min=1).sqrt()
 
     between_var = stats.total_T * between_var_std # Weighted by summed s0
     total_var = stats.total_err * total_var_std
