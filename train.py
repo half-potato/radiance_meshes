@@ -67,7 +67,6 @@ args.eval = False
 args.dataset_path = Path("/data/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
 args.iterations = 40000
-args.max_steps = 30000
 args.ckpt = ""
 args.render_train = False
 

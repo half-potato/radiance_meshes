@@ -1,3 +1,4 @@
 dataset_path,gpu_id,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
 /optane/nerf_datasets/360/room,3,output/room_r21_avgtop2ssim_adt1e-3,32.267064781726575,0.17996753752231598,31.46988868713379,0.937925398349762
 /optane/nerf_datasets/360/bicycle,1,output/bicycle_r21_avgtop2ssim_adt1e-3,23.44493415550265,0.3372824490070343,24.560598373413086,0.7190683484077454
+/optane/nerf_datasets/360/garden,2,output/garden_r21_avgtop2ssim_adt1e-3,26.745412218341333,0.18553829193115234,26.372713088989258,0.8289327621459961

@@ -293,7 +293,7 @@ class TetOptimizer:
                  lambda_color=1e-10,
                  split_std: float = 0.5,
                  lr_delay: int = 500,
-                 max_steps: int = 10000,
+                 freeze_start: int = 10000,
                  vert_lr_delay: int = 500,
                  sh_interval: int = 1000,
                  lambda_tv: float = 0.0,
@@ -342,16 +342,16 @@ class TetOptimizer:
                                                 lr_final=1e-20,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=0,
-                                                max_steps=max_steps//3)
+                                                max_steps=freeze_start//3)
 
         base_net_scheduler = get_expon_lr_func(lr_init=network_lr,
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=max_steps)
+                                                max_steps=freeze_start)
 
         self.net_scheduler_args = SpikingLR(
-            spike_duration, max_steps, base_net_scheduler,
+            spike_duration, freeze_start, base_net_scheduler,
             midpoint, densify_interval, densify_end,
             network_lr, network_lr)
             # network_lr, final_network_lr)
@@ -360,10 +360,10 @@ class TetOptimizer:
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=max_steps)
+                                                max_steps=freeze_start)
 
         self.encoder_scheduler_args = SpikingLR(
-            spike_duration, max_steps, base_encoder_scheduler,
+            spike_duration, freeze_start, base_encoder_scheduler,
             midpoint, densify_interval, densify_end,
             encoding_lr, encoding_lr)
             # encoding_lr, final_encoding_lr)
@@ -372,12 +372,12 @@ class TetOptimizer:
         base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
-                                                max_steps=max_steps,
+                                                max_steps=freeze_start,
                                                 lr_delay_steps=vert_lr_delay)
 
         self.vertex_scheduler_args = base_vertex_scheduler
         self.vertex_scheduler_args = SpikingLR(
-            spike_duration, max_steps, base_vertex_scheduler,
+            spike_duration, freeze_start, base_vertex_scheduler,
             midpoint, densify_interval, densify_end,
             # self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
             self.vertex_lr, self.vertex_lr)
