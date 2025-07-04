@@ -2,3 +2,4 @@ dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SS
 /optane/nerf_datasets/360/room,1,images_2,output/room_ifimages_2_r25,32.859262143697265,0.2862565517425537,31.223846435546875,0.9190861582756042
 /optane/nerf_datasets/360/counter,2,images_2,output/counter_ifimages_2_r25,30.45581035673859,0.2559305429458618,28.898420333862305,0.903767466545105
 /optane/nerf_datasets/360/kitchen,3,images_2,output/kitchen_ifimages_2_r25,31.262227131231462,0.168803408741951,31.083105087280273,0.9186282753944397
+/optane/nerf_datasets/360/bonsai,1,images_2,output/bonsai_ifimages_2_r25,32.45014316732024,0.24401649832725525,31.934534072875977,0.9397461414337158

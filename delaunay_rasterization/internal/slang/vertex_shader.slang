@@ -127,7 +127,7 @@ void vertex_shader(TensorView<int32_t> indices,
     no_diff float3 minv, maxv;
     no_diff find_extent2(camspace_tet, minv, maxv, cam);
     // no_diff float max_alpha = get_max_alpha(maxv.z - minv.z, virtual_tet, densities);
-    // printf("(%f, %f, %f) - (%f, %f, %f)\n", minv.x, minv.y, minv.z, maxv.x, maxv.y, maxv.z);
+    // printf("%i: (%f, %f, %f) - (%f, %f, %f)\n", g_idx, minv.x, minv.y, minv.z, maxv.x, maxv.y, maxv.z);
 
     // Check if tetrahedron is completely outside any frustum plane
     if (maxv.z <= 0.0) {// && max_alpha < 0.5/255.f) {
@@ -148,30 +148,43 @@ void vertex_shader(TensorView<int32_t> indices,
     float sort_depth = float(power_of_circumsphere(A, B, C, D, P, circumcenter));
     if (sort_depth < -1e19) return;
 
-    bool contains_ray_origin = point_in_tetrahedron(tet, cam.position) || sort_depth < 0;
+    // bool contains_ray_origin = point_in_tetrahedron(tet, cam.position) || sort_depth < 0;
+    // if (contains_ray_origin) {
+    //     printf("%i contains ray origin\n", g_idx);
+    // }
     // printf("contains: %i\n", contains_ray_origin);
 
 
-    if (contains_ray_origin) {
-        rect_tile_space.min_x = 0;
-        rect_tile_space.max_x = cam.grid_width;
-        rect_tile_space.min_y = 0;
-        rect_tile_space.max_y = cam.grid_height;
-        out_vs.storeOnce(uint2(g_idx, 1), 1);
-    } else {
-        rect_tile_space.min_x = int32_t(floor(clip(minv.x / cam.tile_width, 0, cam.grid_width)));
-        rect_tile_space.min_y = int32_t(floor(clip(minv.y / cam.tile_height, 0, cam.grid_height)));
-        rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / cam.tile_width, 0, cam.grid_width)));
-        rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / cam.tile_height, 0, cam.grid_height)));
-    }
+    // if (contains_ray_origin) {
+    //     rect_tile_space.min_x = 0;
+    //     rect_tile_space.max_x = cam.grid_width;
+    //     rect_tile_space.min_y = 0;
+    //     rect_tile_space.max_y = cam.grid_height;
+    //     out_vs.storeOnce(uint2(g_idx, 1), 1);
+    // } else {
+    //     rect_tile_space.min_x = int32_t(floor(clip(minv.x / cam.tile_width, 0, cam.grid_width)));
+    //     rect_tile_space.min_y = int32_t(floor(clip(minv.y / cam.tile_height, 0, cam.grid_height)));
+    //     rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / cam.tile_width, 0, cam.grid_width)));
+    //     rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / cam.tile_height, 0, cam.grid_height)));
+    // }
+    rect_tile_space.min_x = int32_t(floor(clip(minv.x / cam.tile_width, 0, cam.grid_width)));
+    rect_tile_space.min_y = int32_t(floor(clip(minv.y / cam.tile_height, 0, cam.grid_height)));
+    rect_tile_space.max_x = int32_t(ceil(clip(maxv.x / cam.tile_width, 0, cam.grid_width)));
+    rect_tile_space.max_y = int32_t(ceil(clip(maxv.y / cam.tile_height, 0, cam.grid_height)));
     int32_t n_tiles = (rect_tile_space.max_x - rect_tile_space.min_x) * (rect_tile_space.max_y - rect_tile_space.min_y);
+    // printf("%i: (%i, %i) - (%i, %i). %i\n", g_idx,
+    //     rect_tile_space.min_x,
+    //     rect_tile_space.min_y,
+    //     rect_tile_space.max_x,
+    //     rect_tile_space.max_y,
+    //     n_tiles);
 
     if (n_tiles == 0) {
         return;
     }
 
-    Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 });
-    Tetrahedra image_tet = camspace_tet2image_w_depth(camspace_tet, cam);
+    // Ray center_ray = get_ray(cam, { cam.W / 2, cam.H / 2 });
+    // Tetrahedra image_tet = camspace_tet2image_w_depth(camspace_tet, cam);
 
     // float3 circumcenter = calculate_circumcenter(tet);
     // float radius = length(circumcenter - tet.verts[0]);

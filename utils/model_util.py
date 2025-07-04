@@ -91,7 +91,7 @@ def compute_gradient_from_vertex_colors(
 
     return base_recovered, gradients_recovered
 
-@torch.jit.script
+# @torch.jit.script
 def compute_vertex_colors_from_field(
     element_verts: torch.Tensor,   # (T, 4, 3) - Renamed for clarity (V=4, D=3)
     base:           torch.Tensor,   # (T, 3)    - (T, C)
@@ -117,29 +117,30 @@ def compute_vertex_colors_from_field(
     # Output: for each element, for each vertex, for each color channel
     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
     vertex_colors = base[:, None, :] + grad_contrib 
-    
+
     return vertex_colors
 
 def offset_normalize(rgb, grd, circumcenters, tets):
-    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
+    full_grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1)
     radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
-    normed_grd = safe_div(grd, radius)
+    full_normed_grd = safe_div(full_grd, radius)
+    normed_grd = safe_div(grd.reshape(-1, 3), radius.reshape(-1, 1))
     vcolors = compute_vertex_colors_from_field(
-        tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
+        tets.detach(), rgb.reshape(-1, 3), full_normed_grd.float(), circumcenters.float().detach())
 
     base_color_v0_raw = vcolors[:, 0]
     return base_color_v0_raw, normed_grd
 
 def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg):
     tets = vertices[indices]
-    base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
     tet_color_raw = eval_sh(
-        tets.mean(dim=1),
-        RGB2SH(base_color_v0_raw),
+        tets.mean(dim=1).detach(),
+        RGB2SH(rgb),
         sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3).half(),
         camera_center,
         current_sh_deg).float()
-    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+    tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+    base_color_v0, normed_grd = offset_normalize(tet_color, grd, circumcenters.detach(), tets.detach())
     features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
     return features.float()
 
