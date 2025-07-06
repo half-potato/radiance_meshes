@@ -91,7 +91,7 @@ def compute_gradient_from_vertex_colors(
 
     return base_recovered, gradients_recovered
 
-# @torch.jit.script
+@torch.jit.script
 def compute_vertex_colors_from_field(
     element_verts: torch.Tensor,   # (T, 4, 3) - Renamed for clarity (V=4, D=3)
     base:           torch.Tensor,   # (T, 3)    - (T, C)
@@ -105,28 +105,18 @@ def compute_vertex_colors_from_field(
       color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
     """
     offsets = element_verts - circumcenters[:, None, :]
-
-    # grad_contrib: (T, V, C)
-    # gradients: (T, C, D) = (T, 3, 3)
-    # normalized_offsets: (T, V, D) = (T, 4, 3)
-    # einsum: 'tcd,tvd->tvc'
-    # t: batch (Elements)
-    # c: color channels (of gradient)
-    # d: spatial dimensions (of gradient and offset)
-    # v: vertices
-    # Output: for each element, for each vertex, for each color channel
     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
     vertex_colors = base[:, None, :] + grad_contrib 
-
+    
     return vertex_colors
 
 def offset_normalize(rgb, grd, circumcenters, tets):
-    full_grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1)
+    # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
+    grd = grd.reshape(-1, 1, 3)# * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
     radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
-    full_normed_grd = safe_div(full_grd, radius)
-    normed_grd = safe_div(grd.reshape(-1, 3), radius.reshape(-1, 1))
+    normed_grd = safe_div(grd, radius)
     vcolors = compute_vertex_colors_from_field(
-        tets.detach(), rgb.reshape(-1, 3), full_normed_grd.float(), circumcenters.float().detach())
+        tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
 
     base_color_v0_raw = vcolors[:, 0]
     return base_color_v0_raw, normed_grd
@@ -140,8 +130,13 @@ def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters
         camera_center,
         current_sh_deg).float()
     tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
-    base_color_v0, normed_grd = offset_normalize(tet_color, grd, circumcenters.detach(), tets.detach())
-    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
+    base_color_v0, normed_grd = offset_normalize(
+        tet_color, grd, circumcenters.detach(), tets.detach())
+    features = torch.cat([
+        density,
+        base_color_v0.reshape(-1, 3),
+        normed_grd.reshape(-1, 3)
+    ], dim=1)
     return features.float()
 
 class iNGPDW(nn.Module):
@@ -231,6 +226,7 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
-        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
+        # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
+        grd = field_samples.reshape(-1, 1, 3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh

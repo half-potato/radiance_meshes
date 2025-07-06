@@ -32,23 +32,6 @@ struct DistortionState5 : IDifferentiable {
     float v;  // new 5th term, e.g., for w_i^2 * interval / 3, or anything else
 };
 
-[Differentiable]
-float tukey_power_ladder(float x, float p) {
-  // Compute sign(x) * |p - 1|/p * ((|x|/|p-1| + 1)^p - 1)
-  if (p == 1) {
-    return x;
-  }
-  let xp = abs(x);
-  let xs = xp / max(TINY_VAL, abs(p - 1));
-  let y = sign(x) * abs(p - 1) / p * (pow(xs + 1, p) - 1);
-  return y;
-}
-
-[Differentiable]
-float safe_exp4alpha(float x) {
-    return safe_clip(safe_exp(x), 0, 1);
-}
-
 // [Differentiable]
 // float moment_0_int(float a, float b, float s1, float T) {
 //     return T * safe_div((-safe_expm1(s1*(a - b))),s1);
@@ -102,8 +85,8 @@ DistortionState5 update_distortion_state(
     float density,
     float2 dist)
 {
-    no_diff float start = dist.x;//tukey_power_ladder(dist.x, ladder_p);
-    no_diff float end = dist.y;  // tukey_power_ladder(dist.y, ladder_p);
+    no_diff float start = dist.x;
+    no_diff float end = dist.y;
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
     float d = density;
 
@@ -149,7 +132,7 @@ DistortionState5 undo_distortion_state(
 float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
 {
     float3 color_t_n = pixel_state_t_nm1.rgb + gauss_rgba_t_n.rgb * pixel_state_t_nm1.a;
-    float transmittance_t_n = pixel_state_t_nm1.a * (1 - gauss_rgba_t_n.a);
+    float transmittance_t_n = pixel_state_t_nm1.a * safe_clip(1 - gauss_rgba_t_n.a, 0, 1);
     return float4(color_t_n, transmittance_t_n);
 }
 
@@ -216,14 +199,8 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
-    //bool print = thread_rank == 0;
-    bool print = false;
-
 
     Ray ray = get_ray(cam, center_pix_coord);
-    // if (print) {
-    //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
-    // }
 
     int32_t local_n_contrib = 0;
     // int32_t low = 0;
@@ -250,15 +227,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     ao = new_ao;
-                    // tet_alive[collected_idx[j]] = true;
-                    // if (pix_coord.x == 3 && pix_coord.y == 0) {
-                    //     printf("%f-%f (%f), (%f, %f, %f, %f, %f)\n", tetra_ctrl.dist.x, tetra_ctrl.dist.y, tetra_ctrl.density,
-                    //     new_ao.distortion_state.x, new_ao.distortion_state.y, new_ao.distortion_state.z, new_ao.distortion_state.w, new_ao.distortion_state.v);
-                    // }
-
                     if (new_ao.rgba.a < 1 / 255.f) {
-                        // This Splat never registred so we subtract it before we break.
-                        // local_n_contrib--;
                         thread_active = false;
                         break;
                     }
@@ -270,7 +239,6 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     if (is_inside)
         n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)] = local_n_contrib;
-    // printf("%i/%i,", low, local_n_contrib);
 
     return ao;
 }
@@ -296,8 +264,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     uint32_t block_size = cam.tile_height * cam.tile_width;
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
-
-    bool print = false;//pix_coord.x == 0 && pix_coord.y == 0;
 
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
@@ -486,14 +452,9 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
-    //bool print = thread_rank == 0;
-    bool print = false;
 
 
     Ray ray = get_ray(cam, center_pix_coord);
-    // if (print) {
-    //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
-    // }
 
     float max_split_alpha = 0.f;
     float max_grow_alpha = 0.f;

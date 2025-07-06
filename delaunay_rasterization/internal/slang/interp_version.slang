@@ -60,17 +60,6 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
     return max(vertex_color[0] * bary.x + vertex_color[1] * bary.y + vertex_color[2] * bary.z + vertex_color[3] * bary.w, 0.f);
 }
 
-// [Differentiable]
-// inline float3 linear_color(float4x3 grad, float3 v)
-// {
-//     // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
-//     return {
-//         max(grad[0].r + dot(grad[1], v), 0.f),
-//         max(grad[0].g + dot(grad[2], v), 0.f),
-//         max(grad[0].b + dot(grad[3], v), 0.f),
-//     };
-// }
-
 [Differentiable]
 inline float3 linear_color(float3 grad, float3 base_color, float3 v)
 {
@@ -79,6 +68,40 @@ inline float3 linear_color(float3 grad, float3 base_color, float3 v)
     return {base_color.r * f, base_color.g * f, base_color.b * f};
 }
 
+[Differentiable]
+float compute_integral_1D(float c0, float c1, float dt, float d) {
+    float alpha = safe_exp(-d*dt);
+    float X = (-d*dt*alpha + 1 - alpha);
+    float Y = (d*dt-1) + alpha;
+    return safe_div(X*c0+Y*c1, d*dt);
+}
+
+[Differentiable]
+inline float integrate_channel(
+    float t_n, float t_f,
+    float c_at_t0, float dc_dt, float density)
+{
+    // Find zero-crossing and adjust integration bounds to the positive segment
+    float t_zero = - safe_div(c_at_t0, dc_dt);
+    bool change_within = (t_n < t_zero) && (t_zero < t_f);
+    // if decreasing
+    float c0 = max(c_at_t0 + dc_dt * t_n, 0.f);
+    float c1 = max(c_at_t0 + dc_dt * t_f, 0.f);
+    if (change_within) {
+        float cm = max(c_at_t0 + dc_dt * t_zero, 0.f);
+        float dt1 = max(t_zero - t_n, 0);
+        float dt2 = max(t_f - t_zero, 0);
+        float onemalpha = safe_clip(safe_exp(-density * dt1), 0.f, 1.f);
+        if (dc_dt < 0.f) {
+            return compute_integral_1D(cm, c0, dt1, density) + onemalpha * compute_integral_1D(0, 0, dt2, density);
+        }
+        if (dc_dt > 0.f) {
+            return compute_integral_1D(0, 0, dt1, density) + onemalpha * compute_integral_1D(c1, cm, dt2, density);
+        }
+    }
+    float dt = max(t_f - t_n, 0.f);
+    return compute_integral_1D(c1, c0, dt, density);
+}
 
 [Differentiable]
 bool evaluate_tetra_interp(
@@ -104,32 +127,26 @@ bool evaluate_tetra_interp(
         ctrl_pt = { (float4)(0.f, 0.f, 0.f, 0.f), {0.f, 0.f}, g.density };
         return false;
     } else {
-        /*
-        float3x3 T = transpose(float3x3(verts[0] - verts[3], verts[1] - verts[3], verts[2] - verts[3]));
-        float3 uvw_enter = SolveLinearSystem(T, enter * ray_d + ray_o - verts[3]);
-        float3 uvw_exit = SolveLinearSystem(T, exit * ray_d + ray_o - verts[3]);
-
-        float w_enter = safe_clip(1.0 - uvw_enter.x - uvw_enter.y - uvw_enter.z, 0, 1);
-        float w_exit = safe_clip(1.0 - uvw_exit.x - uvw_exit.y - uvw_exit.z, 0, 1);
-
-        float4 b_enter = float4(uvw_enter, w_enter);
-        float4 b_exit = float4(uvw_exit, w_exit);
-
-        float3 c_enter = mix_color(g.vertex_color, b_enter);
-        float3 c_exit = mix_color(g.vertex_color, b_exit);
-        */
-
-        //*
         float3 v_enter = enter * ray_d + ray_o - verts[0];
         float3 v_exit = exit * ray_d + ray_o - verts[0];
-        // float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
-        // float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
+
+        // float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
+        float alpha = safe_clip(-safe_expm1(-g.density * dt), 0.f, 1.f);
+        /*
         float3 c_enter = max(linear_color(g.grd, g.base_color, v_enter) + g.base_color, 0.f);
         float3 c_exit = max(linear_color(g.grd, g.base_color, v_exit) + g.base_color, 0.f);
-        //*/
-
-        float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
         float3 final_color = compute_integral(c_exit, c_enter, dt, g.density);
+        */
+        //*
+        float dc_dt = dot(g.grd, ray_d);
+        float f0 = dot(g.grd, v_enter);
+        float offset = dot(ray_o - verts[0], g.grd);
+        float3 final_color = {
+            integrate_channel(enter, exit, g.base_color.r + offset, dc_dt, g.density),
+            integrate_channel(enter, exit, g.base_color.g + offset, dc_dt, g.density),
+            integrate_channel(enter, exit, g.base_color.b + offset, dc_dt, g.density)
+        };
+        //*/
 
         float4 rgba = {final_color.x,
                        final_color.y,

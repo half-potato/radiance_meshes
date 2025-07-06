@@ -45,8 +45,8 @@ def create_view_matrix(camera_pos, look_at_point):
 class DelaunayRenderTest(parameterized.TestCase):
     def setUp(self):
         torch.manual_seed(189710234)
-        self.height = 16
-        self.width = 16
+        self.height = 32
+        self.width = 32
         
     def run_test(self, points, viewmat, tile_size):
         """Run rendering test with different sample counts and compare results."""
@@ -81,7 +81,7 @@ class DelaunayRenderTest(parameterized.TestCase):
     @parameterized.product(
         n_points=[10, 20],
         radius=[10, 100],
-        tile_size=[8]
+        tile_size=[16]
     )
     def test_center_view(self, n_points, radius, tile_size, N=5):
         """Test rendering from center of point cloud with random rotation."""
@@ -105,7 +105,7 @@ class DelaunayRenderTest(parameterized.TestCase):
         n_points=[10, 20],
         radius=[10, 100],
         offset_mag=[1, 10, 100],
-        tile_size=[8]
+        tile_size=[16]
     )
     def test_outside_view(self, n_points, radius, offset_mag, tile_size, N=5):
         """Test rendering from outside the point cloud looking in."""

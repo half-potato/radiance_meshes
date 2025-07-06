@@ -159,7 +159,7 @@ float safe_log(float v) {
 }
 
 void bw_expm1(inout DifferentialPair<float> v, float.Differential R) {
-  v = DifferentialPair<float>(v.p, -exp(v.p) * R);
+  v = DifferentialPair<float>(v.p, exp(v.p) * R);
 }
 
 float _expm1(float v) {
