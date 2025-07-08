@@ -34,6 +34,7 @@ import gc
 from utils.densification import collect_render_stats, apply_densification
 import mediapy
 
+
 torch.set_num_threads(1)
 
 class CustomEncoder(json.JSONEncoder):
@@ -61,10 +62,10 @@ class SimpleSampler:
 
 eps = torch.finfo(torch.float).eps
 args = Args()
-args.tile_size = 4
+args.tile_size = 16
 args.image_folder = "images_4"
 args.eval = False
-args.dataset_path = Path("/data/nerf_datasets/360/bicycle")
+args.dataset_path = Path("/data/nerf_datasets/360/garden")
 args.output_path = Path("output/test/")
 args.iterations = 30000
 args.ckpt = ""
@@ -80,18 +81,18 @@ args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
 args.network_lr = 1e-3
 args.final_network_lr = 1e-4
-args.hidden_dim = 64
-args.sh_hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
 args.log2_hashmap_size = 22
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -4
-args.weight_decay = 0.01
+args.weight_decay = 0.25
 args.final_weight_decay = 0.01
 args.hashmap_dim = 16
 args.percent_alpha = 0.02 # preconditioning
 args.spike_duration = 500
+args.hidden_dim = 256
+args.sh_hidden_dim = 512
 
 args.dg_init=1e-4
 args.g_init=1.0
@@ -108,12 +109,12 @@ args.vertices_lr_delay_multi = 1e-8
 args.clip_multi = 0
 args.delaunay_start = 30000
 
-args.freeze_start = 22500
+args.freeze_start = 16000
 args.freeze_lr = 1e-3
 args.final_freeze_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 1e-4
+args.lambda_dist = 0
 
 # Clone Settings
 args.num_samples = 200
@@ -123,7 +124,7 @@ args.split_mode = "split_point"
 args.clone_schedule = "quadratic"
 args.min_tet_count = 9
 args.densify_start = 2000
-args.densify_end = 20000
+args.densify_end = 16000
 args.densify_interval = 500
 args.budget = 2_000_000
 args.clone_velocity = 0.0
@@ -136,13 +137,13 @@ args.clone_min_density = 0.025
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
-args.sample_cam = 8
+args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
 args.density_threshold = 0.001
 args.alpha_threshold = 0.001
-args.total_thresh = 0.05
-args.within_thresh = 0.4
+args.total_thresh = 0.025
+args.within_thresh = 0.3
 
 args.voxel_size = 0.01
 

@@ -195,10 +195,9 @@ class iNGPDW(nn.Module):
                 [g_init, s_init, d_init, c_init]):
                 last = network[-1]
                 with torch.no_grad():
-                    init.uniform_(last.weight.data, a=-eps, b=eps)
-                    # nn.init.xavier_uniform_(m.weight, gain)
+                    # init.uniform_(last.weight.data, a=-eps, b=eps)
+                    nn.init.xavier_uniform_(last.weight, eps)
                     last.bias.zero_()
-
 
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):
         x = x.detach()

@@ -28,6 +28,7 @@ from simple_knn._C import distCUDA2
 from utils import mesh_util
 from utils.model_util import *
 from models.base_model import BaseModel
+from muon import MuonWithAuxAdam
 
 torch.set_float32_matmul_precision('high')
 
@@ -310,12 +311,34 @@ class TetOptimizer:
         self.optim = optim.CustomAdam([
             {"params": model.backbone.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.999], eps=1e-15)
-        self.net_optim = optim.CustomAdam([
-            {"params": model.backbone.density_net.parameters(),   "lr": network_lr,  "name": "density"},
-            {"params": model.backbone.color_net.parameters(),     "lr": network_lr,    "name": "color"},
-            {"params": model.backbone.gradient_net.parameters(),  "lr": network_lr, "name": "gradient"},
-            {"params": model.backbone.sh_net.parameters(),        "lr": network_lr,       "name": "sh"},
-        ], ignore_param_list=[], betas=[0.9, 0.999])
+        # self.net_optim = optim.CustomAdam([
+        params = dict(
+            weight_decay=0,
+            lr=network_lr,
+        )
+        def process(body):
+            hidden_weights = [p for p in body.parameters() if p.ndim >= 2]
+            hidden_gains_biases = [p for p in body.parameters() if p.ndim < 2]
+            a = dict(
+                params=hidden_weights,
+                use_muon = True,
+                momentum=0.95,
+                **params
+            )
+            b = dict(
+                params=hidden_gains_biases,
+                use_muon = False,
+                betas=(0.9, 0.999),
+                eps=1e-15,
+                **params
+            )
+            return [a, b]
+        self.net_optim = MuonWithAuxAdam(
+            process(model.backbone.density_net) + \
+            process(model.backbone.color_net) + \
+            process(model.backbone.gradient_net) + \
+            process(model.backbone.sh_net)
+        )
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},

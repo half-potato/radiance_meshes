@@ -1,0 +1,2 @@
+c_init,d_init,error,g_init,gpu_id,iterations,output_folder,s_init
+0.1,0.1,Process failed and no JSON output file found,0.1,0,1000,output/si1_di0.1_ci0.1_gi0.1_i1000,1
