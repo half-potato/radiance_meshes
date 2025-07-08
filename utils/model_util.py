@@ -148,6 +148,7 @@ class iNGPDW(nn.Module):
                  per_level_scale=2,
                  L=10,
                  hashmap_dim=4,
+                 sh_hidden_dim=64,
                  hidden_dim=64,
                  g_init=1,
                  s_init=1e-4,
@@ -169,9 +170,11 @@ class iNGPDW(nn.Module):
             log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
             finest_resolution=base_resolution*per_level_scale**self.L)
 
-        def mk_head(n):
+        def mk_head(n, hidden_dim):
             network = nn.Sequential(
                 nn.Linear(self.encoding.n_output_dims, hidden_dim),
+                nn.SELU(inplace=True),
+                nn.Linear(hidden_dim, hidden_dim),
                 nn.SELU(inplace=True),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.SELU(inplace=True),
@@ -180,17 +183,13 @@ class iNGPDW(nn.Module):
             gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
             network.apply(lambda m: init_linear(m, gain))
             return network
-        self.network = mk_head(1+12+sh_dim)
 
-        self.density_net   = mk_head(1)
-        self.color_net     = mk_head(3)
-        self.gradient_net  = mk_head(3)
-        self.sh_net        = mk_head(sh_dim)
+        self.density_net   = mk_head(1, hidden_dim)
+        self.color_net     = mk_head(3, hidden_dim)
+        self.gradient_net  = mk_head(3, hidden_dim)
+        self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
 
-        last = self.network[-1]
         with torch.no_grad():
-            last.weight[4:, :].zero_()
-            last.bias[4:].zero_()
             for network, eps in zip(
                 [self.gradient_net, self.sh_net, self.density_net, self.color_net], 
                 [g_init, s_init, d_init, c_init]):

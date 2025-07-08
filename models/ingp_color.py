@@ -278,8 +278,8 @@ class TetOptimizer:
                  vertices_lr: float=4e-4,
                  final_vertices_lr: float=4e-7,
                  vertices_lr_delay_multi: float=0.01,
+
                  weight_decay=1e-10,
-                 lambda_color=1e-10,
                  split_std: float = 0.5,
                  lr_delay: int = 500,
                  freeze_start: int = 10000,
@@ -305,14 +305,12 @@ class TetOptimizer:
 
                  **kwargs):
         self.weight_decay = weight_decay
-        self.lambda_color = lambda_color
         self.lambda_tv = lambda_tv
         self.lambda_density = lambda_density
         self.optim = optim.CustomAdam([
             {"params": model.backbone.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.999], eps=1e-15)
         self.net_optim = optim.CustomAdam([
-            {"params": model.backbone.network.parameters(), "lr": network_lr, "name": "network"},
             {"params": model.backbone.density_net.parameters(),   "lr": network_lr,  "name": "density"},
             {"params": model.backbone.color_net.parameters(),     "lr": network_lr,    "name": "color"},
             {"params": model.backbone.gradient_net.parameters(),  "lr": network_lr, "name": "gradient"},
@@ -447,23 +445,18 @@ class TetOptimizer:
     def sh_optim(self):
         return None
 
-    def regularizer(self, render_pkg):
-        weight_decay = self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
+    def regularizer(self, render_pkg, weight_decay, lambda_tv, **kwargs):
+        weight_decay = weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
 
-        if self.lambda_density > 0 or self.lambda_tv > 0:
+        if lambda_tv > 0:
             density = self.model.calc_tet_density()
-            density_loss = (self.model.calc_tet_area().detach() * density).sum()
-            if self.lambda_tv > 0:
-                diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
-                tv_loss  = (self.face_area * diff.abs())
-                tv_loss  = tv_loss.sum() / self.face_area.sum()
-            else:
-                tv_loss = 0
+            diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
+            tv_loss  = (self.face_area * diff.abs())
+            tv_loss  = tv_loss.sum() / self.face_area.sum()
         else:
-            density_loss = 0
             tv_loss = 0
 
-        return weight_decay + self.lambda_tv * tv_loss + self.lambda_density * density_loss
+        return weight_decay + lambda_tv * tv_loss
 
     def update_triangulation(self, **kwargs):
         self.model.update_triangulation(**kwargs)

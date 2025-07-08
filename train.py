@@ -81,12 +81,14 @@ args.final_encoding_lr = 3e-4
 args.network_lr = 1e-3
 args.final_network_lr = 1e-4
 args.hidden_dim = 64
+args.sh_hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
 args.log2_hashmap_size = 22
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -4
 args.weight_decay = 0.01
+args.final_weight_decay = 0.01
 args.hashmap_dim = 16
 args.percent_alpha = 0.02 # preconditioning
 args.spike_duration = 500
@@ -206,42 +208,6 @@ def target_num(x):
     else:
         raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
 
-# ----------------------------------------------------------------
-# new helper: front‑loaded (high‑frequency‑then‑slow‑down) schedule
-def densify_schedule(start: int,
-                     end: int,
-                     n_events: int,
-                     mode: str = "sqrt"):
-    """
-    Generate `n_events` iteration indices between `start` and `end`
-    with decreasing frequency.  Modes:
-        • 'sqrt'    – spacing ∝ √t   (simple, monotone)
-        • 'exp'     – exponential easing
-        • 'logistic'– S‑curve
-    """
-    t = np.linspace(0.0, 1.0, n_events)
-    if mode == "linear":
-        w = t
-    elif mode == "sqrt":
-        w = t**2                         # lots of points early, sparse later
-    elif mode == "exp":
-        g = 4.0
-        w = (np.exp(g*t) - 1) / (np.exp(g) - 1)
-    elif mode == "logistic":
-        k = 10.0
-        w = 1 / (1 + np.exp(-k*(t-0.5)))
-        w = (w - w.min()) / (w.max() - w.min())
-    else:
-        raise ValueError("mode must be 'sqrt', 'exp', or 'logistic'")
-    iters = np.round(start + w * (end - start)).astype(int)
-    iters[0] = start                     # make sure start & end are included
-    iters[-1] = end
-    return list(np.unique(iters))
-
-# dschedule = densify_schedule(args.densify_start,
-#                             args.densify_end,
-#                             N,
-#                             mode="linear")
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
 targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
 fig = tpl.figure()
@@ -287,6 +253,13 @@ if args.use_bilateral_grid:
 
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
+
+weight_decay_fn = get_expon_lr_func(
+    lr_init=args.weight_decay,
+    lr_final=args.final_weight_decay,
+    lr_delay_mult=1e-8,
+    max_steps=args.freeze_start,
+    lr_delay_steps=0)
 
 tet_optim.build_tv()
 progress_bar = tqdm(range(args.iterations))
@@ -338,7 +311,7 @@ for iteration in progress_bar:
 
     l1_loss = (target - image).abs().mean()
     l2_loss = ((target - image)**2).mean()
-    reg = tet_optim.regularizer(render_pkg)
+    reg = tet_optim.regularizer(render_pkg, weight_decay_fn(iteration), args.lambda_tv)
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg['distortion_loss']
     loss = (1-args.lambda_ssim)*l1_loss + \

@@ -18,9 +18,10 @@ args.tile_size = 16
 args.image_folder = "images_4"
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
-args.eval = True
+args.eval = False
 args.use_ply = False
 args.render_train = False
+args.base_min_t = 0.2
 args = Args.from_namespace(args.get_parser().parse_args())
 
 device = torch.device('cuda')
@@ -37,7 +38,9 @@ else:
 
 # model.light_offset = -1
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
+    args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
+
+model.min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
 
 ic(model.min_t)
 if args.render_train:
@@ -51,7 +54,7 @@ with torch.no_grad():
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render(camera, model, tile_size=args.tile_size, tmin=model.min_t)
+        render_pkg = render(camera, model, tile_size=args.tile_size, min_t=model.min_t)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()

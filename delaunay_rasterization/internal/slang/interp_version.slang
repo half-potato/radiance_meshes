@@ -84,7 +84,6 @@ inline float integrate_channel(
     // Find zero-crossing and adjust integration bounds to the positive segment
     float t_zero = - safe_div(c_at_t0, dc_dt);
     bool change_within = (t_n < t_zero) && (t_zero < t_f);
-    // if decreasing
     float c0 = max(c_at_t0 + dc_dt * t_n, 0.f);
     float c1 = max(c_at_t0 + dc_dt * t_f, 0.f);
     if (change_within) {
@@ -93,10 +92,11 @@ inline float integrate_channel(
         float dt2 = max(t_f - t_zero, 0);
         float onemalpha = safe_clip(safe_exp(-density * dt1), 0.f, 1.f);
         if (dc_dt < 0.f) {
-            return compute_integral_1D(cm, c0, dt1, density) + onemalpha * compute_integral_1D(0, 0, dt2, density);
+            return compute_integral_1D(cm, c0, dt1, density);
         }
         if (dc_dt > 0.f) {
-            return compute_integral_1D(0, 0, dt1, density) + onemalpha * compute_integral_1D(c1, cm, dt2, density);
+            //return compute_integral_1D(0, 0, dt1, density) + onemalpha * compute_integral_1D(c1, cm, dt2, density);
+            return onemalpha * compute_integral_1D(c1, cm, dt2, density);
         }
     }
     float dt = max(t_f - t_n, 0.f);
@@ -173,7 +173,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
     // Here we assume each tetrahedron has a single scalar density in tet_density:
-    float density = float(tet_density[g_idx, 0]);
+    float density = max(float(tet_density[g_idx, 0]), 0.f);
     float3 base_color = {
         float(tet_density[g_idx, 1]),
         float(tet_density[g_idx, 2]),
@@ -201,7 +201,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    float density = float(tet_density[g_idx, 0]);
+    float density = max(float(tet_density[g_idx, 0]), 0.f);
     SplatTetrahedra_interp result;
     result.tet       = tet;
     result.density   = density;
