@@ -165,7 +165,7 @@ class BaseModel(nn.Module):
         tinyplypy.write_ply(str(path), data_dict, is_binary=True)
 
     @torch.no_grad
-    def extract_mesh(self, path, density_threshold=0.5, alpha_threshold=0.2):
+    def extract_mesh(self, cameras, path, density_threshold=0.5, alpha_threshold=0.2):
         path.mkdir(exist_ok=True, parents=True)
         verts = self.vertices
         tet_density = self.calc_tet_density()
@@ -193,4 +193,5 @@ class BaseModel(nn.Module):
                 mpath = path / f"{i}.ply"
                 print(f"Saving #F:{F} to {mpath}")
                 tinyplypy.write_ply(str(mpath), mesh, is_binary=False)
+
 

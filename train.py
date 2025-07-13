@@ -65,11 +65,12 @@ args = Args()
 args.tile_size = 16
 args.image_folder = "images_4"
 args.eval = False
-args.dataset_path = Path("/data/nerf_datasets/360/garden")
+args.dataset_path = Path("/optane/nerf_datasets/360/garden")
 args.output_path = Path("output/test/")
 args.iterations = 30000
 args.ckpt = ""
 args.render_train = False
+args.delaunay_interval = 10
 
 # Light Settings
 args.max_sh_deg = 3
@@ -79,18 +80,17 @@ args.bake_model = True
 
 # iNGP Settings
 args.encoding_lr = 3e-3
-args.final_encoding_lr = 3e-4
+args.final_encoding_lr = 3e-5
 args.network_lr = 1e-3
-args.final_network_lr = 1e-4
+args.final_network_lr = 1e-5
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
-args.log2_hashmap_size = 24
+args.log2_hashmap_size = 22
 args.per_level_scale = 2
 args.L = 10
 args.density_offset = -4
-args.weight_decay = 0.25
-args.final_weight_decay = 0.01
-args.hashmap_dim = 4
-args.percent_alpha = 0.02 # preconditioning
+args.weight_decay = 0.1
+args.hashmap_dim = 8
+args.percent_alpha = 0.04 # preconditioning
 args.spike_duration = 500
 args.hidden_dim = 64
 args.sh_hidden_dim = 256
@@ -111,7 +111,7 @@ args.clip_multi = 0
 args.delaunay_start = 30000
 
 args.freeze_start = 16000
-args.freeze_lr = 1e-3
+args.freeze_lr = 5e-3
 args.final_freeze_lr = 1e-4
 
 # Distortion Settings
@@ -144,7 +144,7 @@ args.lambda_tv = 0.0
 args.density_threshold = 0.001
 args.alpha_threshold = 0.001
 args.total_thresh = 0.025
-args.within_thresh = 0.3
+args.within_thresh = 0.4
 
 args.voxel_size = 0.01
 
@@ -178,7 +178,8 @@ else:
                                 **args.as_dict())
 min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
 
-tet_optim = TetOptimizer(model, **args.as_dict())
+final_iter = args.freeze_start if args.bake_model else args.iterations
+tet_optim = TetOptimizer(model, final_iter=final_iter, **args.as_dict())
 if args.eval:
     sample_camera = test_cameras[args.sample_cam]
     # sample_camera = train_cameras[args.sample_cam]
@@ -256,21 +257,21 @@ if args.use_bilateral_grid:
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
-weight_decay_fn = get_expon_lr_func(
-    lr_init=args.weight_decay,
-    lr_final=args.final_weight_decay,
-    lr_delay_mult=1e-8,
-    max_steps=args.freeze_start,
-    lr_delay_steps=0)
+# weight_decay_fn = get_expon_lr_func(
+#     lr_init=args.weight_decay,
+#     lr_final=args.final_weight_decay,
+#     lr_delay_mult=1e-8,
+#     max_steps=args.freeze_start,
+#     lr_delay_steps=0)
 
 tet_optim.build_tv()
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for iteration in progress_bar:
-    delaunay_interval = 10 if iteration < args.delaunay_start else 100
+    delaunay_interval = args.delaunay_interval if iteration < args.delaunay_start else 100
     do_delaunay = iteration % delaunay_interval == 0 and iteration < args.freeze_start
     do_freeze = iteration == args.freeze_start
-    do_cloning = iteration in dschedule
+    do_cloning = iteration in dschedule and iteration < args.freeze_start
     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
     do_sh_step = iteration % args.sh_step == 0
 
@@ -313,7 +314,7 @@ for iteration in progress_bar:
 
     l1_loss = (target - image).abs().mean()
     l2_loss = ((target - image)**2).mean()
-    reg = tet_optim.regularizer(render_pkg, weight_decay_fn(iteration), args.lambda_tv)
+    reg = tet_optim.regularizer(render_pkg, args.weight_decay, args.lambda_tv)
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg['distortion_loss']
     loss = (1-args.lambda_ssim)*l1_loss + \
@@ -378,6 +379,8 @@ for iteration in progress_bar:
                 device      = device,
                 sample_cam  = sample_camera,
                 sample_image= sample_image,     # whatever RGB debug frame you use
+                budget      = max(args.budget - model.vertices.shape[0], 0)
+
             )
             # tet_optim.prune(**args.as_dict())
             gc.collect()

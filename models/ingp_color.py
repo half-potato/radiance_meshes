@@ -13,7 +13,7 @@ from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
 
-from utils.train_util import get_expon_lr_func, SpikingLR
+from utils.train_util import get_expon_lr_func, SpikingLR, TwoPhaseLR
 from utils.graphics_utils import l2_normalize_th
 from torch.utils.checkpoint import checkpoint
 from pathlib import Path
@@ -283,7 +283,7 @@ class TetOptimizer:
                  weight_decay=1e-10,
                  split_std: float = 0.5,
                  lr_delay: int = 500,
-                 freeze_start: int = 10000,
+                 final_iter: int = 10000,
                  vert_lr_delay: int = 500,
                  sh_interval: int = 1000,
                  lambda_tv: float = 0.0,
@@ -347,50 +347,60 @@ class TetOptimizer:
         self.vertex_rgbs_param_grad = None
         self.vertex_grad = None
         self.split_std = split_std
+        def make_spiking(init_lr, final_peak_lr, final_lr):
+            return TwoPhaseLR(
+                final_iter, densify_start, densify_interval, densify_end, init_lr, final_peak_lr, (init_lr + final_lr) / 2, final_lr)
 
         self.alpha_sched = get_expon_lr_func(lr_init=percent_alpha*float(model.scene_scaling.cpu()),
                                                 lr_final=1e-20,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=0,
-                                                max_steps=freeze_start//3)
+                                                max_steps=final_iter//3)
 
         base_net_scheduler = get_expon_lr_func(lr_init=network_lr,
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=freeze_start)
+                                                max_steps=final_iter)
 
         self.net_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_net_scheduler,
+            spike_duration, final_iter, base_net_scheduler,
             midpoint, densify_interval, densify_end,
             network_lr, network_lr)
+        self.net_scheduler_args = make_spiking(
+            network_lr, network_lr, final_network_lr)
             # network_lr, final_network_lr)
 
         base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
                                                 lr_delay_steps=lr_delay,
-                                                max_steps=freeze_start)
+                                                max_steps=final_iter)
 
         self.encoder_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_encoder_scheduler,
+            spike_duration, final_iter, base_encoder_scheduler,
             midpoint, densify_interval, densify_end,
             encoding_lr, encoding_lr)
             # encoding_lr, final_encoding_lr)
+        self.encoder_scheduler_args = make_spiking(
+            encoding_lr, encoding_lr, final_encoding_lr)
 
         self.vertex_lr = self.vert_lr_multi*vertices_lr
         base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
-                                                max_steps=freeze_start,
+                                                max_steps=final_iter,
                                                 lr_delay_steps=vert_lr_delay)
 
         self.vertex_scheduler_args = base_vertex_scheduler
         self.vertex_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_vertex_scheduler,
+            spike_duration, final_iter, base_vertex_scheduler,
             midpoint, densify_interval, densify_end,
             # self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
             self.vertex_lr, self.vertex_lr)
+
+        self.vertex_scheduler_args = make_spiking(
+            self.vertex_lr, self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
         self.iteration = 0
 
     def update_learning_rate(self, iteration):

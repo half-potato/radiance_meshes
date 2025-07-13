@@ -130,6 +130,7 @@ def apply_densification(
     device: torch.device,
     sample_cam,
     sample_image,
+    budget: int
 ):
     s0_t, s1_t, s2_t = stats.total_var_moments.T
     total_var_mu = safe_math.safe_div(s1_t, s0_t)
@@ -151,6 +152,13 @@ def apply_densification(
     within_mask = (within_var > args.within_thresh)
     total_mask = (total_var > args.total_thresh)
     clone_mask = within_mask | total_mask
+    if clone_mask.sum() > budget:
+        true_indices = clone_mask.nonzero().squeeze(-1)
+        perm = torch.randperm(true_indices.size(0))
+        selected_indices = true_indices[perm[:budget]]
+        
+        clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
+        clone_mask[selected_indices] = True
 
     if args.output_path is not None:
 
