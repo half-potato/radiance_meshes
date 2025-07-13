@@ -1,4 +1,4 @@
-dataset_path,images
+dataset_path,image_folder
 /optane/nerf_datasets/360/bicycle,images_4
 /optane/nerf_datasets/360/garden,images_4
 /optane/nerf_datasets/360/stump,images_4

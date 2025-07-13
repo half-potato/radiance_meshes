@@ -257,6 +257,54 @@ class SpikingLR:
         height = self.peak_height_fn(peak_ind) - self.base_function(peak_ind)
         return base_f + self.peak_fn(last_peak, height)
 
+class TwoPhaseLR:
+    def __init__(self, max_i, start_i, period_i, settle_i, 
+                 lr_peak, lr_end_peak, lr_trough, lr_final):
+        self.max_i = max_i
+        self.start_i = start_i
+        self.settle_i = settle_i
+        self.period_i = period_i
+        self.lr_peak = lr_peak
+        self.lr_end_peak = lr_end_peak
+        self.lr_trough = lr_trough
+        self.lr_final = lr_final
+
+        n_cycles = settle_i / period_i
+        self.gamma = (lr_end_peak / lr_peak) ** (1 / n_cycles) if n_cycles > 0 else 1
+
+    def __call__(self, i):
+        # Phase 1: Spiking with decaying cosine annealing
+        if i < self.start_i:
+            return get_expon_lr_func(self.lr_peak, self.lr_trough, max_steps=self.start_i)(i)
+        elif self.start_i < i < self.settle_i:
+            cycle = math.floor((i-self.start_i) / self.period_i)
+            t_cycle = (i-self.start_i) % self.period_i
+            
+            lr_max = self.lr_peak * (self.gamma ** cycle)
+            
+            height = (lr_max - self.lr_trough)
+            # lr = self.lr_trough + 0.5 * height * \
+            #      (1 + math.cos(math.pi * t_cycle / self.period_i))
+            t = t_cycle / self.period_i
+            lr = self.lr_trough + np.exp(np.log(height) * (1 - t) + np.log(1e-6) * t)
+            
+            return lr
+
+        # Phase 2: Final settling cosine decay
+        else:
+            if i >= self.max_i:
+                return self.lr_final
+
+            t_settle = i - self.settle_i
+            d_settle = self.max_i - self.settle_i
+            if d_settle <= 0:
+                return self.lr_final
+            
+            lr = self.lr_final + 0.5 * (self.lr_trough - self.lr_final) * \
+                 (1 + math.cos(math.pi * t_settle / d_settle))
+
+            return lr
+
 def render_debug(render_tensor, model, camera, density_multi=1):
 
     # Convert to RGB (NxMx3) using the colormap

@@ -219,3 +219,4 @@ class BaseModel(nn.Module):
                 print(f"Saving #F:{F} to {mpath}")
                 tinyplypy.write_ply(str(mpath), mesh, is_binary=False)
 
+
