@@ -194,6 +194,7 @@ class FrozenTetModel(BaseModel):
         mask: Optional[torch.Tensor] = None,
         all_circumcenters: Optional[torch.Tensor] = None,
         radii: Optional[torch.Tensor] = None,
+        glo: Optional[torch.Tensor] = None,
     ):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices

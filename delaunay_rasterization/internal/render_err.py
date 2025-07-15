@@ -31,7 +31,7 @@ def gaussian_blur(img: torch.Tensor,
                     groups=img.shape[0]).squeeze(0)
 
 def render_err(gt_image, camera: Camera, model, tile_size=16,
-               scene_scaling=1, min_t=0.1, lambda_ssim=0.2, 
+               scene_scaling=1, min_t=0.1, glo=None,
                **kwargs):
     device = model.device
     indices = model.indices
@@ -63,7 +63,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     except:
         pass
     cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
-    vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+    vertex_color, cell_values[mask] = model.get_cell_values(camera, mask, glo=glo)
     # vertex_color, cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
@@ -110,11 +110,10 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
                     render_grid.grid_height, 1)
     )
     torch.cuda.synchronize()
-    alpha = 1-output_img.permute(2,0,1)[3, ...]
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
     l1_err = ((render_img - gt_image)).mean(dim=0)
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
-    pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
+    pixel_err = l1_err.contiguous()
 
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)

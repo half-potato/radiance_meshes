@@ -27,6 +27,7 @@ class RenderStats(NamedTuple):
 def collect_render_stats(
     sampled_cameras: List["Camera"],
     model,
+    glo_list,
     args,
     device: torch.device,
 ):
@@ -50,7 +51,8 @@ def collect_render_stats(
             target, cam, model,
             scene_scaling=model.scene_scaling,
             tile_size=args.tile_size,
-            lambda_ssim=args.clone_lambda_ssim
+            lambda_ssim=args.clone_lambda_ssim,
+            glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
         tc = extras["tet_count"]

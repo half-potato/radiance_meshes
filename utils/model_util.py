@@ -139,9 +139,29 @@ def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters
     ], dim=1)
     return features.float()
 
+class GloMLP(torch.nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, 128),
+            torch.nn.SiLU(),
+            torch.nn.Linear(128, 256),
+            torch.nn.SiLU(),
+            torch.nn.Linear(256, 128),
+            torch.nn.SiLU(),
+            torch.nn.Linear(128, output_dim*2),
+        )
+
+    def forward(self, glo_latent, input_x):
+        out = self.mlp(glo_latent)
+        a, b = torch.split(out, out.shape[-1] // 2, dim=-1)
+        return input_x * torch.exp(a.clip(max=3)).reshape(1, -1) + b.reshape(1, -1)
+
+
 class iNGPDW(nn.Module):
     def __init__(self, 
                  sh_dim=0,
+                 glo_dim=0,
                  scale_multi=0.5,
                  log2_hashmap_size=16,
                  base_resolution=16,
@@ -188,6 +208,7 @@ class iNGPDW(nn.Module):
         self.color_net     = mk_head(3, hidden_dim)
         self.gradient_net  = mk_head(3, hidden_dim)
         self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
+        self.glo_net = GloMLP(glo_dim, self.encoding.n_output_dims)
 
         with torch.no_grad():
             for network, eps in zip(
@@ -212,15 +233,19 @@ class iNGPDW(nn.Module):
         return output
 
 
-    def forward(self, x, cr):
+    def forward(self, x, cr, glo):
         output = self._encode(x, cr)
 
         h = output.reshape(-1, self.L * self.dim)
 
         sigma = self.density_net(h)
-        rgb = self.color_net(h)
-        field_samples = self.gradient_net(h)
-        sh  = self.sh_net(h).half()
+        if glo is not None:
+            hglo = self.glo_net(glo, h)
+        else:
+            hglo = h
+        rgb = self.color_net(hglo)
+        field_samples = self.gradient_net(hglo)
+        sh  = self.sh_net(hglo).half()
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)

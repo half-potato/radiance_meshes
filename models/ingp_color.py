@@ -42,6 +42,7 @@ class Model(BaseModel):
                  density_offset=-1,
                  current_sh_deg=2,
                  max_sh_deg=2,
+                 glo_dim=0,
                  **kwargs):
         super().__init__()
         self.device = vertices.device
@@ -53,7 +54,8 @@ class Model(BaseModel):
             [math.pi, 0],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
-        self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
+        self.backbone = torch.compile(iNGPDW(sh_dim, glo_dim=glo_dim, **kwargs)).to(self.device)
+        self.default_glo = None if glo_dim == 0 else torch.zeros((1, glo_dim), device=self.device)
         self.chunk_size = 408576
         self.mask_values = True
         self.frozen = False
@@ -77,16 +79,10 @@ class Model(BaseModel):
         return circumcenter
 
     def get_cell_values(self, camera: Camera, mask=None,
-                        all_circumcenters=None, radii=None):
+                        all_circumcenters=None, glo=None):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-
-        # vertex_color_raw = eval_sh(
-        #     vertices,
-        #     torch.zeros((vertices.shape[0], 3), device=vertices.device),
-        #     self.vertex_lights.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
-        #     camera.camera_center.to(self.device),
-        #     self.current_sh_deg) - 0.5
+        glo = glo if glo is not None else self.default_glo
 
         outputs = []
         normed_cc = []
@@ -94,7 +90,7 @@ class Model(BaseModel):
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
             circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
-                vertices, indices, start, end, circumcenters=all_circumcenters)
+                vertices, indices, start, end, circumcenters=all_circumcenters, glo=glo)
             dvrgbs = activate_output(camera.camera_center.to(self.device),
                                      density, rgb, grd, sh, indices[start:end],
                                      circumcenters,
@@ -159,7 +155,7 @@ class Model(BaseModel):
                       max_sh_deg=max_sh_deg, **kwargs)
         return model
 
-    def compute_batch_features(self, vertices, indices, start, end, circumcenters=None):
+    def compute_batch_features(self, vertices, indices, start, end, circumcenters=None, glo=None):
         if circumcenters is None:
             tets = vertices[indices[start:end]]
             circumcenter, radius = calculate_circumcenters_torch(tets.double())
@@ -171,7 +167,10 @@ class Model(BaseModel):
         radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
-        output = checkpoint(self.backbone, x, cr, use_reentrant=True)
+
+        glo = glo if glo is not None else self.default_glo
+
+        output = checkpoint(self.backbone, x, cr, glo, use_reentrant=True)
         return circumcenter, normalized, *output
 
     @staticmethod
@@ -197,7 +196,7 @@ class Model(BaseModel):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
+            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end, glo=self.default_glo)
 
             densities.append(density.reshape(-1))
         return torch.cat(densities)
@@ -209,7 +208,7 @@ class Model(BaseModel):
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
 
-            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
+            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
             tets = vertices[indices[start:end]]
             cs.append(circumcenters)
             ds.append(density)
@@ -285,7 +284,6 @@ class TetOptimizer:
                  lr_delay: int = 500,
                  final_iter: int = 10000,
                  vert_lr_delay: int = 500,
-                 sh_interval: int = 1000,
                  lambda_tv: float = 0.0,
                  lambda_density: float = 0.0,
 
@@ -295,14 +293,8 @@ class TetOptimizer:
                  densify_end: int = 15000,
                  midpoint: int = 2000,
 
-                 density_lr:  float = 1e-3,
-                 color_lr:    float = 1e-3,
-                 gradient_lr: float = 1e-3,
-                 sh_lr:       float = 1e-3,
-
-                 lambda_dist: float = 1e-5,
+                 glo_network_lr: float = 1e-3,
                  percent_alpha: float = 0.02,
-                 dist_delay: int = 2000,
 
                  **kwargs):
         self.weight_decay = weight_decay
@@ -314,15 +306,15 @@ class TetOptimizer:
         # self.net_optim = optim.CustomAdam([
         params = dict(
             weight_decay=0,
-            lr=network_lr,
         )
-        def process(body):
+        def process(body, lr):
             hidden_weights = [p for p in body.parameters() if p.ndim >= 2]
             hidden_gains_biases = [p for p in body.parameters() if p.ndim < 2]
             a = dict(
                 params=hidden_weights,
                 use_muon = True,
                 momentum=0.95,
+                lr=lr,
                 **params
             )
             b = dict(
@@ -334,10 +326,11 @@ class TetOptimizer:
             )
             return [a, b]
         self.net_optim = SingleDeviceMuonWithAuxAdam(
-            process(model.backbone.density_net) + \
-            process(model.backbone.color_net) + \
-            process(model.backbone.gradient_net) + \
-            process(model.backbone.sh_net)
+            process(model.backbone.density_net, network_lr) + \
+            process(model.backbone.color_net, network_lr) + \
+            process(model.backbone.gradient_net, network_lr) + \
+            process(model.backbone.sh_net, network_lr) + \
+            process(model.backbone.glo_net, glo_network_lr)
         )
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([

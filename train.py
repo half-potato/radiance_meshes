@@ -33,6 +33,7 @@ from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
 from utils.densification import collect_render_stats, apply_densification
 import mediapy
+from torch import nn
 
 
 torch.set_num_threads(1)
@@ -77,6 +78,10 @@ args.max_sh_deg = 3
 args.sh_interval = 0
 args.sh_step = 1
 args.bake_model = True
+
+args.glo_dim = 128
+args.glo_lr = 1e-2
+args.glo_network_lr = 5e-5
 
 # iNGP Settings
 args.encoding_lr = 3e-3
@@ -254,6 +259,15 @@ if args.use_bilateral_grid:
     print("Bilateral Grid initialized successfully!\n")
 # ------------------------------------------------
 
+glo_list = lambda x: None
+glo_optim = None
+if args.glo_dim > 0:
+    glo_list = nn.Embedding(len(train_cameras), args.glo_dim)
+    with torch.no_grad():
+        glo_list.weight *= 0
+    glo_list = glo_list.cuda()
+    glo_optim = torch.optim.Adam(glo_list.parameters(), lr=args.glo_lr)
+
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
@@ -264,7 +278,6 @@ video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_F
 #     max_steps=args.freeze_start,
 #     lr_delay_steps=0)
 
-tet_optim.build_tv()
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 
@@ -298,7 +311,9 @@ for iteration in progress_bar:
 
     st = time.time()
     ray_jitter = torch.rand((camera.image_height, camera.image_width, 2), device=device)
-    render_pkg = render(camera, model, scene_scaling=model.scene_scaling, ray_jitter=ray_jitter, **args.as_dict())
+    tid = torch.LongTensor([camera.uid]).cuda()
+    render_pkg = render(camera, model, scene_scaling=model.scene_scaling,
+                        ray_jitter=ray_jitter, glo=glo_list(tid), **args.as_dict())
     image = render_pkg['render']
 
     if args.use_bilateral_grid:
@@ -346,6 +361,10 @@ for iteration in progress_bar:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
+    if glo_optim:
+        glo_optim.step()
+        glo_optim.zero_grad()
+
     if args.use_bilateral_grid:
         bil_optimizer.step()
         bil_optimizer.zero_grad(set_to_none=True)
@@ -371,7 +390,7 @@ for iteration in progress_bar:
             sampled_cams = [train_cameras[i] for i in np.unique(densification_cam_buffer)]
 
             model.eval()
-            stats = collect_render_stats(sampled_cams, model, args, device)
+            stats = collect_render_stats(sampled_cams, model, glo_list, args, device)
             model.train()
 
             apply_densification(
@@ -399,6 +418,17 @@ for iteration in progress_bar:
         sd['indices'] = model.indices
         torch.save(sd, checkpoint_dir / "ckpt.pth")
         print(f"Saved checkpoint at iteration {iteration}")
+
+        with torch.no_grad():
+            epath = cam_util.generate_cam_path(train_cameras, 400)
+            eimages = []
+            for camera in tqdm(epath):
+                render_pkg = render(camera, model, min_t=min_t, tile_size=args.tile_size)
+                image = render_pkg['render']
+                image = image.permute(1, 2, 0)
+                image = image.detach().cpu().numpy()
+                eimages.append(pad_image2even(image))
+        mediapy.write_video(args.output_path / f"rotating_{iteration}.mp4", eimages)
 
         with (checkpoint_dir / "config.json").open("w") as f:
             json.dump(args.as_dict(), f, cls=CustomEncoder)

@@ -1,5 +1,11 @@
 import numpy as np
 from collections import deque, defaultdict
+from skimage.draw import polygon, polygon_perimeter
+from PIL import Image
+from pathlib import Path
+import xatlas
+import tinyplypy
+import trimesh
 
 def tet_to_vert_color(verts, tets, tet_v_rgb):
     n_verts = len(verts)
@@ -95,3 +101,281 @@ def extract_meshes(rgb, verts, tets):
         ))
         
     return meshes
+
+def extract_meshes_per_face_color(rgb, verts, tets):
+    n_ch = rgb.shape[-1]
+    color_names = ['r', 'g', 'b', 'a'][:n_ch]
+
+    # Step 1 & 2: Find connected components (This part is correct)
+    face_definitions = np.array([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]], dtype=np.int32)
+    all_faces = tets[:, face_definitions].reshape(-1, 3)
+    
+    face_map = defaultdict(list)
+    for i in range(len(all_faces)):
+        ti, _ = divmod(i, 4)
+        key = tuple(sorted(all_faces[i]))
+        face_map[key].append(ti)
+
+    tet_adj = defaultdict(list)
+    for key, t_indices in face_map.items():
+        if len(t_indices) == 2:
+            t0, t1 = t_indices
+            tet_adj[t0].append(t1)
+            tet_adj[t1].append(t0)
+            
+    components, seen = [], set()
+    for i in range(len(tets)):
+        if i in seen: continue
+        comp = []; q = deque([i])
+        while q:
+            ti = q.popleft()
+            if ti in seen: continue
+            seen.add(ti); comp.append(ti); q.extend(tet_adj[ti])
+        components.append(np.array(comp, dtype=np.int64))
+
+    # Step 3: Extract boundary meshes
+    meshes = []
+    for comp_t_indices in components:
+        comp_tets = tets[comp_t_indices]
+        comp_rgb = rgb[comp_t_indices]
+        
+        comp_all_faces = comp_tets[:, face_definitions].reshape(-1, 3)
+        face_tet_idx = np.arange(len(comp_tets)).repeat(4)
+        
+        faces_key = np.sort(comp_all_faces, axis=1)
+        _, inv, counts = np.unique(faces_key, axis=0, return_inverse=True, return_counts=True)
+        
+        b_mask = counts[inv] == 1
+        b_faces = comp_all_faces[b_mask]
+        b_face_tet_idx = face_tet_idx[b_mask]
+
+        if len(b_faces) == 0:
+            continue
+            
+        # --- NEW, EXPLICIT COLOR LOOKUP ---
+        n_new_verts = len(b_faces) * 3
+        new_verts_pos = np.zeros((n_new_verts, 3), dtype=np.float32)
+        new_verts_rgb = np.zeros((n_new_verts, n_ch), dtype=np.float32)
+        new_f_idx = np.arange(n_new_verts).reshape(-1, 3)
+
+        v_counter = 0
+        for i in range(len(b_faces)):
+            face_global_indices = b_faces[i]
+            tet_local_idx = b_face_tet_idx[i]
+
+            source_tet_v_indices = comp_tets[tet_local_idx]
+            source_tet_colors = comp_rgb[tet_local_idx]
+
+            for v_global_idx in face_global_indices:
+                # Find the local index (0-3) of the vertex in the tetrahedron
+                local_v_idx = np.where(source_tet_v_indices == v_global_idx)[0][0]
+
+                # Assign the correct position and color
+                new_verts_pos[v_counter] = verts[v_global_idx]
+                new_verts_rgb[v_counter] = source_tet_colors[local_v_idx]
+                v_counter += 1
+        # --- END NEW LOGIC ---
+
+        v_dict = dict(
+            x=new_verts_pos[:, 0].astype(np.float32),
+            y=new_verts_pos[:, 1].astype(np.float32),
+            z=new_verts_pos[:, 2].astype(np.float32),
+        )
+        for i, name in enumerate(color_names):
+            v_dict[name] = new_verts_rgb[:, i].astype(np.float32)
+
+        meshes.append(dict(
+            vertex=v_dict,
+            face=dict(
+                vertex_indices=new_f_idx.astype(np.int32)
+            )
+        ))
+            
+    return meshes
+
+def _rasterize_triangle(texture, pts, colors):
+    """
+    Rasterizes a single Gouraud-shaded triangle onto a numpy texture array.
+    """
+
+    rows, cols = polygon(pts[:, 1], pts[:, 0], texture.shape)
+    
+    if len(rows) == 0:
+        return
+
+    # Barycentric coordinates for color interpolation
+    v0, v1, v2 = pts
+    d00 = (v1 - v0) @ (v1 - v0)
+    d01 = (v1 - v0) @ (v2 - v0)
+    d11 = (v2 - v0) @ (v2 - v0)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-6: # Degenerate triangle
+        return
+        
+    inv_denom = 1.0 / denom
+    
+    p = np.stack([cols, rows], axis=-1)
+    d20 = (p - v0) @ (v1 - v0)
+    d21 = (p - v0) @ (v2 - v0)
+    
+    w1 = (d11 * d20 - d01 * d21) * inv_denom
+    w2 = (d00 * d21 - d01 * d20) * inv_denom
+    w0 = 1.0 - w1 - w2
+
+    # Interpolate colors and fill texture
+    c0, c1, c2 = colors
+    interp_colors = w0[:, None] * c0 + w1[:, None] * c1 + w2[:, None] * c2
+    
+    # Clip to valid color range and convert to uint8
+    texture[rows, cols] = np.clip(interp_colors, 0, 1) * 255
+
+def export_textured_meshes(
+    output_path: Path,
+    verts: np.ndarray,
+    tets: np.ndarray,
+    tet_v_rgb: np.ndarray,
+    min_faces_for_export: int = 1000,
+    texture_size: int = 2048
+):
+    """
+    Extracts surface meshes, splits them into manifold components, generates
+    UV maps, and creates textures from per-tet-per-vertex colors.
+    """
+    print("Building tetrahedron adjacency...")
+    face_map = defaultdict(list)
+    # Corrected winding order for outward-facing normals
+    tet_faces_def = np.array([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
+
+    for ti, tet in enumerate(tets):
+        for face_def in tet_faces_def:
+            face_verts = tuple(sorted(tet[face_def]))
+            face_map[face_verts].append(ti)
+
+    tet_adj = defaultdict(list)
+    for t_indices in face_map.values():
+        if len(t_indices) == 2:
+            t0, t1 = t_indices
+            tet_adj[t0].append(t1)
+            tet_adj[t1].append(t0)
+
+    print("Finding connected components of tetrahedra...")
+    components, seen = [], set()
+    for i in range(len(tets)):
+        if i in seen: continue
+        comp_tets_indices = []
+        q = deque([i])
+        while q:
+            ti = q.popleft()
+            if ti in seen: continue
+            seen.add(ti)
+            comp_tets_indices.append(ti)
+            q.extend(tet_adj.get(ti, []))
+        components.append(np.array(comp_tets_indices))
+
+    print(f"Found {len(components)} connected tet component(s).")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    for i, comp_t_indices in enumerate(components):
+        print(f"--- Processing Tet Component {i} ---")
+        
+        b_faces_v_indices = []
+        b_faces_colors = []
+        comp_face_map = defaultdict(int)
+        for ti in comp_t_indices:
+            tet = tets[ti]
+            for face_def in tet_faces_def:
+                key = tuple(sorted(tet[face_def]))
+                comp_face_map[key] += 1
+        
+        for ti in comp_t_indices:
+            tet = tets[ti]
+            tet_colors = tet_v_rgb[ti]
+            for face_def in tet_faces_def:
+                key = tuple(sorted(tet[face_def]))
+                if comp_face_map[key] == 1:
+                    b_faces_v_indices.append(tet[face_def])
+                    b_faces_colors.append(tet_colors[face_def])
+
+        if not b_faces_v_indices:
+            print(f"Tet Component {i} has no boundary faces. Skipping.")
+            continue
+
+        surface_faces_orig_indices = np.array(b_faces_v_indices)
+        all_corner_colors = np.array(b_faces_colors)
+        
+        full_mesh = trimesh.Trimesh(vertices=verts, faces=surface_faces_orig_indices, process=False)
+        
+        print(f"Splitting surface of Tet Component {i} into manifold parts...")
+        # --- CORRECTED LOGIC ---
+        # Use lower-level graph functions to get components as lists of face indices
+        # This allows us to keep the mapping to the original colors.
+        face_indices_components = trimesh.graph.connected_components(full_mesh.face_adjacency)
+        print(f"Found {len(face_indices_components)} manifold component(s).")
+
+        # --- CORRECTED LOGIC ---
+        # Loop over the lists of face indices
+        for j, original_face_indices in enumerate(face_indices_components):
+            num_faces = len(original_face_indices)
+            if num_faces < min_faces_for_export:
+                print(f"  Manifold part {j} has {num_faces} faces. Below threshold. Skipping.")
+                continue
+            
+            print(f"  Processing Manifold Part {j} with {num_faces} faces...")
+
+            mesh_filename = f"component_{i}_part_{j}.obj"
+            mesh_filename2 = f"component_{i}_part_{j}_before.obj"
+            texture_filename = f"component_{i}_part_{j}_texture.png"
+            mesh_path = output_path / mesh_filename
+            texture_path = output_path / texture_filename
+
+            # --- CORRECTED LOGIC ---
+            # Create the submesh for this component using the retrieved face indices
+            mesh_part = trimesh.util.submesh(full_mesh, [original_face_indices], append=True, only_watertight=True)
+            mesh_part.export(str(output_path / mesh_filename2))
+
+            # Select the corresponding colors for this part using the indices
+            part_corner_colors = all_corner_colors[original_face_indices]
+
+            # The vertices and faces are now correctly indexed in mesh_part
+            part_verts = mesh_part.vertices
+            part_faces = mesh_part.faces
+
+            print(f"  Unwrapping {num_faces} faces with xatlas...")
+            atlas = xatlas.Atlas()
+            atlas.add_mesh(part_verts, part_faces, normals=mesh_part.vertex_normals)
+            
+            chart_options = xatlas.ChartOptions()
+            chart_options.normal_deviation_weight = 2.0
+            pack_options = xatlas.PackOptions()
+            pack_options.resolution = texture_size
+            # pack_options.bruteForce = True
+            pack_options.padding = 2
+            
+            atlas.generate(chart_options=chart_options, pack_options=pack_options)
+            
+            vmapping, new_indices, uvs = atlas[0]
+            
+            print(f"  Rasterizing texture...")
+            texture = np.zeros((texture_size, texture_size, 3), dtype=np.uint8)
+            
+            orig_face_to_idx_map = {tuple(sorted(face)): idx for idx, face in enumerate(part_faces)}
+            
+            for new_face_idx, new_face_v_indices in enumerate(new_indices):
+                orig_v_indices = vmapping[new_face_v_indices]
+                key = tuple(sorted(orig_v_indices))
+                
+                if key not in orig_face_to_idx_map:
+                    continue
+
+                orig_face_idx = orig_face_to_idx_map[key]
+                
+                uv_coords = uvs[new_indices[new_face_idx]] * texture_size
+                corner_colors = part_corner_colors[orig_face_idx]
+                _rasterize_triangle(texture, uv_coords, corner_colors)
+
+            print(f"  Saving mesh to {mesh_path} and texture to {texture_path}")
+            
+            vmapping, new_indices, uvs = atlas[0]
+            final_verts = part_verts[vmapping]
+            xatlas.export(str(mesh_path), positions=final_verts, indices=new_indices, uvs=uvs)
+            Image.fromarray(texture, 'RGB').save(texture_path)

@@ -172,6 +172,7 @@ class BaseModel(nn.Module):
 
         for cam in cameras:
             target = cam.original_image.cuda()
+            camera_center = cam.camera_center.to(self.device)
 
             image_votes, extras = render_err(
                 target, cam, self,
@@ -202,19 +203,36 @@ class BaseModel(nn.Module):
         tets = verts[self.indices[mask]]
         circumcenters, radius = calculate_circumcenters_torch(tets.double())
         grd = grd[mask].detach()
+        sh = sh[mask].detach()
         grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
         normed_grd = safe_div(grd, radius.reshape(-1, 1, 1))
+        tet_color_raw = eval_sh(
+            tets.mean(dim=1).detach(),
+            RGB2SH(rgb),
+            sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3).half(),
+            camera_center,
+            self.max_sh_deg).float()
+        tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
         vcolors = compute_vertex_colors_from_field(
-            tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
-        vcolors = torch.nn.functional.softplus(vcolors, beta=10)
+            tets.detach(), tet_color.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach()).clip(min=0)
+        # vcolors = torch.nn.functional.softplus(vcolors, beta=10)
 
-        meshes = mesh_util.extract_meshes(
+        # mesh_util.export_textured_meshes(path, 
+        #     verts=verts.detach().cpu().numpy(),
+        #     tets=self.indices[mask].cpu().numpy(),
+        #     tet_v_rgb=vcolors.detach().cpu().numpy(),
+        #     min_faces_for_export=10000,
+        #     texture_size=4096*2**0,
+        # )
+
+        meshes = mesh_util.extract_meshes_per_face_color(
+        # meshes = mesh_util.extract_meshes(
             vcolors.detach().cpu().numpy(),
             verts.detach().cpu().numpy(),
             self.indices[mask].cpu().numpy())
         for i, mesh in enumerate(meshes):
             F = mesh['face']['vertex_indices'].shape[0]
-            if F > 1000:
+            if F > 10000:
                 mpath = path / f"{i}.ply"
                 print(f"Saving #F:{F} to {mpath}")
                 tinyplypy.write_ply(str(mpath), mesh, is_binary=False)
