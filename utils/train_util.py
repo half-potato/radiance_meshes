@@ -2,17 +2,13 @@ import torch
 import time
 import math
 from data.camera import Camera
-from utils import optim
-from sh_slang.eval_sh import eval_sh
 from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render
-from delaunay_rasterization.internal.alphablend_tiled_slang_linear import AlphaBlendTiledRender as LinearRender
 from delaunay_rasterization.internal.render_grid import RenderGrid
-from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader, point2image
+from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 import numpy as np
 from utils import topo_utils
 from icecream import ic
 import math
-from utils.contraction import contraction_jacobian
 from utils.graphics_utils import l2_normalize_th
 import matplotlib.pyplot as plt
 from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
@@ -110,7 +106,7 @@ def safe_sin(x):
 
 
 def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
-           scene_scaling=1, clip_multi=0, ray_jitter=None,
+           scene_scaling=1, clip_multi=0, ray_jitter=None, glo=None,
            **kwargs):
     device = model.device
     if ray_jitter is None:
@@ -142,9 +138,9 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
     if cell_values is None:
         cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
         if mask.sum() > 0 and model.mask_values:
-            normed_cc, cell_values[mask] = model.get_cell_values(camera, mask, circumcenter[mask])
+            normed_cc, cell_values[mask] = model.get_cell_values(camera, mask, circumcenter[mask], glo=glo)
         else:
-            normed_cc, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+            normed_cc, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter, glo=glo)
         if clip_multi > 0 and not model.frozen:
             with torch.no_grad():
                 tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask],
@@ -152,8 +148,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
                 scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1e-5)
             vertices = ClippedGradients.apply(vertices, scaling)
 
-    mod = LinearRender if model.linear else Render
-    image_rgb, distortion_img, tet_alive = mod.apply(
+    image_rgb, distortion_img, tet_alive = Render.apply(
         sorted_tetra_idx,
         tile_ranges,
         model.indices,
@@ -281,7 +276,7 @@ class TwoPhaseLR:
         # Phase 1: Spiking with decaying cosine annealing
         if i < self.start_i:
             return get_expon_lr_func(self.lr_peak, self.lr_trough, max_steps=self.start_i)(i)
-        elif self.start_i < i < self.settle_i:
+        elif self.start_i <= i <= self.settle_i:
             cycle = math.floor((i-self.start_i) / self.period_i)
             t_cycle = (i-self.start_i) % self.period_i
             
@@ -334,11 +329,6 @@ def render_debug(render_tensor, model, camera, density_multi=1):
     del render_pkg, render_tensor
     return image
 
-def select_n(tet_err_weight, N):
-    rgbs_threshold = torch.sort(tet_err_weight).values[-min(int(N), tet_err_weight.shape[0])]
-    clone_mask = (tet_err_weight > rgbs_threshold)
-    return clone_mask
-
 def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
     """
     Calculates the approximate intersection point for pairs of line segments.
@@ -387,20 +377,6 @@ def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
     e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
 
     denom = a * c - b * b
-    
-    # Parameters for closest points on the *infinite lines*
-    # s_line = (b*e - c*d) / denom
-    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
-    # The t_line should be for the parameterization o2 + t*d2.
-    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
-    # by setting derivatives w.r.t s and t to 0, we get:
-    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
-    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
-    # Solving this system:
-    # s_line = (d*c - e*b) / denom
-    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
-    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
-    
     s_line_num = (b * e) - (c * d)
     t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
 

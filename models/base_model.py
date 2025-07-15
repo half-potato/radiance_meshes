@@ -17,7 +17,7 @@ from utils.safe_math import safe_log, safe_exp
 from utils.train_util import get_expon_lr_func, SpikingLR
 from utils import mesh_util
 from utils.args import Args
-
+from delaunay_rasterization.internal.render_err import render_err
 
 class BaseModel(nn.Module):
 
@@ -165,31 +165,74 @@ class BaseModel(nn.Module):
         tinyplypy.write_ply(str(path), data_dict, is_binary=True)
 
     @torch.no_grad
-    def extract_mesh(self, cameras, path, density_threshold=0.5, alpha_threshold=0.2):
+    def extract_mesh(self, cameras, path, tile_size=16, contrib_threshold=0.1, density_threshold=0.5, alpha_threshold=0.2, **kwargs):
         path.mkdir(exist_ok=True, parents=True)
-        verts = self.vertices
-        tet_density = self.calc_tet_density()
+        n_tets = self.indices.shape[0]
+        peak_contrib = torch.zeros((n_tets), device=self.device)
+
+        for cam in cameras:
+            target = cam.original_image.cuda()
+            camera_center = cam.camera_center.to(self.device)
+
+            image_votes, extras = render_err(
+                target, cam, self,
+                scene_scaling=self.scene_scaling,
+                tile_size=tile_size,
+                lambda_ssim=0
+            )
+
+            tc = extras["tet_count"]
+            
+            # --- Create a single mask for valid updates ---
+            # Mask for tets that have a reasonable number of samples in the current view
+            # --- Moments (s-1: sum of T, s1: sum of err, s2: sum of err^2)
+            image_T, image_err, image_err1 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
+            # total_T_p, image_err, image_err1 = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+            _, image_Terr, image_ssim = image_votes[:, 2], image_votes[:, 4], image_votes[:, 5]
+            N = tc
+            peak_contrib = torch.maximum(image_T / N.clip(min=1), peak_contrib)
         tet_alpha = self.calc_tet_alpha(mode="min")
-        mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
+        mask = (peak_contrib > contrib_threshold) | (tet_alpha > alpha_threshold)
+
+        verts = self.vertices
+        # tet_density = self.calc_tet_density()
+        # mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
 
         circumcenters, density, rgb, grd, sh = self.compute_features(offset=False)
         rgb = rgb[mask].detach()
         tets = verts[self.indices[mask]]
         circumcenters, radius = calculate_circumcenters_torch(tets.double())
         grd = grd[mask].detach()
+        sh = sh[mask].detach()
         grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
         normed_grd = safe_div(grd, radius.reshape(-1, 1, 1))
+        tet_color_raw = eval_sh(
+            tets.mean(dim=1).detach(),
+            RGB2SH(rgb),
+            sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3).half(),
+            camera_center,
+            self.max_sh_deg).float()
+        tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
         vcolors = compute_vertex_colors_from_field(
-            tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
-        vcolors = torch.nn.functional.softplus(vcolors, beta=10)
+            tets.detach(), tet_color.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach()).clip(min=0)
+        # vcolors = torch.nn.functional.softplus(vcolors, beta=10)
 
-        meshes = mesh_util.extract_meshes(
+        # mesh_util.export_textured_meshes(path, 
+        #     verts=verts.detach().cpu().numpy(),
+        #     tets=self.indices[mask].cpu().numpy(),
+        #     tet_v_rgb=vcolors.detach().cpu().numpy(),
+        #     min_faces_for_export=10000,
+        #     texture_size=4096*2**0,
+        # )
+
+        meshes = mesh_util.extract_meshes_per_face_color(
+        # meshes = mesh_util.extract_meshes(
             vcolors.detach().cpu().numpy(),
             verts.detach().cpu().numpy(),
             self.indices[mask].cpu().numpy())
         for i, mesh in enumerate(meshes):
             F = mesh['face']['vertex_indices'].shape[0]
-            if F > 1000:
+            if F > 10000:
                 mpath = path / f"{i}.ply"
                 print(f"Saving #F:{F} to {mpath}")
                 tinyplypy.write_ply(str(mpath), mesh, is_binary=False)

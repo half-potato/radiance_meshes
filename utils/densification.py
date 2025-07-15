@@ -20,12 +20,14 @@ class RenderStats(NamedTuple):
     total_err: torch.Tensor
     top_ssim: torch.Tensor
     top_size: torch.Tensor
+    total_count: torch.Tensor
 
 
 @torch.no_grad()
 def collect_render_stats(
     sampled_cameras: List["Camera"],
     model,
+    glo_list,
     args,
     device: torch.device,
 ):
@@ -37,6 +39,7 @@ def collect_render_stats(
     top_ssim = torch.zeros((n_tets, 2), device=device)
     top_size = torch.zeros((n_tets, 2), device=device)
     total_err = torch.zeros((n_tets), device=device)
+    total_count = torch.zeros((n_tets), device=device, dtype=int)
     within_var_rays = torch.zeros((n_tets, 2, 6), device=device)
     total_var_moments = torch.zeros((n_tets, 3), device=device)
     top_moments = torch.zeros((n_tets, 2, 4), device=device)
@@ -48,7 +51,8 @@ def collect_render_stats(
             target, cam, model,
             scene_scaling=model.scene_scaling,
             tile_size=args.tile_size,
-            lambda_ssim=args.clone_lambda_ssim
+            lambda_ssim=args.clone_lambda_ssim,
+            glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
         tc = extras["tet_count"]
@@ -58,20 +62,14 @@ def collect_render_stats(
         # --- Moments (s0: sum of T, s1: sum of err, s2: sum of err^2)
         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
-        N = tc
         total_err += image_Terr
-
-        # -------- Within-Image Variance (Top-2 per tet) -----------------------
-        within_var_mu = safe_math.safe_div(image_err, N)
-        within_var_std = (safe_math.safe_div(image_err2, N) - within_var_mu**2).clip(min=0)
-        within_var_std[N < 10] = 0
-        within_var_std[~update_mask] = 0 # Use the unified mask
 
         # ray buffer: (enter | exit) → (N, 6)
         w = image_votes[:, 12:13]
         seg_exit = safe_math.safe_div(image_votes[:, 9:12], w)
         seg_enter = safe_math.safe_div(image_votes[:, 6:9], w)
 
+        image_ssim[~update_mask] = 0
         top_ssim, idx_sorted = torch.cat([top_ssim[:, :2], image_ssim.reshape(-1, 1)], dim=1).sort(1, descending=True)
         top_size = torch.gather(
             torch.cat([top_size, tc.reshape(-1, 1)], dim=1), 1,
@@ -99,9 +97,11 @@ def collect_render_stats(
         )
 
         # -------- Total Variance (accumulated across images) ------------------
-        total_var_moments[update_mask, 0] += N[update_mask]
+        total_var_moments[update_mask, 0] += image_T[update_mask]
         total_var_moments[update_mask, 1] += image_err[update_mask]
         total_var_moments[update_mask, 2] += image_err2[update_mask]
+        # total_count += N
+        total_count[update_mask] += 1
 
         # -------- Other stats -------------------------------------------------
         tet_moments[update_mask, :3] += image_votes[update_mask, 13:16]
@@ -116,6 +116,7 @@ def collect_render_stats(
         tet_moments = tet_moments,
         tet_view_count = tet_view_count,
         total_err = total_err,
+        total_count = total_count,
         top_ssim = top_ssim[:, :2],
         top_size = top_size[:, :2],
     )
@@ -139,7 +140,7 @@ def apply_densification(
 
     within_var = stats.top_ssim.sum(dim=1) / stats.top_size.sum(dim=1).clip(min=1).sqrt()
 
-    total_var = stats.total_err * total_var_std
+    total_var = (stats.total_err / stats.total_count.clip(min=1)) * total_var_std
     # N_b = stats.tet_view_count # Num views
     # total_var[(N_b < 2) | (s0_t < 1)] = 0
 
