@@ -284,6 +284,7 @@ class TetOptimizer:
                  densify_end: int = 15000,
                  midpoint: int = 2000,
 
+                 glo_net_decay: float = 0,
                  glo_network_lr: float = 1e-3,
                  percent_alpha: float = 0.02,
 
@@ -295,10 +296,7 @@ class TetOptimizer:
             {"params": model.backbone.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.999], eps=1e-15)
         # self.net_optim = optim.CustomAdam([
-        params = dict(
-            weight_decay=0,
-        )
-        def process(body, lr):
+        def process(body, lr, weight_decay=0):
             hidden_weights = [p for p in body.parameters() if p.ndim >= 2]
             hidden_gains_biases = [p for p in body.parameters() if p.ndim < 2]
             a = dict(
@@ -306,22 +304,23 @@ class TetOptimizer:
                 use_muon = True,
                 momentum=0.95,
                 lr=lr,
-                **params
+                weight_decay=weight_decay,
             )
             b = dict(
                 params=hidden_gains_biases,
                 use_muon = False,
                 betas=(0.9, 0.999),
                 eps=1e-15,
-                **params
+                weight_decay=0,
             )
             return [a, b]
+        glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
         self.net_optim = SingleDeviceMuonWithAuxAdam(
             process(model.backbone.density_net, network_lr) + \
             process(model.backbone.color_net, network_lr) + \
             process(model.backbone.gradient_net, network_lr) + \
             process(model.backbone.sh_net, network_lr) + \
-            process(model.backbone.glo_net, glo_network_lr)
+            glo_p
         )
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([

@@ -151,6 +151,10 @@ class GloMLP(torch.nn.Module):
             torch.nn.SiLU(),
             torch.nn.Linear(128, output_dim*2),
         )
+        last = self.mlp[-1]
+        with torch.no_grad():
+            nn.init.xavier_uniform_(last.weight, 1e-3)
+            last.bias.zero_()
 
     def forward(self, glo_latent, input_x):
         out = self.mlp(glo_latent)
@@ -213,6 +217,7 @@ class iNGPDW(nn.Module):
         self.gradient_net  = mk_head(3, hidden_dim)
         self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
         self.glo_net = GloMLP(glo_dim, self.n_output_dims)
+        self.glo_dim = glo_dim
 
         with torch.no_grad():
             for network, eps in zip(
@@ -251,9 +256,7 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
-        # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
         grd = field_samples.reshape(-1, 1, 3)
-        # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh
 
 class Heads(nn.Module):
@@ -304,6 +307,7 @@ class Heads(nn.Module):
         self.gradient_net  = mk_head(3, hidden_dim)
         self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
         self.glo_net = GloMLP(glo_dim, n_output_dims)
+        self.glo_dim = glo_dim
 
     def forward(self, h, glo):
         h = h.float()

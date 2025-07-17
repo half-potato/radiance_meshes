@@ -66,7 +66,7 @@ args = Args()
 args.tile_size = 16
 args.image_folder = "images_4"
 args.eval = False
-args.dataset_path = Path("/optane/nerf_datasets/360/garden")
+args.dataset_path = Path("/data/nerf_datasets/360/garden")
 args.output_path = Path("output/test/")
 args.iterations = 30000
 args.ckpt = ""
@@ -82,17 +82,19 @@ args.bake_model = True
 args.glo_dim = 128
 args.glo_lr = 1e-2
 args.glo_network_lr = 5e-5
+args.glo_weight_decay = 1e-4
+args.glo_net_decay = 1e-3
 
 # iNGP Settings
-args.base_resolution = 16
+args.base_resolution = 64
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-5
 args.network_lr = 1e-3
 args.final_network_lr = 1e-5
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
-args.log2_hashmap_size = 22
+args.log2_hashmap_size = 23
 args.per_level_scale = 2
-args.L = 10
+args.L = 6
 args.density_offset = -4
 args.weight_decay = 0.1
 args.hashmap_dim = 8
@@ -347,6 +349,9 @@ for iteration in progress_bar:
         tvloss = args.lambda_tv_grid * total_variation_loss(bil_grids.grids)
         loss += tvloss
 
+    if args.glo_dim > 0:
+        loss += args.glo_weight_decay * (glo_list.weight**2).mean()
+
     mask = render_pkg['mask']
     st = time.time()
 
@@ -468,10 +473,14 @@ with (args.output_path / "results.json").open("w") as f:
     json.dump(all_data, f, cls=CustomEncoder)
 
 with torch.no_grad():
+    if args.glo_dim > 0:
+        mean_glo = glo_list.weight.data.mean(dim=0)
+    else:
+        mean_glo = None
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render(camera, model, min_t=min_t, tile_size=args.tile_size)
+        render_pkg = render(camera, model, glo=mean_glo, min_t=min_t, tile_size=args.tile_size)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()
@@ -482,3 +491,5 @@ model.save2ply(args.output_path / "ckpt.ply")
 sd = model.state_dict()
 sd['indices'] = model.indices
 torch.save(sd, args.output_path / "ckpt.pth")
+if args.glo_dim > 0:
+    torch.save(glo_list.state_dict(), args.output_path / "glo.pth")
