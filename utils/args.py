@@ -25,19 +25,30 @@ class Args:
         """Generate an ArgumentParser with stored values as defaults."""
         parser = ArgumentParser(description="Argument parser for the script")
         for key, value in self._data.items():
-            arg_type = type(value)
-            if isinstance(value, bool):  # Special handling for boolean flags
-                parser.add_argument(f"--{key}", action="store_true" if not value else "store_false")
+            if isinstance(value, bool):
+                # Special handling for boolean flags
+                parser.add_argument(
+                    f"--{key}",
+                    action="store_true" if not value else "store_false",
+                    default=value
+                )
+            elif isinstance(value, list):
+                # --- NEW: Handling for list arguments ---
+                parser.add_argument(
+                    f"--{key}",
+                    nargs='+', # Accepts one or more arguments
+                    default=value
+                )
             else:
-                parser.add_argument(f"--{key}", type=arg_type, default=value)
+                # Handling for other types (int, float, str, etc.)
+                parser.add_argument(f"--{key}", type=type(value), default=value)
         return parser
 
     @classmethod
     def from_namespace(cls, namespace: Namespace):
         """Convert a parsed Namespace back into an Args object."""
         obj = cls()
-        for key, value in vars(namespace).items():
-            obj._data[key] = value
+        obj._data = vars(namespace)
         return obj
 
     @classmethod
@@ -46,19 +57,20 @@ class Args:
         path = Path(json_path)
         if not path.exists():
             raise FileNotFoundError(f"JSON file not found: {json_path}")
-        
+
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         obj = cls()
         obj._data = data
         return obj
 
     def __add__(self, other):
-        """Merges two Args objects, creating a shared dictionary."""
+        """Merges two Args objects, updating the first with the second."""
         if not isinstance(other, Args):
             raise TypeError("Can only add Args objects together.")
 
         new_args = Args()
-        new_args._data = {**self._data, **other._data}  # Shared dictionary
+        # Other's values overwrite self's values in case of conflict
+        new_args._data = {**self._data, **other._data}
         return new_args

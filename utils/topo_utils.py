@@ -28,6 +28,23 @@ def tet_volumes(tets):
     vol = torch.abs(det) / 6.0
     return vol
 
+@torch.no_grad()
+def tet_denom(tets):
+    v0 = tets[:, 0]
+    v1 = tets[:, 1]
+    v2 = tets[:, 2]
+    v3 = tets[:, 3]
+
+    # Compute vectors relative to v0
+    a = v1 - v0
+    b = v2 - v0
+    c = v3 - v0
+
+    cross_bc = torch.cross(b, c, dim=-1)
+    denominator = 2.0 * torch.sum(a * cross_bc, dim=-1)
+
+    return denominator
+
 @torch.jit.script
 def calc_barycentric(points, tets):
     """
@@ -239,7 +256,7 @@ def compute_vertex_sensitivity(indices: torch.Tensor, vertices: torch.Tensor,
     return tet_sens, vertex_sensitivity.reshape(num_vertices, -1)
 
 def fibonacci_spiral_on_sphere(n_points: int, 
-                               radius: float = 1.0, 
+                               radius = 1.0, 
                                device: str = 'cpu') -> torch.Tensor:
     """
     Generate points on a sphere (approximately evenly) via a Fibonacci spiral.

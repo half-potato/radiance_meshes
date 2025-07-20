@@ -30,7 +30,7 @@ if args.use_ply:
     model = Model.load_ply(args.output_path / "ckpt.ply", device)
 else:
     from models.ingp_color import Model
-    from models.frozen import FrozenTetModel
+    from models.frozen_features import FrozenTetModel
     try:
         model = Model.load_ckpt(args.output_path, device)
     except:

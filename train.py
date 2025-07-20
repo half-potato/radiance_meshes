@@ -125,7 +125,9 @@ args.feature_lr = 1e-3
 args.final_feature_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 0
+args.lambda_dist = 0.0
+args.lambda_density = 0.0
+args.lambda_aniso = 0.0
 
 # Clone Settings
 args.num_samples = 200
@@ -151,11 +153,11 @@ args.base_min_t = 0.2
 args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
-args.density_threshold = 0.001
-args.alpha_threshold = 0.001
+args.density_threshold = 0.05
+args.alpha_threshold = 0.1
 args.total_thresh = 0.025
 args.within_thresh = 0.4
-
+args.density_intercept = 1.0
 args.voxel_size = 0.01
 
 args.use_bilateral_grid = False
@@ -169,6 +171,9 @@ args = Args.from_namespace(args.get_parser().parse_args())
 
 args.output_path.mkdir(exist_ok=True, parents=True)
 # args.checkpoint_iterations.append(args.freeze_start-1)
+args.checkpoint_iterations = [int(i) for i in args.checkpoint_iterations]
+print(args.checkpoint_iterations)
+ic(args.eval)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval)
@@ -297,12 +302,16 @@ for iteration in progress_bar:
 
     if do_delaunay or do_freeze:
         st = time.time()
-        tet_optim.update_triangulation(density_threshold=args.density_threshold, alpha_threshold=args.alpha_threshold, high_precision=do_freeze)
         if do_freeze and args.bake_model:
+            model.save2ply(args.output_path / "ckpt_prefreeze.ply")
             del tet_optim
             model, tet_optim = freeze_model(model, args)
             gc.collect()
             torch.cuda.empty_cache()
+        else:
+            dt = args.density_threshold if iteration > 1500 else 0
+            at = args.alpha_threshold if iteration > 1500 else 0
+            tet_optim.update_triangulation(density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
 
     if len(inds) == 0:
         inds = list(range(len(train_cameras)))
@@ -340,10 +349,20 @@ for iteration in progress_bar:
     reg = tet_optim.regularizer(render_pkg, args.weight_decay, args.lambda_tv)
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg['distortion_loss']
+    a = args.density_intercept
+    mask = render_pkg['mask']
+    # density_loss = (-(render_pkg['density'] - a)**2 / a**2 + 1).clip(min=0)[mask].mean()
+    density_loss = render_pkg['density'][mask].mean()
+    lambda_dist = args.lambda_dist if iteration > 1000 else 0
+    lambda_density = lambda_dist * args.lambda_density if iteration > 1000 else 0
+    lambda_aniso = args.lambda_aniso if iteration > 1000 else 0
+    aniso_loss = model.calc_aniso_loss(render_pkg['density'])[mask].mean()
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
-           args.lambda_dist * dl_loss
+           lambda_dist * dl_loss + \
+           lambda_density * density_loss + \
+           lambda_aniso * aniso_loss
 
     if args.use_bilateral_grid:
         tvloss = args.lambda_tv_grid * total_variation_loss(bil_grids.grids)
@@ -418,27 +437,8 @@ for iteration in progress_bar:
 
     # Save checkpoints at specified iterations
     if iteration in args.checkpoint_iterations:
-        checkpoint_dir = args.output_path / f"checkpoint_{iteration}"
-        checkpoint_dir.mkdir(exist_ok=True, parents=True)
-        model.save2ply(checkpoint_dir / "ckpt.ply")
-        sd = model.state_dict()
-        sd['indices'] = model.indices
-        torch.save(sd, checkpoint_dir / "ckpt.pth")
+        model.save2ply(args.output_path / f"ckpt_{iteration}.ply")
         print(f"Saved checkpoint at iteration {iteration}")
-
-        with torch.no_grad():
-            epath = cam_util.generate_cam_path(train_cameras, 400)
-            eimages = []
-            for camera in tqdm(epath):
-                render_pkg = render(camera, model, min_t=min_t, tile_size=args.tile_size)
-                image = render_pkg['render']
-                image = image.permute(1, 2, 0)
-                image = image.detach().cpu().numpy()
-                eimages.append(pad_image2even(image))
-        mediapy.write_video(args.output_path / f"rotating_{iteration}.mp4", eimages)
-
-        with (checkpoint_dir / "config.json").open("w") as f:
-            json.dump(args.as_dict(), f, cls=CustomEncoder)
 
     psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
     psnrs[-1].append(psnr)
@@ -451,10 +451,13 @@ for iteration in progress_bar:
         "#V": len(model),
         "#T": model.indices.shape[0],
         "DL": repr(f"{dl_loss:>5.2f}"),
+        "Density": repr(f"{density_loss.item():.3f}")
     })
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 video_writer.release()
+
+model.save2ply(args.output_path / "ckpt.ply")
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
@@ -487,7 +490,6 @@ with torch.no_grad():
         eimages.append(pad_image2even(image))
 mediapy.write_video(args.output_path / "rotating.mp4", eimages)
 
-model.save2ply(args.output_path / "ckpt.ply")
 sd = model.state_dict()
 sd['indices'] = model.indices
 torch.save(sd, args.output_path / "ckpt.pth")

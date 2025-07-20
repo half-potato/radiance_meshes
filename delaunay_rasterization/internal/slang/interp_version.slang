@@ -169,7 +169,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     DiffTensorView tet_density)
 {
     no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
-    Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
+    Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet); // 12 floats
 
     // Here we assume each tetrahedron has a single scalar density in tet_density:
     float density = max(float(tet_density[g_idx, 0]), 0.f);
@@ -183,6 +183,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
         float(tet_density[g_idx, 5]),
         float(tet_density[g_idx, 6]),
     };
+    // 7 floats
 
     SplatTetrahedra_interp result = {
         tet, base_color, grd, density

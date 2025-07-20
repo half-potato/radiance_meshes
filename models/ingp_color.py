@@ -94,6 +94,33 @@ class Model(BaseModel):
         normed_cc = torch.cat(normed_cc, dim=0)
         return normed_cc, features
 
+    def compute_features(self, offset=False):
+        vertices = self.vertices
+        indices = self.indices
+        cs, ds, rs, gs, ss = [], [], [], [], []
+        for start in range(0, indices.shape[0], self.chunk_size):
+            end = min(start + self.chunk_size, indices.shape[0])
+
+            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
+            tets = vertices[indices[start:end]]
+            cs.append(circumcenters)
+            ds.append(density)
+            ss.append(sh)
+            if offset:
+                base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
+                rs.append(base_color_v0_raw)
+                gs.append(normed_grd)
+            else:
+                rs.append(rgb)
+                gs.append(grd)
+        cs = torch.cat(cs, dim=0)
+        ds = torch.cat(ds, dim=0)
+        rs = torch.cat(rs, dim=0)
+        gs = torch.cat(gs, dim=0)
+        ss = torch.cat(ss, dim=0)
+        return cs, ds, rs, gs, ss
+
+
     def compute_batch_features(self, vertices, indices, start, end, circumcenters=None, glo=None):
         if circumcenters is None:
             tets = vertices[indices[start:end]]
@@ -141,32 +168,6 @@ class Model(BaseModel):
             densities.append(density.reshape(-1))
         return torch.cat(densities)
 
-    def compute_features(self, offset=False):
-        vertices = self.vertices
-        indices = self.indices
-        cs, ds, rs, gs, ss = [], [], [], [], []
-        for start in range(0, indices.shape[0], self.chunk_size):
-            end = min(start + self.chunk_size, indices.shape[0])
-
-            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
-            tets = vertices[indices[start:end]]
-            cs.append(circumcenters)
-            ds.append(density)
-            ss.append(sh)
-            if offset:
-                base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
-                rs.append(base_color_v0_raw)
-                gs.append(normed_grd)
-            else:
-                rs.append(rgb)
-                gs.append(grd)
-        cs = torch.cat(cs, dim=0)
-        ds = torch.cat(ds, dim=0)
-        rs = torch.cat(rs, dim=0)
-        gs = torch.cat(gs, dim=0)
-        ss = torch.cat(ss, dim=0)
-        return cs, ds, rs, gs, ss
-
     def inv_contract(self, points):
         return inv_contract_points(points) * self.scene_scaling + self.center
 
@@ -193,10 +194,14 @@ class Model(BaseModel):
             del prev
         
         self.indices = torch.as_tensor(indices_np).cuda()
+        denom = topo_utils.tet_denom(self.vertices.detach()[self.indices]).detach()
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.calc_tet_density()
             tet_alpha = self.calc_tet_alpha(mode="min", density=tet_density)
-            mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
+            mask = ((tet_density > density_threshold) | (tet_alpha > alpha_threshold)) & (denom > 1e-10)
+            self.indices = self.indices[mask]
+        else:
+            mask = (denom > 1e-10)
             self.indices = self.indices[mask]
             
         torch.cuda.empty_cache()
@@ -236,8 +241,9 @@ class Model(BaseModel):
         vertices = vertices + torch.randn(*vertices.shape) * 1e-3
 
         # add sphere
-        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
-        new_radius = pcd_scaling.cpu().item()
+        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2)
+        pcd_scaling = (vertices - vertices.mean(dim=0, keepdim=True)).abs().max(dim=0).values
+        new_radius = math.sqrt(2) * pcd_scaling.cpu()
 
         # vertices = sample_uniform_in_sphere(10000, 3, base_radius=0, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
 
@@ -251,8 +257,9 @@ class Model(BaseModel):
 
         # within_sphere = sample_uniform_in_sphere(10000, 3, base_radius=new_radius, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
         # vertices = torch.cat([vertices, within_sphere], dim=0)
-        num_ext = 1000
-        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+        num_ext = 5000
+        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius.reshape(1, 3), device='cpu') + center.reshape(1, 3).cpu()
+        # ext_vertices = torch.empty((0, 3), device='cpu')
         num_ext = ext_vertices.shape[0]
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,

@@ -4,6 +4,7 @@ import math
 from delaunay_rasterization.internal.sort_by_keys import sort_by_keys_cub
 from icecream import ic
 from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
+import time
 
 def augment(v):
     return torch.cat([v, torch.ones_like(v[:, :1])], dim=-1)
@@ -55,8 +56,10 @@ def vertex_and_tile_shader(indices,
         )
 
         highest_tile_id_msb = (render_grid.grid_width*render_grid.grid_height).bit_length()
+        # torch.cuda.synchronize()
         sorted_keys, sorted_tetra_idx = sort_by_keys_cub.sort_by_keys(
             unsorted_keys, unsorted_tetra_idx, highest_tile_id_msb)
+        # torch.cuda.synchronize()
 
         tile_ranges = torch.zeros((render_grid.grid_height*render_grid.grid_width, 2), 
                                   device="cuda",

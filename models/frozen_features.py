@@ -112,43 +112,15 @@ class FrozenTetModel(BaseModel):
             output = checkpoint(self.backbone, self.features[start:end], glo, use_reentrant=True)
         return circumcenter, normalized, *output
 
-    @staticmethod
-    def load_ckpt(path: Path, device):
-        ckpt_path = path / "ckpt.pth"
-        config_path = path / "config.json"
-        config = Args.load_from_json(str(config_path))
-        ckpt = torch.load(ckpt_path)
-        vertices = ckpt['interior_vertices']
-        indices = ckpt["indices"]  # shape (N,4)
-        del ckpt["indices"]
-        print(f"Loaded {vertices.shape[0]} vertices")
-        ext_vertices = ckpt['ext_vertices']
-        model = FrozenTetModel(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
-        model.load_state_dict(ckpt)
-        # model.min_t = model.scene_scaling * config.base_min_t
-        model.min_t = config.base_min_t
-        model.indices = torch.as_tensor(indices).cuda()
-        return model
-
-    def calc_tet_density(self):
-        densities = []
-        verts = self.vertices
-        for start in range(0, self.indices.shape[0], self.chunk_size):
-            end = min(start + self.chunk_size, self.indices.shape[0])
-            
-            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end, glo=self.default_glo)
-
-            densities.append(density.reshape(-1))
-        return torch.cat(densities)
-
     def compute_features(self, offset=False):
         vertices = self.vertices
         indices = self.indices
+        features = self.features
         cs, ds, rs, gs, ss = [], [], [], [], []
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
 
-            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
+            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, features=features, glo=self.default_glo)
             tets = vertices[indices[start:end]]
             cs.append(circumcenters)
             ds.append(density)
@@ -166,6 +138,42 @@ class FrozenTetModel(BaseModel):
         gs = torch.cat(gs, dim=0)
         ss = torch.cat(ss, dim=0)
         return cs, ds, rs, gs, ss
+
+
+    @staticmethod
+    def load_ckpt(path: Path, device):
+        ckpt_path = path / "ckpt.pth"
+        config_path = path / "config.json"
+        config = Args.load_from_json(str(config_path))
+        ckpt = torch.load(ckpt_path)
+        vertices = ckpt['interior_vertices']
+        indices = ckpt["indices"]  # shape (N,4)
+        print(f"Loaded {vertices.shape[0]} vertices")
+        ext_vertices = ckpt['ext_vertices']
+        model = FrozenTetModel(
+            int_vertices=vertices.to(device),
+            ext_vertices=ext_vertices,
+            features=ckpt['features'],
+            indices=indices,
+            center=ckpt['center'],
+            scene_scaling=ckpt['scene_scaling'],
+            **config.as_dict())
+        model.load_state_dict(ckpt)
+        # model.min_t = model.scene_scaling * config.base_min_t
+        model.min_t = config.base_min_t
+        model.indices = torch.as_tensor(indices).cuda()
+        return model
+
+    def calc_tet_density(self):
+        densities = []
+        verts = self.vertices
+        for start in range(0, self.indices.shape[0], self.chunk_size):
+            end = min(start + self.chunk_size, self.indices.shape[0])
+            
+            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end, glo=self.default_glo)
+
+            densities.append(density.reshape(-1))
+        return torch.cat(densities)
 
     def inv_contract(self, points):
         return inv_contract_points(points) * self.scene_scaling + self.center
@@ -209,6 +217,7 @@ class FrozenTetOptimizer:
                  densify_end: int = 15000,
                  midpoint: int = 2000,
 
+                 glo_net_decay: float = 0,
                  glo_network_lr: float = 1e-3,
                  percent_alpha: float = 0.02,
 
