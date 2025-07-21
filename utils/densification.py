@@ -51,7 +51,7 @@ def collect_render_stats(
             target, cam, model,
             scene_scaling=model.scene_scaling,
             tile_size=args.tile_size,
-            lambda_ssim=args.clone_lambda_ssim,
+            lambda_ssim=0,
             glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
