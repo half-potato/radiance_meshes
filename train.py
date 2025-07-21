@@ -38,35 +38,12 @@ from torch import nn
 
 torch.set_num_threads(1)
 
-class CustomEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, PosixPath):
-            return str(o)
-        return super().default(o)
-
-class SimpleSampler:
-    def __init__(self, total_num_samples, batch_size):
-        self.total_num_samples = total_num_samples
-        self.batch_size = batch_size
-        self.curr = total_num_samples
-        self.ids = None
-
-    def nextids(self, batch_size=None):
-        batch_size = self.batch_size if batch_size is None else batch_size
-        self.curr += batch_size
-        if self.curr + batch_size > self.total_num_samples:
-            # self.ids = torch.LongTensor(np.random.permutation(self.total_num_samples))
-            self.ids = torch.randperm(self.total_num_samples, dtype=torch.long, device=device)
-            self.curr = 0
-        ids = self.ids[self.curr : self.curr + batch_size]
-        return ids
-
 eps = torch.finfo(torch.float).eps
 args = Args()
 args.tile_size = 16
 args.image_folder = "images_4"
 args.eval = False
-args.dataset_path = Path("/data/nerf_datasets/360/garden")
+args.dataset_path = Path("/optane/nerf_datasets/360/garden")
 args.output_path = Path("output/test/")
 args.iterations = 30000
 args.ckpt = ""
@@ -80,10 +57,10 @@ args.sh_step = 1
 args.bake_model = True
 
 args.glo_dim = 128
-args.glo_lr = 1e-2
+args.glo_lr = 1e-3
 args.glo_network_lr = 5e-5
-args.glo_weight_decay = 1e-4
-args.glo_net_decay = 1e-3
+args.glo_weight_decay = 1e-1
+args.glo_net_decay = 1e-6
 
 # iNGP Settings
 args.base_resolution = 64
@@ -131,7 +108,6 @@ args.lambda_aniso = 0.0
 
 # Clone Settings
 args.num_samples = 200
-args.clone_lambda_ssim = 0.0
 args.split_std = 1e-1
 args.split_mode = "split_point"
 args.clone_schedule = "quadratic"
@@ -140,11 +116,6 @@ args.densify_start = 2000
 args.densify_end = 16000
 args.densify_interval = 500
 args.budget = 2_000_000
-args.clone_velocity = 0.0
-args.speed_mul = 10
-args.percent_within = 0.70
-args.percent_total = 0.30
-args.diff_threshold = 0.0
 args.clone_min_alpha = 0.025
 args.clone_min_density = 0.025
 
@@ -153,8 +124,8 @@ args.base_min_t = 0.2
 args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
-args.density_threshold = 0.05
-args.alpha_threshold = 0.1
+args.density_threshold = 0.001
+args.alpha_threshold = 0.001
 args.total_thresh = 0.025
 args.within_thresh = 0.4
 args.density_intercept = 1.0
@@ -169,11 +140,34 @@ args.checkpoint_iterations = []
 
 args = Args.from_namespace(args.get_parser().parse_args())
 
+class CustomEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, PosixPath):
+            return str(o)
+        return super().default(o)
+
+class SimpleSampler:
+    def __init__(self, total_num_samples, batch_size):
+        self.total_num_samples = total_num_samples
+        self.batch_size = batch_size
+        self.curr = total_num_samples
+        self.ids = None
+
+    def nextids(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        self.curr += batch_size
+        if self.curr + batch_size > self.total_num_samples:
+            # self.ids = torch.LongTensor(np.random.permutation(self.total_num_samples))
+            self.ids = torch.randperm(self.total_num_samples, dtype=torch.long, device=device)
+            self.curr = 0
+        ids = self.ids[self.curr : self.curr + batch_size]
+        return ids
+
+
 args.output_path.mkdir(exist_ok=True, parents=True)
 # args.checkpoint_iterations.append(args.freeze_start-1)
 args.checkpoint_iterations = [int(i) for i in args.checkpoint_iterations]
 print(args.checkpoint_iterations)
-ic(args.eval)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval)
@@ -214,22 +208,7 @@ num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
-def target_num(x):
-    if args.clone_schedule == "linear":
-        k = (args.budget - S) // N
-        return k * x + S
-    elif args.clone_schedule == "quadratic":
-        k = 2 * (args.budget - S) // N
-        a = (args.budget - S - k * N) // N**2
-        return a * x**2 + k * x + S
-    else:
-        raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
-
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
-targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
-fig = tpl.figure()
-fig.plot(dschedule, targets, width=100, height=20)
-fig.show()
 
 print("Encoding LR")
 xs = list(range(args.iterations))
@@ -240,7 +219,6 @@ fig.show()
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples)
 
-# ----- Initialize bilateral grid if enabled -----
 bil_grids = None
 bil_optimizer = None
 if args.use_bilateral_grid:
@@ -256,9 +234,6 @@ if args.use_bilateral_grid:
     ).to("cuda")
     bil_optimizer = torch.optim.Adam([bil_grids.grids], lr=args.bilateral_grid_lr, eps=1e-15)
     
-    # Create a chained scheduler with warmup like in gsplat
-    # First 1000 iterations: linear warmup from 1% to 100% of learning rate
-    # Then exponential decay to 1% of initial learning rate by the end of training
     bil_warmup = LinearLR(bil_optimizer, start_factor=0.01, total_iters=1000)
     bil_decay = ExponentialLR(bil_optimizer, gamma=0.01**(1.0/args.iterations))
     bil_scheduler = ChainedScheduler([bil_warmup, bil_decay])
@@ -266,7 +241,6 @@ if args.use_bilateral_grid:
     print(f"- Number of grids: {len(train_cameras)}")
     print("- Using LinearLR warmup + ExponentialLR decay scheduler")
     print("Bilateral Grid initialized successfully!\n")
-# ------------------------------------------------
 
 glo_list = lambda x: None
 glo_optim = None
@@ -279,13 +253,6 @@ if args.glo_dim > 0:
 
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
-
-# weight_decay_fn = get_expon_lr_func(
-#     lr_init=args.weight_decay,
-#     lr_final=args.final_weight_decay,
-#     lr_delay_mult=1e-8,
-#     max_steps=args.freeze_start,
-#     lr_delay_steps=0)
 
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()

@@ -318,7 +318,7 @@ class TetOptimizer:
                 use_muon = False,
                 betas=(0.9, 0.999),
                 eps=1e-15,
-                weight_decay=0,
+                weight_decay=weight_decay,
             )
             return [a, b]
         glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
