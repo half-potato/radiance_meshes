@@ -56,24 +56,11 @@ float3 compute_integral(float3 c0, float3 c1, float dt, float d) {
 }
 
 [Differentiable]
-inline float3 mix_color(float4x3 vertex_color, float4 bary) {
-    return max(vertex_color[0] * bary.x + vertex_color[1] * bary.y + vertex_color[2] * bary.z + vertex_color[3] * bary.w, 0.f);
-}
-
-[Differentiable]
-inline float3 linear_color(float3 grad, float3 base_color, float3 v)
-{
-    // return grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
-    float f = safe_clip(dot(grad, v), -1, 1);
-    return {base_color.r * f, base_color.g * f, base_color.b * f};
-}
-
-[Differentiable]
-float compute_integral_1D(float c0, float c1, float dt, float d) {
-    float alpha = safe_exp(-d*dt);
-    float X = (-d*dt*alpha + 1 - alpha);
-    float Y = (d*dt-1) + alpha;
-    return safe_div(X*c0+Y*c1, d*dt);
+float compute_integral_1D(float c0, float c1, float d_dt) {
+    float alpha = safe_exp(-d_dt);
+    float X = (-d_dt*alpha + 1 - alpha);
+    float Y = (d_dt-1) + alpha;
+    return safe_div(X*c0+Y*c1, d_dt);
 }
 
 [Differentiable]
@@ -92,16 +79,50 @@ inline float integrate_channel(
         float dt2 = max(t_f - t_zero, 0);
         float onemalpha = safe_clip(safe_exp(-density * dt1), 0.f, 1.f);
         if (dc_dt < 0.f) {
-            return compute_integral_1D(cm, c0, dt1, density);
+            return compute_integral_1D(cm, c0, dt1 * density);
         }
         if (dc_dt > 0.f) {
             //return compute_integral_1D(0, 0, dt1, density) + onemalpha * compute_integral_1D(c1, cm, dt2, density);
-            return onemalpha * compute_integral_1D(c1, cm, dt2, density);
+            return onemalpha * compute_integral_1D(c1, cm, dt2 * density);
         }
     }
     float dt = max(t_f - t_n, 0.f);
-    return compute_integral_1D(c1, c0, dt, density);
+    return compute_integral_1D(c1, c0, dt * density);
 }
+
+/*
+[Differentiable]
+inline float integrate_channel(
+    float t_n, float t_f,
+    float c_at_t0, float dc_dt, float density)
+{
+    // Find where the linear color function C(t) would cross zero.
+    float t_zero = clamp(-safe_div(c_at_t0, dc_dt), t_n, t_f);
+
+    // Determine the start and end of the segment where C(t) > 0.
+    // This replaces the main "if (change_within)" and nested branches.
+    float t_start = (dc_dt > 0.0f) ? t_zero : t_n;
+    float t_end   = (dc_dt < 0.0f) ? t_zero : t_f;
+
+    // Clamp this "positive" segment to the actual integration bounds [t_n, t_f].
+    float dt_pos_segment = t_end - t_start;
+    float d_dt = dt_pos_segment * density;
+    if (d_dt < 1e-3) {
+        return 0.f;
+    }
+
+    // Calculate transmittance through the initial "zero-color" segment [t_n, t_start].
+    float dt_zero_segment = t_start - t_n;
+    float T_zero_segment = safe_exp(-density * dt_zero_segment);
+
+    // Calculate the integral over the clamped positive segment [t_start, t_end].
+    float c_start = c_at_t0 + dc_dt * t_start;
+    float c_end   = c_at_t0 + dc_dt * t_end;
+
+    // The final result is the attenuated integral over the positive part.
+    return T_zero_segment * compute_integral_1D(c_end, c_start, d_dt);
+}
+*/
 
 [Differentiable]
 bool evaluate_tetra_interp(
@@ -130,14 +151,7 @@ bool evaluate_tetra_interp(
         float3 v_enter = enter * ray_d + ray_o - verts[0];
         float3 v_exit = exit * ray_d + ray_o - verts[0];
 
-        // float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
         float alpha = safe_clip(-safe_expm1(-g.density * dt), 0.f, 1.f);
-        /*
-        float3 c_enter = max(linear_color(g.grd, g.base_color, v_enter) + g.base_color, 0.f);
-        float3 c_exit = max(linear_color(g.grd, g.base_color, v_exit) + g.base_color, 0.f);
-        float3 final_color = compute_integral(c_exit, c_enter, dt, g.density);
-        */
-        //*
         float dc_dt = dot(g.grd, ray_d);
         float offset = dot(ray_o - verts[0], g.grd);
         float3 final_color = {
@@ -168,6 +182,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     TensorView<int32_t> indices,
     DiffTensorView tet_density)
 {
+    // 4 ints
     no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet); // 12 floats
 

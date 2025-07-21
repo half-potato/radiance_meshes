@@ -32,51 +32,51 @@ struct DistortionState5 : IDifferentiable {
     float v;  // new 5th term, e.g., for w_i^2 * interval / 3, or anything else
 };
 
-[Differentiable]
-float moment_0_int(float a, float b, float s1, float T) {
-    return T * safe_div((-safe_expm1(s1*(a - b))),s1);
-}
-[Differentiable]
-float moment_1_int(float a, float b, float s1, float T) {
-    float s12 = s1*s1;
-    if (s12 < 1e-6) {
-        return T * 0.5 * max(b * b - a * a, 0);
-    } else {
-        // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
-        return T * max(
-            - safe_div(safe_expm1(s1*(a - b)), s12)
-            + safe_div(a - b*safe_exp(s1*(a - b)), s1), 0);
-    }
-}
-[Differentiable]
-float self_dist(float a, float b, float s, float T) {
-    float dt = (a - b);
-    float ds = s * dt;
-    float s3 = s*s*s;
-    if (abs(ds) < 1e-4 || s3 < 1e-5) {
-        return T * T * max(-1 / 3 * pow(dt, 3), 0);
-    } else {
-        return T * T * max(
-            safe_div(
-                ( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
-                s3),
-            0);
-    }
-}
-
 // [Differentiable]
 // float moment_0_int(float a, float b, float s1, float T) {
-//     return s1;
+//     return T * safe_div((-safe_expm1(s1*(a - b))),s1);
 // }
 // [Differentiable]
 // float moment_1_int(float a, float b, float s1, float T) {
-//     return s1 * (b+a)/2;
+//     float s12 = s1*s1;
+//     if (s12 < 1e-6) {
+//         return T * 0.5 * max(b * b - a * a, 0);
+//     } else {
+//         // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
+//         return T * max(
+//             - safe_div(safe_expm1(s1*(a - b)), s12)
+//             + safe_div(a - b*safe_exp(s1*(a - b)), s1), 0);
+//     }
 // }
 // [Differentiable]
 // float self_dist(float a, float b, float s, float T) {
-//     float dt = max(b - a, 0);
-//     return s*s*dt/3;
+//     float dt = (a - b);
+//     float ds = s * dt;
+//     float s3 = s*s*s;
+//     if (abs(ds) < 1e-4 || s3 < 1e-5) {
+//         return T * T * max(-1 / 3 * pow(dt, 3), 0);
+//     } else {
+//         return T * T * max(
+//             safe_div(
+//                 ( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
+//                 s3),
+//             0);
+//     }
 // }
+
+[Differentiable]
+float moment_0_int(float a, float b, float s1, float T) {
+    return s1;
+}
+[Differentiable]
+float moment_1_int(float a, float b, float s1, float T) {
+    return s1 * (b+a)/2;
+}
+[Differentiable]
+float self_dist(float a, float b, float s, float T) {
+    float dt = max(b - a, 0);
+    return s*s*dt/3;
+}
 
 [Differentiable]
 DistortionState5 update_distortion_state(
@@ -85,10 +85,12 @@ DistortionState5 update_distortion_state(
     float density,
     float2 dist)
 {
+    // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
+    // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
     no_diff float start = dist.x;
     no_diff float end = dist.y;
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
-    float d = density;
+    float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
     float m0 = moment_0_int(start, end, d, T); // just weight
     float m1 = moment_1_int(start, end, d, T);
@@ -113,8 +115,11 @@ DistortionState5 undo_distortion_state(
 {
     float start = dist.x;
     float end = dist.y;
+    // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
+    // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
     float scaling = 1;
-    float d = density;
+    // float d = density;
+    float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
     float m0 = moment_0_int(start, end, d, T);
     float m1 = moment_1_int(start, end, d, T);

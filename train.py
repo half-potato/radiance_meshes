@@ -159,6 +159,7 @@ args.total_thresh = 0.025
 args.within_thresh = 0.4
 args.density_intercept = 1.0
 args.voxel_size = 0.01
+args.start_threshold = 5500
 
 args.use_bilateral_grid = False
 args.bilateral_grid_shape = [16, 16, 8]
@@ -309,8 +310,8 @@ for iteration in progress_bar:
             gc.collect()
             torch.cuda.empty_cache()
         else:
-            dt = args.density_threshold if iteration > 1500 else 0
-            at = args.alpha_threshold if iteration > 1500 else 0
+            dt = args.density_threshold if iteration > args.start_threshold else 0
+            at = args.alpha_threshold if iteration > args.start_threshold else 0
             tet_optim.update_triangulation(density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
 
     if len(inds) == 0:

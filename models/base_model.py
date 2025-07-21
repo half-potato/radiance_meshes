@@ -21,45 +21,6 @@ from delaunay_rasterization.internal.render_err import render_err
 
 class BaseModel(nn.Module):
 
-    def get_cell_values(
-        self,
-        camera: Camera,
-        mask: Optional[torch.Tensor] = None,
-        all_circumcenters: Optional[torch.Tensor] = None,
-        radii: Optional[torch.Tensor] = None,
-    ):
-        indices = self.indices[mask] if mask is not None else self.indices
-        vertices = self.vertices
-
-        if self.chunk_size is None:
-            cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
-                vertices, indices, start, end, circumcenters=all_circumcenters
-            )
-            cell_output = activate_output(
-                camera.camera_center.to(self.device),
-                density, rgb, grd, sh, indices,
-                cc, vertices,
-                self.max_sh_deg, self.max_sh_deg,
-            )
-            return normalized, cell_output
-        else:
-            outputs = []
-            normed_cc = []
-            start = 0
-            for start in range(0, indices.shape[0], self.chunk_size):
-                end = min(start + self.chunk_size, indices.shape[0])
-                circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
-                    vertices, indices, start, end, circumcenters=all_circumcenters)
-                dvrgbs = activate_output(camera.camera_center.to(self.device),
-                                         density, rgb, grd, sh, indices[start:end],
-                                         circumcenters,
-                                         vertices, self.max_sh_deg, self.max_sh_deg)
-                normed_cc.append(normalized)
-                outputs.append(dvrgbs)
-            features = torch.cat(outputs, dim=0)
-            normed_cc = torch.cat(normed_cc, dim=0)
-            return normed_cc, features
-
     def __len__(self):
         return self.vertices.shape[0]
 

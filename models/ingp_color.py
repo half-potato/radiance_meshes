@@ -80,14 +80,22 @@ class Model(BaseModel):
         outputs = []
         normed_cc = []
         start = 0
+        cam_center = camera.camera_center.to(self.device)
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
             circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
                 vertices, indices, start, end, circumcenters=all_circumcenters, glo=glo)
-            dvrgbs = activate_output(camera.camera_center.to(self.device),
-                                     density, rgb, grd, sh, indices[start:end],
+            tets = vertices[indices[start:end]]
+            tet_color_raw = eval_sh(
+                tets.mean(dim=1).detach(),
+                RGB2SH(rgb),
+                sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3).half(),
+                cam_center,
+                self.max_sh_deg).float()
+            dvrgbs = activate_output(cam_center, tet_color_raw,
+                                     density, grd,
                                      circumcenters,
-                                     vertices, self.max_sh_deg, self.max_sh_deg)
+                                     tets)
             normed_cc.append(normalized)
             outputs.append(dvrgbs)
         features = torch.cat(outputs, dim=0)

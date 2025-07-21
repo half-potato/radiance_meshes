@@ -314,3 +314,15 @@ float4 half2float(half4 v) {
         half2float(v.w)
     };
 }
+
+[Differentiable]
+float tukey_power_ladder(float x, float p) {
+  // Compute sign(x) * |p - 1|/p * ((|x|/|p-1| + 1)^p - 1)
+  if (p == 1) {
+    return x;
+  }
+  let xp = abs(x);
+  let xs = xp / max(TINY_VAL, abs(p - 1));
+  let y = sign(x) * abs(p - 1) / p * (pow(xs + 1, p) - 1);
+  return y;
+}

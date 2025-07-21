@@ -3,6 +3,7 @@ import numpy as np
 from utils import safe_math
 from icecream import ic
 
+@torch.jit.script
 def contract_mean_std(x, std, eps:float = 1.1920928955078125e-07):#torch.finfo(torch.float).eps):
     # eps = 1e-3
     # Clamping to eps prevents non-finite gradients when x == 0.
