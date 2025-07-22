@@ -25,7 +25,7 @@ def tet_volumes(tets):
     mat = torch.stack((a, b, c), dim=1)
     det = torch.det(mat)
     
-    vol = torch.abs(det) / 6.0
+    vol = det / 6.0
     return vol
 
 @torch.no_grad()

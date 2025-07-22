@@ -7,7 +7,7 @@ from pathlib import Path
 import imageio
 import numpy as np
 from data import loader
-from utils import test_util
+from utils import test_util, topo_utils
 from utils.args import Args
 from utils import cam_util
 import mediapy
@@ -31,10 +31,18 @@ if args.use_ply:
 else:
     from models.ingp_color import Model
     from models.frozen_features import FrozenTetModel
+    from models.frozen import FrozenTetModel
     try:
         model = Model.load_ckpt(args.output_path, device)
     except:
         model = FrozenTetModel.load_ckpt(args.output_path, device)
+
+# from models.frozen import bake_from_model
+# model = bake_from_model(model, detach=True)
+vol = topo_utils.tet_volumes(model.vertices[model.indices])
+reverse_mask = (vol < 0)
+model.indices[reverse_mask] = model.indices[reverse_mask][:, [1, 0, 2, 3]]
+model.save2ply(Path('test.ply'))
 
 # model.light_offset = -1
 train_cameras, test_cameras, scene_info = loader.load_dataset(
@@ -48,7 +56,6 @@ if args.render_train:
 else:
     splits = zip(['test'], [test_cameras])
 test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t=model.min_t)
-#model.save2ply(Path('test.ply'))
 
 with torch.no_grad():
     epath = cam_util.generate_cam_path(train_cameras, 400)

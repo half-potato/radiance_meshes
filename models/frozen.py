@@ -45,7 +45,6 @@ class FrozenTetModel(BaseModel):
         center: torch.Tensor,                # (1, 3)
         scene_scaling: torch.Tensor | float,
         *,
-        density_offset: float = -1.0,
         max_sh_deg: int = 2,
         chunk_size: int = 408_576,
         **kwargs
@@ -68,7 +67,6 @@ class FrozenTetModel(BaseModel):
         self.sh        = nn.Parameter(sh.half())         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
-        self.density_offset  = density_offset
         self.max_sh_deg      = max_sh_deg
         self.chunk_size      = chunk_size
         self.device          = self.density.device
@@ -123,7 +121,6 @@ class FrozenTetModel(BaseModel):
             sh=sh.to(device),
             center=center.to(device),
             scene_scaling=scene_scaling.to(device),
-            density_offset=config.density_offset,
             max_sh_deg=config.max_sh_deg,
             chunk_size=config.chunk_size if hasattr(config, 'chunk_size') else 408_576,
         )
@@ -134,79 +131,45 @@ class FrozenTetModel(BaseModel):
         
         return model
 
-    # ------------------------------------------------------------------
-    # convenience properties
-    # ------------------------------------------------------------------
     @property
     def vertices(self) -> torch.Tensor:
         """Concatenated vertex tensor (internal + exterior)."""
         return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
 
 
-    # ------------------------------------------------------------------
-    # core helper (network‑free)
-    # ------------------------------------------------------------------
-    def compute_batch_features(
-        self,
-        vertices: torch.Tensor,
-        indices: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        circumcenters: Optional[torch.Tensor] = None,
-    ):
-        if circumcenters is None:
-            circumcenter = pre_calc_cell_values(
-                vertices, indices
-            )
-        else:
-            circumcenter = circumcenters
-        normalized = (circumcenter - self.center) / self.scene_scaling
-
-        if mask is not None:
-            density  = self.density[mask]
-            grd      = self.gradient[mask]
-            rgb      = self.rgb[mask]
-            sh       = self.sh[mask]
-        else:
-            density  = self.density
-            grd      = self.gradient
-            rgb      = self.rgb
-            sh       = self.sh
-
-        return circumcenter, normalized, density, rgb, grd, sh
-
-    def compute_features(self, offset=False):
+    def compute_features(self):
         vertices = self.vertices
         indices = self.indices
-        circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
         tets = vertices[indices]
-        if offset:
-            base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
-            return circumcenters, density, base_color_v0_raw, normed_grd, sh
-        else:
-            return circumcenters, density, rgb, grd, sh
+        circumcenters, radius = calculate_circumcenters_torch(tets.double())
+        return circumcenters, self.density, self.rgb, safe_div(self.gradient, radius.reshape(-1, 1, 1)), self.sh
 
-    # ------------------------------------------------------------------
-    # public renderer interface
-    # ------------------------------------------------------------------
-    def get_cell_values(
-        self,
-        camera: Camera,
-        mask: Optional[torch.Tensor] = None,
-        all_circumcenters: Optional[torch.Tensor] = None,
-        radii: Optional[torch.Tensor] = None,
-        glo: Optional[torch.Tensor] = None,
-    ):
+    def get_cell_values(self, camera: Camera, mask=None,
+                        all_circumcenters=None, glo=None):
+        cam_center = camera.camera_center.to(self.device)
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-        cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
-            vertices, indices, mask, circumcenters=all_circumcenters
-        )
-        cell_output = activate_output(
-            camera.camera_center.to(self.device),
-            density, rgb, grd, sh, indices,
-            cc, vertices,
-            self.max_sh_deg, self.max_sh_deg,
-        )
+        tets = vertices[indices]
+        if all_circumcenters is None:
+            all_circumcenters, radius = calculate_circumcenters_torch(tets.double())
+
+        rgb = self.rgb if mask is None else self.rgb[mask]
+        density = self.density if mask is None else self.density[mask]
+        grd = self.gradient if mask is None else self.gradient[mask]
+        sh = self.sh if mask is None else self.sh[mask]
+
+        tet_color_raw = eval_sh(
+            tets.mean(dim=1).detach(),
+            RGB2SH(rgb),
+            sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3).half(),
+            cam_center,
+            self.max_sh_deg).float()
+        cell_output = activate_output(cam_center, tet_color_raw,
+            density, grd,
+            all_circumcenters,
+            tets)
+
+        normalized = (all_circumcenters - self.center) / self.scene_scaling
         return normalized, cell_output
 
     # ------------------------------------------------------------------
@@ -231,16 +194,16 @@ class FrozenTetModel(BaseModel):
 # =============================================================================
 
 @torch.no_grad()
-def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_576) -> FrozenTetModel:
+def bake_from_model(base_model, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only
     `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
     network and stored explicitly so that no backbone is needed afterwards."""
     device = base_model.device
 
-    vertices_full = base_model.vertices.detach() if detach else base_model.vertices
+    vertices_full = base_model.vertices.detach()
     int_vertices  = vertices_full[: base_model.num_int_verts]
-    ext_vertices  = base_model.ext_vertices.detach() if detach else base_model.ext_vertices
-    indices       = base_model.indices.detach() if detach else base_model.indices
+    ext_vertices  = base_model.ext_vertices.detach()
+    indices       = base_model.indices.detach()
 
     d_list, rgb_list, grd_list, sh_list = [], [], [], []
     for start in range(0, indices.shape[0], chunk_size):
@@ -258,8 +221,7 @@ def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_57
     gradient = torch.cat(grd_list, 0)
     sh       = torch.cat(sh_list, 0)
 
-    if detach:
-        density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
+    density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
 
     return FrozenTetModel(
         int_vertices=int_vertices.to(device),
@@ -271,7 +233,6 @@ def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_57
         sh=sh.to(device),
         center=base_model.center.detach().to(device),
         scene_scaling=base_model.scene_scaling.detach().to(device),
-        density_offset=base_model.density_offset,
         max_sh_deg=base_model.max_sh_deg,
         chunk_size=chunk_size,
     )
@@ -380,10 +341,6 @@ def _offload_model_to_cpu(model: nn.Module):
 def freeze_model(
     base_model,
     args,
-    weight_decay: float = 1e-10,
-    lambda_tv:    float = 0.0,
-    lambda_density: float = 0.0,
-    detach: bool = True,
     chunk_size: int = 408_576,
     **kwargs
 ) -> Tuple[FrozenTetModel, FrozenTetOptimizer]:
@@ -399,7 +356,7 @@ def freeze_model(
         Optimiser bound to the frozen model.
     """
     print("Freezing model")
-    frozen_model = bake_from_model(base_model, detach=detach, chunk_size=chunk_size)
+    frozen_model = bake_from_model(base_model, chunk_size=chunk_size)
 
     frozen_optim = FrozenTetOptimizer(
         frozen_model,

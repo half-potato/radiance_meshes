@@ -392,28 +392,29 @@ bool ray_tetrahedron_intersect_fused(
 
 
 
-    float3 v0 = verts[0];
-    float3 v1 = verts[1];
-    float3 v2 = verts[2];
-    float3 v3 = verts[3];    
-    // const float3 n0 = cross(
-    //     verts[kTetTriangles[0][2]] - verts[kTetTriangles[0][0]],
-    //     verts[kTetTriangles[0][1]] - verts[kTetTriangles[0][0]]);
-    // const float d0  = -dot(n0, verts[kTetTriangles[0][0]] - orig);
-    // const float3 n1 = cross(
-    //     verts[kTetTriangles[1][2]] - verts[kTetTriangles[1][0]],
-    //     verts[kTetTriangles[1][1]] - verts[kTetTriangles[1][0]]);
-    // const float d1  = -dot(n1, verts[kTetTriangles[1][0]] - orig);
-    // const float3 n2 = cross(
-    //     verts[kTetTriangles[2][2]] - verts[kTetTriangles[2][0]],
-    //     verts[kTetTriangles[2][1]] - verts[kTetTriangles[2][0]]);
-    // const float d2  = -dot(n2, verts[kTetTriangles[2][0]] - orig);
-    // const float3 n3 = cross(
-    //     verts[kTetTriangles[3][2]] - verts[kTetTriangles[3][0]],
-    //     verts[kTetTriangles[3][1]] - verts[kTetTriangles[3][0]]);
-    // const float d3  = -dot(n3, verts[kTetTriangles[3][0]] - orig);
+    // float3 v0 = verts[0];
+    // float3 v1 = verts[1];
+    // float3 v2 = verts[2];
+    // float3 v3 = verts[3];    
+    const float3 n0 = -cross(
+        verts[kTetTriangles[0][2]] - verts[kTetTriangles[0][0]],
+        verts[kTetTriangles[0][1]] - verts[kTetTriangles[0][0]]);
+    const float d0  = -dot(n0, verts[kTetTriangles[0][0]] - orig);
+    const float3 n1 = -cross(
+        verts[kTetTriangles[1][2]] - verts[kTetTriangles[1][0]],
+        verts[kTetTriangles[1][1]] - verts[kTetTriangles[1][0]]);
+    const float d1  = -dot(n1, verts[kTetTriangles[1][0]] - orig);
+    const float3 n2 = -cross(
+        verts[kTetTriangles[2][2]] - verts[kTetTriangles[2][0]],
+        verts[kTetTriangles[2][1]] - verts[kTetTriangles[2][0]]);
+    const float d2  = -dot(n2, verts[kTetTriangles[2][0]] - orig);
+    const float3 n3 = -cross(
+        verts[kTetTriangles[3][2]] - verts[kTetTriangles[3][0]],
+        verts[kTetTriangles[3][1]] - verts[kTetTriangles[3][0]]);
+    const float d3  = -dot(n3, verts[kTetTriangles[3][0]] - orig);
 
 
+    /*
     // Face 0: (v0, v1, v2)
     float3 n0 = cross(v1 - v0, v2 - v0);
     if (dot(n0, v3 - v0) > 0) {
@@ -441,6 +442,7 @@ bool ray_tetrahedron_intersect_fused(
         n3 = -n3;
     }
     float d3 = -dot(n3, v1-orig);
+    */
 
     // --------------------------------------------------------------------
     // 2. Initialize the intersection range [t_enter, t_exit]
@@ -580,101 +582,6 @@ bool ray_tetrahedron_intersect_fused(
     t = { t_enter, t_exit };
     return true;
 }
-
-/*
-[Differentiable]
-bool ray_tetrahedron_intersect_fused_vectorized(
-    float3 orig, float3 dir,
-    float4x3 verts,
-    inout float2 t)
-{
-    // These are the specific winding orders that produce inward-facing normals.
-    static const uint3 kTetTriangles[4] = {
-        uint3(0, 2, 1), uint3(1, 2, 3), uint3(0, 3, 2), uint3(3, 0, 1)
-    };
-
-    // 1. Compute the four INWARD-FACING normals in parallel using the fixed indices.
-    // The cross product order is chosen to match the known winding.
-    // const float4x3 normals = float4x3(
-    //     cross(verts[kTetTriangles[0][2]] - verts[0], verts[kTetTriangles[0][1]] - verts[0]), // Face 0: (v1-v0) x (v2-v0)
-    //     cross(verts[kTetTriangles[1][2]] - verts[1], verts[kTetTriangles[1][1]] - verts[1]), // Face 1: (v3-v1) x (v2-v1)
-    //     cross(verts[kTetTriangles[2][2]] - verts[0], verts[kTetTriangles[2][1]] - verts[0]), // Face 2: (v2-v0) x (v3-v0)
-    //     cross(verts[kTetTriangles[3][2]] - verts[3], verts[kTetTriangles[3][1]] - verts[3])  // Face 3: (v1-v3) x (v0-v3)
-    // );
-
-    const float3 v0 = verts[0], v1 = verts[1], v2 = verts[2], v3 = verts[3];
-    const float4x3 normals = float4x3(
-        cross(v1 - v0, v2 - v0),
-        cross(v1 - v0, v3 - v0),
-        cross(v2 - v0, v3 - v0),
-        cross(v2 - v1, v3 - v1)
-    );
-
-    // 2. Ensure all normals point outward without branching.
-    // We check each normal against the tetrahedron's fourth vertex.
-    const float4 dots = float4(
-        dot(normals[0], v3 - v0),
-        dot(normals[1], v2 - v0),
-        dot(normals[2], v1 - v0),
-        dot(normals[3], v0 - v1)
-    );
-    const float4x3 outward_normals = float4x3(
-        normals[0] * sign(dots.x),
-        normals[1] * sign(dots.y),
-        normals[2] * sign(dots.z),
-        normals[3] * sign(dots.w),
-    );
-
-    // NOTE: The expensive step of checking and flipping normals is now removed.
-
-    // 2. Calculate ray-plane intersection parameters t = N/D.
-    // Numerators N = dot(n, v_base - orig)
-    const float4 numerators = float4(
-        // dot(outward_normals[0], verts[kTetTriangles[0][0]] - orig),
-        // dot(outward_normals[1], verts[kTetTriangles[1][0]] - orig),
-        // dot(outward_normals[2], verts[kTetTriangles[2][0]] - orig),
-        // dot(outward_normals[3], verts[kTetTriangles[3][0]] - orig)
-        dot(outward_normals[0], v0 - orig),
-        dot(outward_normals[1], v1 - orig),
-        dot(outward_normals[2], v2 - orig),
-        dot(outward_normals[3], v3 - orig)
-    );
-
-    // Denominators D = dot(n, dir)
-    const float4 denoms = mul(normals, dir);
-
-    // 3. Handle parallel rays.
-    // For an inward normal, the origin is "outside" if dot(n, o-v_base) < 0,
-    // which means the numerator is negative.
-    const float eps = 1e-10f;
-    if (any((abs(denoms) < eps) & (numerators < 0.0f))) {
-        return false;
-    }
-
-    // 4. Perform the slab test using the INWARD normal convention.
-    const float4 t_planes = -numerators / denoms;
-    const float t_initial_enter = -1e30f;
-    const float t_initial_exit  = 1e30f;
-
-    // With INWARD normals:
-    // denom > 0 means the ray is ENTERING.
-    // denom < 0 means the ray is EXITING.
-    const float4 t_enters = select(denoms < 0.0f, t_planes, float4(t_initial_enter));
-    const float4 t_exits  = select(denoms > 0.0f, t_planes, float4(t_initial_exit));
-
-    // 5. Find the final interval [t_enter, t_exit] with horizontal reductions.
-    float t_enter = max(max(t_enters.x, t_enters.y), max(t_enters.z, t_enters.w));
-    float t_exit  = min(min(t_exits.x, t_exits.y), min(t_exits.z, t_exits.w));
-
-    // 6. Final intersection checks.
-    if (t_enter > t_exit || t_exit <= 0.0f) {
-        return false;
-    }
-
-    t = float2(max(t_enter, 0.f), t_exit);
-    return true;
-}
-*/
 
 [Differentiable]
 bool ray_tetrahedron_intersect_fused_vectorized(

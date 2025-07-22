@@ -92,7 +92,8 @@ class BaseModel(nn.Module):
     def save2ply(self, path):
         path.parent.mkdir(exist_ok=True, parents=True)
 
-        xyz = self.vertices.detach().cpu().numpy().astype(np.float32)  # shape (num_vertices, 3)
+        vertices = self.vertices
+        xyz = vertices.detach().cpu().numpy().astype(np.float32)  # shape (num_vertices, 3)
 
         vertex_dict = {
             "x": xyz[:, 0],
@@ -103,11 +104,8 @@ class BaseModel(nn.Module):
         N = self.indices.shape[0]
         sh_dim = ((self.max_sh_deg+1)**2-1)
 
-        vertices = self.vertices
         indices = self.indices
-        circumcenters, density, base_color_v0_raw, normed_grd, sh = self.compute_features(offset=False)
-        radius = torch.linalg.norm(vertices[indices[:, 0]] - circumcenters.reshape(-1, 3), dim=-1)
-        normed_grd = safe_div(normed_grd.reshape(-1, 3), radius.reshape(-1, 1))
+        circumcenters, density, base_color_v0_raw, normed_grd, sh = self.compute_features()
 
         base_color_v0_raw = base_color_v0_raw.cpu().numpy().astype(np.float32)
         grds = normed_grd.reshape(-1, 3).cpu().numpy().astype(np.float32)
@@ -115,7 +113,7 @@ class BaseModel(nn.Module):
         sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
 
         tetra_dict = {}
-        tetra_dict["vertex_indices"] = self.indices.cpu().numpy().astype(np.int32)
+        tetra_dict["vertex_indices"] = indices.cpu().numpy().astype(np.int32)
         tetra_dict["s"] = np.ascontiguousarray(densities)
         for i, co in enumerate(["x", "y", "z"]):
             tetra_dict[f"grd_{co}"]         = np.ascontiguousarray(grds[:, i])
@@ -171,14 +169,13 @@ class BaseModel(nn.Module):
         # tet_density = self.calc_tet_density()
         # mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
 
-        circumcenters, density, rgb, grd, sh = self.compute_features(offset=False)
+        circumcenters, density, rgb, grd, sh = self.compute_features()
         rgb = rgb[mask].detach()
         tets = verts[self.indices[mask]]
         circumcenters, radius = calculate_circumcenters_torch(tets.double())
         grd = grd[mask].detach()
         sh = sh[mask].detach()
-        grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
-        normed_grd = safe_div(grd, radius.reshape(-1, 1, 1))
+        normed_grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
         tet_color_raw = eval_sh(
             tets.mean(dim=1).detach(),
             RGB2SH(rgb),

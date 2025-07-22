@@ -120,7 +120,7 @@ class FrozenTetModel(BaseModel):
             output = checkpoint(self.backbone, self.features[start:end], glo, use_reentrant=True)
         return circumcenter, normalized, *output
 
-    def compute_features(self, offset=False):
+    def compute_features(self):
         vertices = self.vertices
         indices = self.indices
         features = self.features
@@ -133,13 +133,8 @@ class FrozenTetModel(BaseModel):
             cs.append(circumcenters)
             ds.append(density)
             ss.append(sh)
-            if offset:
-                base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
-                rs.append(base_color_v0_raw)
-                gs.append(normed_grd)
-            else:
-                rs.append(rgb)
-                gs.append(grd)
+            rs.append(rgb)
+            gs.append(grd)
         cs = torch.cat(cs, dim=0)
         ds = torch.cat(ds, dim=0)
         rs = torch.cat(rs, dim=0)

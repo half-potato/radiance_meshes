@@ -6,7 +6,7 @@ from gDel3D.build.gdel3d import Del
 from torch import nn
 from icecream import ic
 
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, tet_volumes
 from utils import topo_utils
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
@@ -102,7 +102,7 @@ class Model(BaseModel):
         normed_cc = torch.cat(normed_cc, dim=0)
         return normed_cc, features
 
-    def compute_features(self, offset=False):
+    def compute_features(self):
         vertices = self.vertices
         indices = self.indices
         cs, ds, rs, gs, ss = [], [], [], [], []
@@ -114,13 +114,8 @@ class Model(BaseModel):
             cs.append(circumcenters)
             ds.append(density)
             ss.append(sh)
-            if offset:
-                base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
-                rs.append(base_color_v0_raw)
-                gs.append(normed_grd)
-            else:
-                rs.append(rgb)
-                gs.append(grd)
+            rs.append(rgb)
+            gs.append(grd)
         cs = torch.cat(cs, dim=0)
         ds = torch.cat(ds, dim=0)
         rs = torch.cat(rs, dim=0)
@@ -201,7 +196,12 @@ class Model(BaseModel):
             indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
             del prev
         
-        self.indices = torch.as_tensor(indices_np).cuda()
+        indices = torch.as_tensor(indices_np).cuda()
+        vols = tet_volumes(verts[indices])
+        reverse_mask = vols < 0
+        indices[reverse_mask] = indices[reverse_mask, [1, 0, 2, 3]]
+
+        self.indices = indices
         denom = topo_utils.tet_denom(self.vertices.detach()[self.indices]).detach()
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.calc_tet_density()
