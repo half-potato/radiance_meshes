@@ -1,0 +1,5 @@
+slangtorch
+opencv-python
+tqdm
+scipy
+jax

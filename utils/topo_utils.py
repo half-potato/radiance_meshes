@@ -6,11 +6,11 @@ import time
 import torch
 from torch.autograd.functional import jacobian
 from icecream import ic
-from submodules.spectral_norm3 import compute_spectral_norm3
 from utils.contraction import contract_points, contraction_jacobian, contraction_jacobian_d_in_chunks
 import math
 from scipy.spatial import ConvexHull
 from utils.safe_math import safe_div
+# from submodules.spectral_norm3 import compute_spectral_norm3
 
 def tet_volumes(tets):
     v0 = tets[:, 0]

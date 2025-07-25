@@ -2,7 +2,7 @@ import torch
 import math
 from data.camera import Camera
 from utils import optim
-from gDel3D.build.gdel3d import Del
+from gdel3d import Del
 from torch import nn
 from icecream import ic
 
@@ -18,8 +18,7 @@ from pathlib import Path
 import numpy as np
 from utils.args import Args
 from scipy.spatial import  Delaunay
-import open3d as o3d
-from simple_knn._C import distCUDA2
+# import open3d as o3d
 from utils.model_util import *
 from models.base_model import BaseModel
 from muon import SingleDeviceMuonWithAuxAdam
@@ -232,22 +231,23 @@ class Model(BaseModel):
 
         vertices = torch.as_tensor(point_cloud.points).float()
 
-        dist = torch.clamp_min(distCUDA2(vertices.cuda()), 0.0000001).sqrt().cpu()
+        # dist = torch.clamp_min(distCUDA2(vertices.cuda()), 0.0000001).sqrt().cpu()
 
         # vertices = vertices.reshape(-1, 1, 3).expand(-1, init_repeat, 3)
         # vertices = vertices + torch.randn(*vertices.shape) * dist.reshape(-1, 1, 1).clip(min=0.01)
         # vertices = vertices.reshape(-1, 3)
 
         # Convert BasicPointCloud to Open3D PointCloud
-        o3d_pcd = o3d.geometry.PointCloud()
-        o3d_pcd.points = o3d.utility.Vector3dVector(vertices.numpy())
+        # o3d_pcd = o3d.geometry.PointCloud()
+        # o3d_pcd.points = o3d.utility.Vector3dVector(vertices.numpy())
+        #
+        # # Perform voxel downsampling
+        # if voxel_size > 0:
+        #     o3d_pcd = o3d_pcd.voxel_down_sample(voxel_size=voxel_size)
+        #
+        # N = point_cloud.points.shape[0]
+        # vertices = torch.as_tensor(np.asarray(o3d_pcd.points)).float()
 
-        # Perform voxel downsampling
-        if voxel_size > 0:
-            o3d_pcd = o3d_pcd.voxel_down_sample(voxel_size=voxel_size)
-
-        N = point_cloud.points.shape[0]
-        vertices = torch.as_tensor(np.asarray(o3d_pcd.points)).float()
         vertices = vertices + torch.randn(*vertices.shape) * 1e-3
 
         # add sphere

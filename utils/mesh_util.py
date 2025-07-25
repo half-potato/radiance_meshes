@@ -1,10 +1,9 @@
 import numpy as np
 from collections import deque, defaultdict
-from skimage.draw import polygon, polygon_perimeter
+# from skimage.draw import polygon, polygon_perimeter
 from PIL import Image
 from pathlib import Path
 # import xatlas
-import tinyplypy
 # import trimesh
 
 def tet_to_vert_color(verts, tets, tet_v_rgb):

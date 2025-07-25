@@ -1,0 +1,8 @@
+feature_lr,final_feature_lr,fnetwork_lr,final_fnetwork_lr,dataset_path,iterations,freeze_start,ckpt
+1.00E-02,1.00E-03,1.00E-04,1.00E-05,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+5.00E-02,5.00E-03,1.00E-04,1.00E-05,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+1.00E-01,1.00E-02,1.00E-04,1.00E-05,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+1.00E-02,1.00E-04,1.00E-04,1.00E-05,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+1.00E-02,1.00E-04,1.00E-03,1.00E-05,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+1.00E-02,1.00E-04,1.00E-04,1.00E-06,/data/nerf_datasets/360/garden,4000,0,output/garden_r29_ld1e-4_dt0.1at0.1_denom1e-10_alphadist2_st5.5k_noglo/
+

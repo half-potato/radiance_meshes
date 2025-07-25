@@ -1,15 +1,11 @@
 import torch
-from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
 from utils.contraction import contract_points, inv_contract_points
 from models.base_model import BaseModel
 from muon import SingleDeviceMuonWithAuxAdam
 import math
 from data.camera import Camera
-from utils import optim
-from gDel3D.build.gdel3d import Del
 from torch import nn
-from icecream import ic
 from typing import Optional, Tuple
 from torch.utils.checkpoint import checkpoint
 import gc
@@ -251,7 +247,7 @@ class FrozenTetOptimizer:
             process(model.backbone.sh_net, fnetwork_lr) + \
             glo_p
         )
-        self.feature_optim = torch.optim.RMSprop([
+        self.feature_optim = torch.optim.Adam([
             {"params": [model.features],       "lr": feature_lr,       "name": "sh"},
         ])
         self.sh_optim = None

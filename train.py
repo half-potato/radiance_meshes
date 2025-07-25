@@ -26,9 +26,7 @@ from models.frozen import freeze_model
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
-import imageio
 from utils import test_util
-import termplotlib as tpl
 from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
 from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
@@ -246,7 +244,7 @@ if args.glo_dim > 0:
     glo_list = glo_list.cuda()
     glo_optim = torch.optim.Adam(glo_list.parameters(), lr=args.glo_lr)
 
-video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
+video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'MP4V'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
 progress_bar = tqdm(range(args.iterations))

@@ -236,19 +236,19 @@ def apply_densification(
         color = torch.rand_like(f[:, :3])
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
-                        render_debug(f, model, sample_cam, 10))
+        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+        #                 render_debug(f, model, sample_cam, 10))
         f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"densify{iteration}.png",
-                        render_debug(f, model, sample_cam, 10))
-        imageio.imwrite(args.output_path / f"total_var{iteration}.png",
-                        render_debug(total_var[:, None],
-                                     model, sample_cam))
-        imageio.imwrite(args.output_path / f"within_var{iteration}.png",
-                        render_debug(within_var[:, None],
-                                     model, sample_cam))
+        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
+        #                 render_debug(f, model, sample_cam, 10))
+        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+        #                 render_debug(total_var[:, None],
+        #                              model, sample_cam))
+        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+        #                 render_debug(within_var[:, None],
+        #                              model, sample_cam))
         imageio.imwrite(args.output_path / f"im{iteration}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 
