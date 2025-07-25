@@ -87,8 +87,8 @@ DistortionState5 update_distortion_state(
 {
     // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
     // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
-    float start = dist.x;
-    float end = dist.y;
+    float start = (2*dist.x) / (2+dist.x);
+    float end = (2*dist.y) / (2+dist.y);
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
     float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
@@ -113,8 +113,8 @@ DistortionState5 undo_distortion_state(
     float density,
     float2 dist)
 {
-    float start = dist.x;
-    float end = dist.y;
+    float start = (2*dist.x) / (2+dist.x);
+    float end = (2*dist.y) / (2+dist.y);
     // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
     // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
     float scaling = 1;

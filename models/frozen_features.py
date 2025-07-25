@@ -253,7 +253,7 @@ class FrozenTetOptimizer:
         )
         self.feature_optim = torch.optim.RMSprop([
             {"params": [model.features],       "lr": feature_lr,       "name": "sh"},
-        ], eps=1e-4)
+        ])
         self.sh_optim = None
         self.model = model
         self.freeze_start = freeze_start

@@ -146,7 +146,6 @@ class GloMLP(torch.nn.Module):
             torch.nn.SiLU(),
             torch.nn.Linear(128, output_dim*2),
         )
-        ic(output_dim, input_dim)
         last = self.mlp[-1]
         with torch.no_grad():
             nn.init.xavier_uniform_(last.weight, 1e-3)

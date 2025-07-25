@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
 from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render

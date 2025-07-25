@@ -21,8 +21,8 @@ from delaunay_rasterization import render
 # from models.vertex_color import Model, TetOptimizer
 from models.ingp_color import Model, TetOptimizer
 # from models.ingp_linear import Model, TetOptimizer
-from models.frozen_features import freeze_model
-# from models.frozen import freeze_model
+# from models.frozen_features import freeze_model
+from models.frozen import freeze_model
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -99,13 +99,13 @@ args.delaunay_start = 30000
 args.freeze_start = 16000
 args.freeze_lr = 5e-3
 args.final_freeze_lr = 1e-4
-args.feature_lr = 1e-2
-args.final_feature_lr = 1e-3
+args.feature_lr = 1e-3
+args.final_feature_lr = 1e-4
 args.fnetwork_lr = 1e-3
 args.final_fnetwork_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 0.0
+args.lambda_dist = 1e-4
 args.lambda_density = 0.0
 args.lambda_aniso = 0.0
 
@@ -127,8 +127,8 @@ args.base_min_t = 0.2
 args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
-args.density_threshold = 0.001
-args.alpha_threshold = 0.001
+args.density_threshold = 0.1
+args.alpha_threshold = 0.1
 args.total_thresh = 0.025
 args.within_thresh = 0.4
 args.density_intercept = 1.0
@@ -149,7 +149,7 @@ args = Args.from_namespace(parser.parse_args())
 if len(args.ckpt) > 0: 
     config_path = Path(args.ckpt) / "config.json"
     config = Args.load_from_json(str(config_path))
-parser.set_defaults(**config.as_dict())
+    parser.set_defaults(**config.as_dict())
 args = Args.from_namespace(parser.parse_args())
 
 args.output_path.mkdir(exist_ok=True, parents=True)
