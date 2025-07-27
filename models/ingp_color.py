@@ -33,6 +33,7 @@ class Model(BaseModel):
                  center: torch.Tensor,
                  scene_scaling: float,
                  density_offset=-1,
+                 current_sh_deg=2,
                  max_sh_deg=2,
                  glo_dim=0,
                  **kwargs):
@@ -54,6 +55,7 @@ class Model(BaseModel):
         self.alpha = 0
         self.linear = False
         self.feature_dim = 7
+        self.current_sh_deg = current_sh_deg
 
         self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
@@ -90,7 +92,7 @@ class Model(BaseModel):
                 RGB2SH(rgb),
                 sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3).half(),
                 cam_center,
-                self.max_sh_deg).float()
+                self.current_sh_deg).float()
             dvrgbs = activate_output(cam_center, tet_color_raw,
                                      density, grd,
                                      circumcenters,
@@ -181,6 +183,9 @@ class Model(BaseModel):
     def vertices(self):
         verts = self.interior_vertices
         return torch.cat([verts, self.ext_vertices])
+
+    def sh_up(self):
+        self.current_sh_deg = min(self.current_sh_deg + 1, self.max_sh_deg)
 
     @torch.no_grad()
     def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):

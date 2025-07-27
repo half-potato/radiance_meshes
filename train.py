@@ -51,11 +51,11 @@ args.delaunay_interval = 10
 
 # Light Settings
 args.max_sh_deg = 3
-args.sh_interval = 0
+args.sh_interval = 2000
 args.sh_step = 1
 args.bake_model = True
 
-args.glo_dim = 128
+args.glo_dim = 0#128
 args.glo_lr = 1e-3
 args.glo_network_lr = 5e-5
 args.glo_weight_decay = 1e-1
@@ -177,6 +177,7 @@ if len(args.ckpt) > 0:
         tet_optim = FrozenTetOptimizer(model, final_iter=final_iter, **args.as_dict())
 else:
     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
+                                current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
                                 **args.as_dict())
     tet_optim = TetOptimizer(model, final_iter=final_iter, **args.as_dict())
 

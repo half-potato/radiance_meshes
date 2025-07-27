@@ -1,2 +1,2 @@
-dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
-/optane/nerf_datasets/360/stump,3,images_4,output/stump_ifimages_4_r31_glo,28.167118268905458,0.25321164727211,26.57364273071289,0.7786961197853088
+dataset_path,error,gpu_id,image_folder,output_folder
+/data/nerf_datasets/360/bicycle,Process failed and no JSON output file found,0,images_4,output/bicycle_ifimages_4_r31_noglo_si1k
