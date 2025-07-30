@@ -21,8 +21,6 @@ from delaunay_rasterization import render
 # from models.vertex_color import Model, TetOptimizer
 from models.ingp_color import Model, TetOptimizer
 # from models.ingp_linear import Model, TetOptimizer
-from models.frozen_features import freeze_model
-# from models.frozen import freeze_model
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -49,6 +47,7 @@ args.ckpt = ""
 args.render_train = False
 args.delaunay_interval = 10
 args.orient_scene = True
+args.freeze_features = True
 
 # Light Settings
 args.max_sh_deg = 3
@@ -82,7 +81,7 @@ args.sh_hidden_dim = 256
 
 args.dg_init=0.1
 args.g_init=0.1
-args.s_init=1e-4
+args.s_init=0.1
 args.d_init=0.1
 args.c_init=0.1
 
@@ -171,12 +170,14 @@ with (args.output_path / "config.json").open("w") as f:
 final_iter = args.freeze_start if args.bake_model else args.iterations
 device = torch.device('cuda')
 if len(args.ckpt) > 0: 
-    from models.frozen_features import FrozenTetModel, FrozenTetOptimizer
-    # from models.frozen import FrozenTetModel
     try:
         model = Model.load_ckpt(Path(args.ckpt), device, args)
         tet_optim = TetOptimizer(model, final_iter=final_iter, **args.as_dict())
     except:
+        if args.freeze_features:
+            from models.frozen_features import FrozenTetModel, FrozenTetOptimizer
+        else:
+            from models.frozen import FrozenTetModel, FrozenTetOptimizer
         model = FrozenTetModel.load_ckpt(Path(args.ckpt), device)
         tet_optim = FrozenTetOptimizer(model, final_iter=final_iter, **args.as_dict())
 else:
@@ -250,7 +251,7 @@ if args.glo_dim > 0:
     glo_optim = torch.optim.Adam(glo_list.parameters(), lr=args.glo_lr)
 
 if args.record_training:
-    video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
+    video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'h264'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
 progress_bar = tqdm(range(args.iterations))
@@ -273,6 +274,10 @@ for iteration in progress_bar:
         tet_optim.update_triangulation(density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
         if do_freeze and args.bake_model and not model.frozen:
             # model.save2ply(args.output_path / "ckpt_prefreeze.ply")
+            if args.freeze_features:
+                from models.frozen_features import freeze_model
+            else:
+                from models.frozen import freeze_model
             del tet_optim
             model, tet_optim = freeze_model(model, args)
             gc.collect()

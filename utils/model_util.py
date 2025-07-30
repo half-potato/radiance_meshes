@@ -112,8 +112,8 @@ def compute_vertex_colors_from_field(
 
 def offset_normalize(rgb, grd, circumcenters, tets):
     # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
-    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
-    radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
+    grd = grd.reshape(-1, 1, 3)# * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
+    radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
     normed_grd = safe_div(grd, radius)
     vcolors = compute_vertex_colors_from_field(
         tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
@@ -317,7 +317,7 @@ class Heads(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
-        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
-        # grd = field_samples.reshape(-1, 1, 3)
+        # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
+        grd = field_samples.reshape(-1, 1, 3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh

@@ -61,10 +61,10 @@ class FrozenTetModel(BaseModel):
         # learnable per‑tet parameters -------------------------------------------
         # self.density   = nn.Parameter(safe_log(density))    # (T, 1)
         # self.gradient  = nn.Parameter(torch.atanh(gradient.clip(min=-0.99, max=0.99)))   # (T, 3, 3)
-        self.density   = nn.Parameter(density)    # (T, 1)
-        self.gradient  = nn.Parameter(gradient)   # (T, 3, 3)
-        self.rgb       = nn.Parameter(rgb)        # (T, 3)
-        self.sh        = nn.Parameter(sh.half())         # (T, SH, 3)
+        self.density   = nn.Parameter(density, requires_grad=True)    # (T, 1)
+        self.gradient  = nn.Parameter(gradient, requires_grad=True)   # (T, 3, 3)
+        self.rgb       = nn.Parameter(rgb, requires_grad=True)        # (T, 3)
+        self.sh        = nn.Parameter(sh.half(), requires_grad=True)         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
         self.max_sh_deg      = max_sh_deg
@@ -196,7 +196,6 @@ class FrozenTetModel(BaseModel):
 # 2.  BAKING UTILITY                                                         |
 # =============================================================================
 
-@torch.no_grad()
 def bake_from_model(base_model, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only
     `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
@@ -276,15 +275,16 @@ class FrozenTetOptimizer:
         # ------------------------------------------------------------------
         # single optimiser with four parameter groups
         # ------------------------------------------------------------------
-        self.optim = torch.optim.RMSprop([
-        # self.optim = torch.optim.Adam([
+        # self.optim = torch.optim.RMSprop([
+        self.optim = torch.optim.Adam([
             {"params": [model.density],  "lr": freeze_lr,  "name": "density"},
             {"params": [model.rgb],      "lr": freeze_lr,    "name": "color"},
             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
         ])
-        self.sh_optim = torch.optim.RMSprop([
-            {"params": [model.sh],       "lr": freeze_lr,       "name": "sh"},
-        ], eps=1e-4)
+        # self.sh_optim = torch.optim.RMSprop([
+        self.sh_optim = torch.optim.Adam([
+            {"params": [model.sh],       "lr": freeze_lr / 20,       "name": "sh"},
+        ], eps=1e-6)
         self.freeze_start = freeze_start
         self.scheduler = get_expon_lr_func(lr_init=freeze_lr,
                                            lr_final=final_freeze_lr,
@@ -295,6 +295,9 @@ class FrozenTetOptimizer:
         # alias for external training scripts that expected these names
         self.net_optim   = self.optim
         self.vertex_optim = None  # geometry is frozen
+
+    def update_triangulation(self, *_, **__):
+        return None
 
     def step(self):
         self.optim.step()

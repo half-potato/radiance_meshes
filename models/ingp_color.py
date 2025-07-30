@@ -111,11 +111,13 @@ class Model(BaseModel):
 
             circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
             tets = vertices[indices[start:end]]
+            radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
             cs.append(circumcenters)
             ds.append(density)
             ss.append(sh)
             rs.append(rgb)
             gs.append(grd)
+            gs.append(safe_math.safe_div(grd, radius))
         cs = torch.cat(cs, dim=0)
         ds = torch.cat(ds, dim=0)
         rs = torch.cat(rs, dim=0)
@@ -352,7 +354,7 @@ class TetOptimizer:
             process(model.backbone.density_net, network_lr) + \
             process(model.backbone.color_net, network_lr) + \
             process(model.backbone.gradient_net, network_lr) + \
-            process(model.backbone.sh_net, network_lr) + \
+            process(model.backbone.sh_net, network_lr, weight_decay=1e-5) + \
             glo_p
         )
         self.vert_lr_multi = float(model.scene_scaling.cpu())
