@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from utils.args import Args
 from utils.model_util import *
-
+from utils import safe_math
 
 class FrozenTetModel(BaseModel):
     def __init__(self,
@@ -310,7 +310,7 @@ class FrozenTetOptimizer:
         return None
 
 
-def bake_from_model(base_model, args, chunk_size: int = 408_576) -> FrozenTetModel:
+def bake_from_model(base_model, mask, args, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only
     `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
     network and stored explicitly so that no backbone is needed afterwards."""
@@ -319,7 +319,7 @@ def bake_from_model(base_model, args, chunk_size: int = 408_576) -> FrozenTetMod
     vertices = base_model.vertices.detach()
     int_vertices  = vertices[: base_model.num_int_verts]
     ext_vertices  = base_model.ext_vertices.detach()
-    indices       = base_model.indices.detach()
+    indices       = base_model.indices[mask].detach()
 
     features = []
     for start in range(0, indices.shape[0], chunk_size):
@@ -368,6 +368,7 @@ def _offload_model_to_cpu(model: nn.Module):
 @torch.no_grad()
 def freeze_model(
     base_model,
+    mask,
     args,
     chunk_size: int = 408_576,
 ) -> Tuple[FrozenTetModel, FrozenTetOptimizer]:
@@ -383,7 +384,7 @@ def freeze_model(
         Optimiser bound to the frozen model.
     """
     print("Freezing model")
-    frozen_model = bake_from_model(base_model, args, chunk_size=chunk_size)
+    frozen_model = bake_from_model(base_model, mask, args, chunk_size=chunk_size)
 
     frozen_optim = FrozenTetOptimizer(
         frozen_model,

@@ -126,6 +126,7 @@ args.base_min_t = 0.2
 args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
+args.contrib_threshold = 0.025
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.total_thresh = 0.025
@@ -279,7 +280,11 @@ for iteration in progress_bar:
             else:
                 from models.frozen import freeze_model
             del tet_optim
-            model, tet_optim = freeze_model(model, args)
+            model.eval()
+            stats = collect_render_stats(train_cameras, model, glo_list, args, device)
+            model.train()
+            mask = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
+            model, tet_optim = freeze_model(model, mask, args)
             gc.collect()
             torch.cuda.empty_cache()
 

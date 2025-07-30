@@ -6,6 +6,7 @@ import gc
 from delaunay_rasterization.internal.render_err import render_err
 from delaunay_rasterization import render_debug
 import torch
+from icecream import ic
 
 def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
     """
@@ -90,6 +91,9 @@ class RenderStats(NamedTuple):
     top_ssim: torch.Tensor
     top_size: torch.Tensor
     total_count: torch.Tensor
+    peak_contrib: torch.Tensor
+    alphas: torch.Tensor
+    density: torch.Tensor
 
 
 @torch.no_grad()
@@ -105,6 +109,7 @@ def collect_render_stats(
     tet_moments = torch.zeros((n_tets, 4), device=device)
     tet_view_count = torch.zeros((n_tets,), device=device)
 
+    peak_contrib = torch.zeros((n_tets), device=device)
     top_ssim = torch.zeros((n_tets, 2), device=device)
     top_size = torch.zeros((n_tets, 2), device=device)
     total_err = torch.zeros((n_tets), device=device)
@@ -132,6 +137,7 @@ def collect_render_stats(
         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         total_err += image_Terr
+        peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
 
         # ray buffer: (enter | exit) → (N, 6)
         w = image_votes[:, 12:13]
@@ -178,6 +184,8 @@ def collect_render_stats(
 
         tet_view_count[update_mask] += 1 # Count views per tet
 
+    tet_density = model.calc_tet_density()
+    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
     # done
     return RenderStats(
         within_var_rays = within_var_rays,
@@ -188,6 +196,9 @@ def collect_render_stats(
         total_count = total_count,
         top_ssim = top_ssim[:, :2],
         top_size = top_size[:, :2],
+        peak_contrib = peak_contrib,
+        density=tet_density,
+        alphas=alphas
     )
 
 @torch.no_grad()
@@ -213,9 +224,18 @@ def apply_densification(
     # N_b = stats.tet_view_count # Num views
     # total_var[(N_b < 2) | (s0_t < 1)] = 0
 
-    tet_density = model.calc_tet_density()
-    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
-    mask_alive = (alphas >= args.clone_min_alpha) & (tet_density.reshape(-1) >= args.clone_min_density)
+    mask_alive = (stats.alphas >= args.clone_min_alpha) & (stats.density.reshape(-1) >= args.clone_min_density)
+
+
+    mask_alive2 = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
+    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=stats.alphas.device)
+    indices = model.indices.long()
+    reduce_type = "sum"
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive2, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive2, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive2, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive2, reduce=reduce_type)
+
 
     total_var[~mask_alive] = 0
     within_var[~mask_alive] = 0
@@ -266,6 +286,9 @@ def apply_densification(
     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
     split_point[bad] = random_locations[bad]    # fall back
 
+    keep_verts = keep_verts > 0
+    print(f"Pruned: {(~keep_verts).sum()}")
+    # tet_optim.remove_points(keep_verts.reshape(-1))
     tet_optim.split(clone_indices,
                     split_point,
                     **args.as_dict())

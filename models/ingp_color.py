@@ -117,7 +117,7 @@ class Model(BaseModel):
             ss.append(sh)
             rs.append(rgb)
             gs.append(grd)
-            gs.append(safe_math.safe_div(grd, radius))
+            gs.append(safe_div(grd, radius))
         cs = torch.cat(cs, dim=0)
         ds = torch.cat(ds, dim=0)
         rs = torch.cat(rs, dim=0)
@@ -452,9 +452,9 @@ class TetOptimizer:
     @torch.no_grad()
     def split(self, clone_indices, split_point, split_mode, split_std, **kwargs):
         device = self.model.device
-        clone_vertices = self.model.vertices[clone_indices]
 
         if split_mode == "circumcenter":
+            clone_vertices = self.model.vertices[clone_indices]
             circumcenters, radius = topo_utils.calculate_circumcenters_torch(clone_vertices)
             radius = radius.reshape(-1, 1)
             circumcenters = circumcenters.reshape(-1, 3)
@@ -476,6 +476,7 @@ class TetOptimizer:
             new_vertex_location = split_point
             # new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
         elif split_mode == "split_point_c":
+            clone_vertices = self.model.vertices[clone_indices]
             barycentric_weights = topo_utils.calc_barycentric(split_point, clone_vertices).clip(min=0)
             barycentric_weights = barycentric_weights / (1e-3+barycentric_weights.sum(dim=1, keepdim=True))
             barycentric_weights += 1e-4*torch.randn(*barycentric_weights.shape, device=self.model.device)
