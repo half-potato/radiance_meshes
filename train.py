@@ -28,7 +28,7 @@ from utils import test_util
 from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
 from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
-from utils.densification import collect_render_stats, apply_densification
+from utils.densification import collect_render_stats, apply_densification, determine_cull_mask
 import mediapy
 from torch import nn
 
@@ -281,9 +281,8 @@ for iteration in progress_bar:
                 from models.frozen import freeze_model
             del tet_optim
             model.eval()
-            stats = collect_render_stats(train_cameras, model, glo_list, args, device)
+            mask = determine_cull_mask(train_cameras, model, glo_list, args, device)
             model.train()
-            mask = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
             model, tet_optim = freeze_model(model, mask, args)
             gc.collect()
             torch.cuda.empty_cache()

@@ -95,6 +95,38 @@ class RenderStats(NamedTuple):
     alphas: torch.Tensor
     density: torch.Tensor
 
+@torch.no_grad()
+def determine_cull_mask(
+    sampled_cameras: List["Camera"],
+    model,
+    glo_list,
+    args,
+    device: torch.device,
+):
+    """Accumulate densification statistics for one iteration."""
+    n_tets = model.indices.shape[0]
+    peak_contrib = torch.zeros((n_tets), device=device)
+
+    for cam in sampled_cameras:
+        target = cam.original_image.cuda()
+
+        image_votes, extras = render_err(
+            target, cam, model,
+            scene_scaling=model.scene_scaling,
+            tile_size=args.tile_size,
+            lambda_ssim=0,
+            glo=glo_list(torch.LongTensor([cam.uid]).to(device))
+        )
+
+        tc = extras["tet_count"]
+        image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
+        _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+        peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+
+    tet_density = model.calc_tet_density()
+    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
+    mask = ((peak_contrib > args.contrib_threshold) | (alphas > args.clone_min_alpha))
+    return mask
 
 @torch.no_grad()
 def collect_render_stats(
