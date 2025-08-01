@@ -13,7 +13,7 @@ dependencies = [
     "matplotlib>=3.10.3",
     "mediapy>=1.2.4",
     "muon-optimizer",
-    "opencv-python>=4.12.0.88",
+    "opencv-contrib-python>=4.12.0.88",
     "plyfile>=1.1.2",
     "pybind11>=3.0.0",
     "slangtorch>=1.3.11",

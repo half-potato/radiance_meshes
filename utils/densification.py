@@ -124,8 +124,8 @@ def determine_cull_mask(
         peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
 
     tet_density = model.calc_tet_density()
-    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
-    mask = ((peak_contrib > args.contrib_threshold) | (alphas > args.clone_min_alpha))
+    alphas = model.calc_tet_alpha(mode="min", density=tet_density)
+    mask = ((peak_contrib > args.contrib_threshold))
     return mask
 
 @torch.no_grad()

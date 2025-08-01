@@ -127,7 +127,7 @@ args.base_min_t = 0.2
 args.sample_cam = 1
 args.data_device = 'cpu'
 args.lambda_tv = 0.0
-args.contrib_threshold = 0.025
+args.contrib_threshold = 0.01
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.total_thresh = 0.025
@@ -155,7 +155,6 @@ if len(args.ckpt) > 0:
 args = Args.from_namespace(parser.parse_args())
 
 args.output_path.mkdir(exist_ok=True, parents=True)
-# args.checkpoint_iterations.append(args.freeze_start-1)
 args.checkpoint_iterations = [int(i) for i in args.checkpoint_iterations]
 print(args.checkpoint_iterations)
 
@@ -253,7 +252,7 @@ if args.glo_dim > 0:
     glo_optim = torch.optim.Adam(glo_list.parameters(), lr=args.glo_lr)
 
 if args.record_training:
-    video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'h264'), 30,
+    video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
 
 progress_bar = tqdm(range(args.iterations))
@@ -276,6 +275,9 @@ for iteration in progress_bar:
         tet_optim.update_triangulation(density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
         if do_freeze and args.bake_model and not model.frozen:
             # model.save2ply(args.output_path / "ckpt_prefreeze.ply")
+            sd = model.state_dict()
+            sd['indices'] = model.indices
+            torch.save(sd, args.output_path / "ckpt_prefreeze.pth")
             if args.freeze_features:
                 from models.frozen_features import freeze_model
             else:
@@ -284,7 +286,9 @@ for iteration in progress_bar:
             model.eval()
             mask = determine_cull_mask(train_cameras, model, glo_list, args, device)
             model.train()
+            print(f"Kept {mask.sum()} tets")
             model, tet_optim = freeze_model(model, mask, args)
+            del mask
             gc.collect()
             torch.cuda.empty_cache()
 

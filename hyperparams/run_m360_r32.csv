@@ -1,0 +1,3 @@
+dataset_path,error,gpu_id,image_folder,output_folder
+/data/nerf_datasets/360/bonsai,Process failed and no JSON output file found,0,images_2,output/bonsai_ifimages_2_r32_noglo
+/data/nerf_datasets/360/room,Process failed and no JSON output file found,0,images_2,output/room_ifimages_2_r32_noglo

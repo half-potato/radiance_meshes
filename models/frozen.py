@@ -65,7 +65,7 @@ class FrozenTetModel(BaseModel):
         self.density   = nn.Parameter(density, requires_grad=True)    # (T, 1)
         self.gradient  = nn.Parameter(gradient, requires_grad=True)   # (T, 3, 3)
         self.rgb       = nn.Parameter(rgb, requires_grad=True)        # (T, 3)
-        self.sh        = nn.Parameter(sh.half(), requires_grad=True)         # (T, SH, 3)
+        self.sh        = nn.Parameter(sh, requires_grad=True)         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
         self.max_sh_deg      = max_sh_deg
@@ -232,7 +232,7 @@ class FrozenTetOptimizer:
         # self.sh_optim = torch.optim.RMSprop([
         self.sh_optim = torch.optim.Adam([
             {"params": [model.sh],       "lr": freeze_lr / 20,       "name": "sh"},
-        ], eps=1e-6)
+        ])#, eps=1e-6)
         self.freeze_start = freeze_start
         self.scheduler = get_expon_lr_func(lr_init=freeze_lr,
                                            lr_final=final_freeze_lr,
