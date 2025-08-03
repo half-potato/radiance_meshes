@@ -94,8 +94,8 @@ DistortionState5 update_distortion_state(
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
     float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
-    float m0 = moment_0_int(start, start+1, d, T); // just weight
-    float m1 = moment_1_int(start, start+1, d, T);
+    float m0 = moment_0_int(start, end, d, T); // just weight
+    float m1 = moment_1_int(start, end, d, T);
 
     DistortionState5 new_state;
     new_state.x = old_state.x + 2.0f * m1 * old_state.z;
@@ -125,10 +125,8 @@ DistortionState5 undo_distortion_state(
     // float d = density;
     float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
-    //float m0 = moment_0_int(start, end, d, T);
-    //float m1 = moment_1_int(start, end, d, T);
-    float m0 = moment_0_int(start, start+1, d, T); // just weight
-    float m1 = moment_1_int(start, start+1, d, T);
+    float m0 = moment_0_int(start, end, d, T);
+    float m1 = moment_1_int(start, end, d, T);
 
     DistortionState5 old_state;
     old_state.z = new_state.z - m0;

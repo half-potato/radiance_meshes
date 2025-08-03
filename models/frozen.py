@@ -37,7 +37,6 @@ class FrozenTetModel(BaseModel):
     def __init__(
         self,
         int_vertices: torch.Tensor,          # (N_int, 3)
-        ext_vertices: torch.Tensor,          # (N_ext, 3)
         indices: torch.Tensor,               # (T, 4)
         density: torch.Tensor,               # (T, 1)
         rgb: torch.Tensor,                   # (T, 3)
@@ -54,7 +53,6 @@ class FrozenTetModel(BaseModel):
 
         # geometry ----------------------------------------------------------------
         self.register_buffer("interior_vertices", int_vertices)          # immutable
-        self.register_buffer("ext_vertices", ext_vertices)
         self.register_buffer("indices", indices.int())
         self.register_buffer("center", center.reshape(1, 3))
         self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
@@ -100,7 +98,6 @@ class FrozenTetModel(BaseModel):
         
         # Extract required parameters from checkpoint
         int_vertices = ckpt['interior_vertices']
-        ext_vertices = ckpt['ext_vertices']
         indices = ckpt['indices']
         density = ckpt['density']
         rgb = ckpt['rgb']
@@ -114,7 +111,6 @@ class FrozenTetModel(BaseModel):
         # Create model instance
         model = FrozenTetModel(
             int_vertices=int_vertices.to(device),
-            ext_vertices=ext_vertices.to(device),
             indices=indices.to(device),
             density=density.to(device),
             rgb=rgb.to(device),
@@ -135,7 +131,7 @@ class FrozenTetModel(BaseModel):
     @property
     def vertices(self) -> torch.Tensor:
         """Concatenated vertex tensor (internal + exterior)."""
-        return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
+        return self.interior_vertices
 
 
     def compute_features(self):
@@ -288,7 +284,6 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
 
     vertices_full = base_model.vertices.detach()
     int_vertices  = vertices_full[: base_model.num_int_verts]
-    ext_vertices  = base_model.ext_vertices.detach()
     indices       = base_model.indices[mask].detach()
 
     d_list, rgb_list, grd_list, sh_list = [], [], [], []
@@ -311,7 +306,6 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
 
     return FrozenTetModel(
         int_vertices=int_vertices.to(device),
-        ext_vertices=ext_vertices.to(device),
         indices=indices.to(device),
         density=density.to(device),
         rgb=rgb.to(device),

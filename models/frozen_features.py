@@ -25,7 +25,6 @@ from sh_slang.eval_sh import eval_sh
 class FrozenTetModel(BaseModel):
     def __init__(self,
                  int_vertices: torch.Tensor,
-                 ext_vertices: torch.Tensor,
                  indices: torch.Tensor,
                  center: torch.Tensor,
                  features: torch.Tensor,
@@ -56,7 +55,6 @@ class FrozenTetModel(BaseModel):
         self.feature_dim = 7
 
         self.register_buffer("interior_vertices", int_vertices)          # immutable
-        self.register_buffer("ext_vertices", ext_vertices)
         self.register_buffer('indices', indices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
@@ -152,10 +150,8 @@ class FrozenTetModel(BaseModel):
         vertices = ckpt['interior_vertices']
         indices = ckpt["indices"]  # shape (N,4)
         print(f"Loaded {vertices.shape[0]} vertices")
-        ext_vertices = ckpt['ext_vertices']
         model = FrozenTetModel(
             int_vertices=vertices.to(device),
-            ext_vertices=ext_vertices,
             features=ckpt['features'],
             indices=indices,
             center=ckpt['center'],
@@ -187,7 +183,7 @@ class FrozenTetModel(BaseModel):
     @property
     def vertices(self):
         verts = self.interior_vertices
-        return torch.cat([verts, self.ext_vertices])
+        return verts
 
     def sh_up(self):
         pass
@@ -320,7 +316,6 @@ def bake_from_model(base_model, mask, args, chunk_size: int = 408_576) -> Frozen
 
     vertices = base_model.vertices.detach()
     int_vertices  = vertices[: base_model.num_int_verts]
-    ext_vertices  = base_model.ext_vertices.detach()
     indices       = base_model.indices[mask].detach()
 
     features = []
@@ -340,7 +335,6 @@ def bake_from_model(base_model, mask, args, chunk_size: int = 408_576) -> Frozen
 
     fmodel = FrozenTetModel(
         int_vertices=int_vertices.to(device),
-        ext_vertices=ext_vertices.to(device),
         indices=indices.to(device),
         features=features.to(device),
         center=base_model.center.detach().to(device),
