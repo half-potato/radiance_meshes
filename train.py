@@ -79,6 +79,7 @@ args.spike_duration = 500
 args.hidden_dim = 64
 args.sh_hidden_dim = 256
 args.sh_weight_decay = 1e-5
+args.sh_lr_div = 20
 
 args.dg_init=0.1
 args.g_init=0.1

@@ -215,6 +215,7 @@ class FrozenTetOptimizer:
 
                  freeze_start: int = 15000,
                  iterations: int = 30000,
+                 sh_lr_div: int = 20,
 
                  **kwargs):
         self.weight_decay = weight_decay
@@ -243,8 +244,11 @@ class FrozenTetOptimizer:
             process(model.backbone.density_net, fnetwork_lr) + \
             process(model.backbone.color_net, fnetwork_lr) + \
             process(model.backbone.gradient_net, fnetwork_lr) + \
-            process(model.backbone.sh_net, fnetwork_lr, weight_decay=sh_weight_decay) + \
             glo_p
+        )
+        self.sh_lr_div = sh_lr_div
+        self.sh_net_optim = SingleDeviceMuonWithAuxAdam(
+            process(model.backbone.sh_net, fnetwork_lr/self.sh_lr_div, weight_decay=sh_weight_decay)
         )
         self.feature_optim = torch.optim.Adam([
             {"params": [model.features],       "lr": feature_lr,       "name": "sh"},
@@ -271,6 +275,9 @@ class FrozenTetOptimizer:
         for param_group in self.net_optim.param_groups:
             lr = self.net_scheduler(iteration - self.freeze_start)
             param_group['lr'] = lr
+        for param_group in self.sh_net_optim.param_groups:
+            lr = self.net_scheduler_args(iteration)
+            param_group['lr'] = lr/self.sh_lr_div
         for param_group in self.feature_optim.param_groups:
             lr = self.feature_scheduler(iteration - self.freeze_start)
             param_group['lr'] = lr

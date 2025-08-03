@@ -305,6 +305,7 @@ class TetOptimizer:
                  densify_interval: int = 500,
                  densify_end: int = 15000,
                  midpoint: int = 2000,
+                 sh_lr_div: int = 20,
 
                  glo_net_decay: float = 0,
                  glo_network_lr: float = 1e-3,
@@ -333,12 +334,15 @@ class TetOptimizer:
             )
             return [a, b]
         glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
+        self.sh_lr_div = sh_lr_div
         self.net_optim = SingleDeviceMuonWithAuxAdam(
             process(model.backbone.density_net, network_lr) + \
             process(model.backbone.color_net, network_lr) + \
             process(model.backbone.gradient_net, network_lr) + \
-            process(model.backbone.sh_net, network_lr, weight_decay=sh_weight_decay) + \
             glo_p
+        )
+        self.sh_net_optim = SingleDeviceMuonWithAuxAdam(
+            process(model.backbone.sh_net, network_lr/self.sh_lr_div, weight_decay=sh_weight_decay)
         )
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
@@ -411,6 +415,9 @@ class TetOptimizer:
         for param_group in self.net_optim.param_groups:
             lr = self.net_scheduler_args(iteration)
             param_group['lr'] = lr
+        for param_group in self.sh_net_optim.param_groups:
+            lr = self.net_scheduler_args(iteration)
+            param_group['lr'] = lr/self.sh_lr_div
         for param_group in self.optim.param_groups:
             if param_group["name"] == "encoding":
                 lr = self.encoder_scheduler_args(iteration)
@@ -442,10 +449,12 @@ class TetOptimizer:
     def main_step(self):
         self.optim.step()
         self.net_optim.step()
+        self.sh_net_optim.step()
 
     def main_zero_grad(self):
         self.optim.zero_grad(set_to_none=True)
         self.net_optim.zero_grad(set_to_none=True)
+        self.sh_net_optim.zero_grad(set_to_none=True)
 
     @property
     def sh_optim(self):
