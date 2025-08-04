@@ -75,11 +75,11 @@ args.density_offset = -4
 args.weight_decay = 0.1
 args.hashmap_dim = 16
 args.percent_alpha = 0.04 # preconditioning
-args.spike_duration = 500
+args.spike_duration = 0
 args.hidden_dim = 64
 args.sh_hidden_dim = 256
 args.sh_weight_decay = 1e-5
-args.sh_lr_div = 20
+args.sh_lr_div = 1
 
 args.dg_init=0.1
 args.g_init=0.1

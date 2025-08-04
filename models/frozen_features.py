@@ -276,7 +276,7 @@ class FrozenTetOptimizer:
             lr = self.net_scheduler(iteration - self.freeze_start)
             param_group['lr'] = lr
         for param_group in self.sh_net_optim.param_groups:
-            lr = self.net_scheduler_args(iteration)
+            lr = self.net_scheduler(iteration)
             param_group['lr'] = lr/self.sh_lr_div
         for param_group in self.feature_optim.param_groups:
             lr = self.feature_scheduler(iteration - self.freeze_start)
