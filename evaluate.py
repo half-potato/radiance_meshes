@@ -22,7 +22,16 @@ args.eval = False
 args.use_ply = False
 args.render_train = False
 args.base_min_t = 0.2
-args = Args.from_namespace(args.get_parser().parse_args())
+
+parser = args.get_parser()
+args = Args.from_namespace(parser.parse_args())
+
+# if a ckpt is loaded, load config, then override config with user specified flags
+if len(str(args.output_path)) > 0: 
+    config_path = Path(args.output_path) / "config.json"
+    config = Args.load_from_json(str(config_path))
+    parser.set_defaults(**config.as_dict())
+args = Args.from_namespace(parser.parse_args())
 
 device = torch.device('cuda')
 if args.use_ply:
@@ -48,20 +57,21 @@ model.save2ply(Path('test.ply'))
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
 
-model.min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+# model.min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+min_t = args.min_t = args.base_min_t# * model.scene_scaling.item()
 
-ic(model.min_t)
+ic(min_t)
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
 else:
     splits = zip(['test'], [test_cameras])
-test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t=model.min_t)
+test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t=min_t)
 
 with torch.no_grad():
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render(camera, model, tile_size=args.tile_size, min_t=model.min_t)
+        render_pkg = render(camera, model, tile_size=args.tile_size, min_t=min_t)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()

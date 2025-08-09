@@ -204,9 +204,10 @@ def collect_render_stats(
         )
 
         # -------- Total Variance (accumulated across images) ------------------
+        # total_var_moments[update_mask, 0] += tc[update_mask]
         total_var_moments[update_mask, 0] += image_T[update_mask]
-        total_var_moments[update_mask, 1] += image_err[update_mask]
-        total_var_moments[update_mask, 2] += image_err2[update_mask]
+        total_var_moments[update_mask, 1] += image_T[update_mask] * image_err[update_mask]
+        total_var_moments[update_mask, 2] += image_T[update_mask] * image_err2[update_mask]
         # total_count += N
         total_count[update_mask] += 1
 

@@ -1,8 +1,8 @@
-dataset_path,error,gpu_id,image_folder,output_folder
-/optane/nerf_datasets/360/counter,Process failed and no JSON output file found,3,images_2,output/counter_ifimages_2_r33_noglo
-/optane/nerf_datasets/360/kitchen,Process failed and no JSON output file found,3,images_2,output/kitchen_ifimages_2_r33_noglo
-/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,3,images_4,output/bicycle_ifimages_4_r33_noglo
-/optane/nerf_datasets/360/garden,Process failed and no JSON output file found,3,images_4,output/garden_ifimages_4_r33_noglo
-/optane/nerf_datasets/360/stump,Process failed and no JSON output file found,3,images_4,output/stump_ifimages_4_r33_noglo
-/optane/nerf_datasets/360/treehill,Process failed and no JSON output file found,3,images_4,output/treehill_ifimages_4_r33_noglo
-/optane/nerf_datasets/360/flowers,Process failed and no JSON output file found,3,images_4,output/flowers_ifimages_4_r33_noglo
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/room,2,images_2,output/room_ifimages_2_r33_noglo_sphereinit_ld1e-3,32.06500916200543,0.288591593503952,30.80350112915039,0.9180541634559631
+/optane/nerf_datasets/360/bonsai,1,images_2,output/bonsai_ifimages_2_r33_noglo_sphereinit_ld1e-3,30.965427498528843,0.2525949478149414,30.577985763549805,0.9365938305854797
+/optane/nerf_datasets/360/counter,3,images_2,output/counter_ifimages_2_r33_noglo_sphereinit_ld1e-3,29.3898446184463,0.25196051597595215,28.03778648376465,0.9015414714813232
+/optane/nerf_datasets/360/kitchen,2,images_2,output/kitchen_ifimages_2_r33_noglo_sphereinit_ld1e-3,30.453023056361992,0.17032532393932343,30.277963638305664,0.9198696613311768
+/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_r33_noglo_sphereinit_ld1e-3,23.234687306811242,0.27234652638435364,24.470151901245117,0.7405747771263123
+/optane/nerf_datasets/360/garden,3,images_4,output/garden_ifimages_4_r33_noglo_sphereinit_ld1e-3,26.490455852864752,0.16210384666919708,26.230234146118164,0.8352000713348389
+/optane/nerf_datasets/360/stump,2,images_4,output/stump_ifimages_4_r33_noglo_sphereinit_ld1e-3,27.23606653363963,0.26276057958602905,26.19904327392578,0.761351466178894

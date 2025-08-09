@@ -72,8 +72,9 @@ args.log2_hashmap_size = 23
 args.per_level_scale = 2
 args.L = 6
 args.density_offset = -4
-args.weight_decay = 0.1
-args.hashmap_dim = 16
+args.weight_decay = 1e-3
+args.final_weight_decay = 1e-3
+args.hashmap_dim = 8
 args.percent_alpha = 0.04 # preconditioning
 args.spike_duration = 0
 args.hidden_dim = 64
@@ -105,9 +106,8 @@ args.fnetwork_lr = 1e-3
 args.final_fnetwork_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 1e-6
+args.lambda_dist = 1e-4
 args.lambda_density = 0.0
-args.lambda_aniso = 0.0
 args.lambda_cost = 1e-3
 
 # Clone Settings
@@ -257,6 +257,13 @@ if args.record_training:
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 
+weight_decay_fn = get_expon_lr_func(
+    lr_init=args.weight_decay,
+    lr_final=args.final_weight_decay,
+    lr_delay_mult=1e-8,
+    lr_delay_steps=0,
+    max_steps=args.freeze_start)
+
 densification_cam_buffer = []
 
 for iteration in progress_bar:
@@ -324,7 +331,7 @@ for iteration in progress_bar:
 
     l1_loss = (target - image).abs().mean()
     l2_loss = ((target - image)**2).mean()
-    reg = tet_optim.regularizer(render_pkg, args.weight_decay, args.lambda_tv)
+    reg = tet_optim.regularizer(render_pkg, weight_decay_fn(iteration), args.lambda_tv)
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg['distortion_loss']
     a = args.density_intercept
@@ -336,8 +343,6 @@ for iteration in progress_bar:
     density_loss = density[mask].mean()
     lambda_dist = args.lambda_dist if iteration > 1000 else 0
     lambda_density = lambda_dist * args.lambda_density if iteration > 1000 else 0
-    lambda_aniso = args.lambda_aniso if iteration > 1000 else 0
-    aniso_loss = model.calc_aniso_loss(render_pkg['density'])[mask].mean()
     # area = topo_utils.tet_volumes(model.vertices[model.indices])
     render_cost = (density.clip(max=2*args.density_threshold) * area.reshape(-1))[mask].mean()
     loss = (1-args.lambda_ssim)*l1_loss + \
@@ -345,7 +350,6 @@ for iteration in progress_bar:
            reg + \
            lambda_dist * dl_loss + \
            lambda_density * density_loss + \
-           lambda_aniso * aniso_loss + \
            args.lambda_cost * render_cost
 
     if args.use_bilateral_grid:

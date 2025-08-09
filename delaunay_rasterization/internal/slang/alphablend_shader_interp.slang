@@ -87,10 +87,10 @@ DistortionState5 update_distortion_state(
 {
     // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
     // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
-    //float start = (2*dist.x) / (2+dist.x);
-    //float end = (2*dist.y) / (2+dist.y);
-    float start = dist.x;
-    float end = dist.y;
+    float start = (2*dist.x) / (2+dist.x);
+    float end = (2*dist.y) / (2+dist.y);
+    //float start = dist.x;
+    //float end = dist.y;
     float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
     float d = safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
@@ -115,10 +115,10 @@ DistortionState5 undo_distortion_state(
     float density,
     float2 dist)
 {
-    //float start = (2*dist.x) / (2+dist.x);
-    //float end = (2*dist.y) / (2+dist.y);
-    float start = dist.x;
-    float end = dist.y;
+    float start = (2*dist.x) / (2+dist.x);
+    float end = (2*dist.y) / (2+dist.y);
+    //float start = dist.x;
+    //float end = dist.y;
     // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
     // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
     float scaling = 1;
@@ -509,8 +509,8 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     int32_t old_ival;
 
                     tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 1), 1 * mismatch, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 2), 1 * mismatch * mismatch, old_val);
                     T_p = 1;
                     tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(mismatch), old_val);

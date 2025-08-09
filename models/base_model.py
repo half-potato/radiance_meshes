@@ -51,19 +51,6 @@ class BaseModel(nn.Module):
         vertex_density.scatter_reduce_(dim=0, index=indices[..., 3], src=density, reduce=reduce_type)
         return vertex_density
 
-    def calc_aniso_loss(self, density):
-        verts = self.vertices
-        inds = self.indices
-        v0, v1, v2, v3 = verts[inds[:, 0]], verts[inds[:, 1]], verts[inds[:, 2]], verts[inds[:, 3]]
-        
-        edge_lengths = torch.stack([
-            torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
-            torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
-        ], dim=0)
-        alpha_min = 1 - torch.exp(-density.reshape(-1) * edge_lengths.min(dim=0)[0].reshape(-1))
-        alpha_max = 1 - torch.exp(-density.reshape(-1) * edge_lengths.max(dim=0)[0].reshape(-1))
-        return (safe_div((alpha_max-0.05).clip(min=0), alpha_min) - 1).clip(min=-10, max=10)
-
     def calc_tet_alpha(self, mode="min", density=None):
         verts = self.vertices
         inds = self.indices
