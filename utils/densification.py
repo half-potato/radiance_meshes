@@ -249,7 +249,7 @@ def apply_densification(
     s0_t, s1_t, s2_t = stats.total_var_moments.T
     total_var_mu = safe_math.safe_div(s1_t, s0_t)
     total_var_std = (safe_math.safe_div(s2_t, s0_t) - total_var_mu**2).clip(min=0)
-    total_var_std[s0_t < 1] = 0
+    total_var_std[s0_t < 1e-2] = 0
 
     within_var = stats.top_ssim.sum(dim=1) / stats.top_size.sum(dim=1).clip(min=1).sqrt()
 
@@ -257,17 +257,17 @@ def apply_densification(
     # N_b = stats.tet_view_count # Num views
     # total_var[(N_b < 2) | (s0_t < 1)] = 0
 
-    mask_alive = (stats.alphas >= args.clone_min_alpha) & (stats.density.reshape(-1) >= args.clone_min_density)
+    # mask_alive = (stats.alphas >= args.clone_min_alpha) & (stats.density.reshape(-1) >= args.clone_min_density)
 
 
-    mask_alive2 = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
+    mask_alive = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
     keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=stats.alphas.device)
     indices = model.indices.long()
     reduce_type = "sum"
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive2, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive2, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive2, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive2, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive, reduce=reduce_type)
 
 
     total_var[~mask_alive] = 0
