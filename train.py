@@ -121,6 +121,7 @@ args.budget = 2_000_000
 args.clone_min_alpha = 0.025
 args.clone_min_density = 0.025
 
+args.lambda_alpha = 0.0
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
 args.sample_cam = 1
@@ -341,11 +342,13 @@ for iteration in progress_bar:
     lambda_density = lambda_dist * args.lambda_density if iteration > 1000 else 0
     # area = topo_utils.tet_volumes(model.vertices[model.indices])
     render_cost = (density.clip(max=2*args.density_threshold) * area.reshape(-1))[mask].mean()
+    lambda_alpha = args.lambda_alpha if iteration > 1000 else 0
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
            lambda_dist * dl_loss + \
            lambda_density * density_loss + \
+           lambda_alpha * (1-render_pkg['alpha']).mean() + \
            args.lambda_cost * render_cost
 
     if args.use_bilateral_grid:

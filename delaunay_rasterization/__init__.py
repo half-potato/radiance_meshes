@@ -88,7 +88,6 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         ray_jitter)
     alpha = image_rgb.permute(2,0,1)[3, ...]
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
-    # total_density = ((1-alpha) ** 2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
 
     
