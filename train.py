@@ -71,9 +71,9 @@ args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the
 args.log2_hashmap_size = 23
 args.per_level_scale = 2
 args.L = 6
-args.density_offset = -4
-args.weight_decay = 1e-3
-args.final_weight_decay = 1e-3
+args.density_offset = -3
+args.weight_decay = 0.1
+args.final_weight_decay = 0.1
 args.hashmap_dim = 8
 args.percent_alpha = 0.04 # preconditioning
 args.spike_duration = 0
@@ -106,9 +106,10 @@ args.fnetwork_lr = 1e-3
 args.final_fnetwork_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 1e-3
+args.lambda_dist = 1e-4
 args.lambda_density = 0.0
 args.lambda_cost = 1e-3
+args.lambda_color = 0.0
 
 # Clone Settings
 args.num_samples = 200
@@ -121,7 +122,7 @@ args.budget = 2_000_000
 args.clone_min_alpha = 0.025
 args.clone_min_density = 0.025
 
-args.lambda_alpha = 0.0
+args.lambda_alpha = 1e-4
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
 args.sample_cam = 1
@@ -130,7 +131,7 @@ args.lambda_tv = 0.0
 args.contrib_threshold = 0.01
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
-args.total_thresh = 0.025
+args.total_thresh = 0.1#025
 args.within_thresh = 0.4
 args.density_intercept = 0.2
 args.voxel_size = 0.01
@@ -282,7 +283,8 @@ for iteration in progress_bar:
         st = time.time()
         dt = args.density_threshold if iteration > args.start_threshold else 0
         at = args.alpha_threshold if iteration > args.start_threshold else 0
-        tet_optim.update_triangulation(density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
+        tet_optim.update_triangulation(
+            density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
         if do_freeze and args.bake_model and not model.frozen:
             # model.save2ply(args.output_path / "ckpt_prefreeze.ply")
             sd = model.state_dict()
@@ -356,6 +358,7 @@ for iteration in progress_bar:
            lambda_dist * dl_loss + \
            lambda_density * density_loss + \
            lambda_alpha * (1-render_pkg['alpha']).mean() + \
+           args.lambda_color * (render_pkg['color']).abs().mean() + \
            args.lambda_cost * render_cost
 
     if args.use_bilateral_grid:

@@ -250,10 +250,6 @@ class iNGPDW(nn.Module):
         rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
         density = safe_exp(3*sigma+self.density_offset)
         grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
-
-        # rgb = rgb.reshape(-1, 3, 1) + 0.5
-        # density = safe_exp(sigma+self.density_offset)
-        # grd = field_samples.reshape(-1, 1, 3)
         return density, rgb.reshape(-1, 3), grd, sh
 
 class Heads(nn.Module):

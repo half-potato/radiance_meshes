@@ -99,6 +99,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         'visibility_filter': mask,
         'circumcenters': circumcenter,
         'density': cell_values[:, 0],
+        'color': cell_values[:, 1:],
         'mask': mask,
         **extras
     }
