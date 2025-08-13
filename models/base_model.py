@@ -131,7 +131,8 @@ class BaseModel(nn.Module):
                 lambda_ssim=0
             )
 
-            tc = extras["tet_count"]
+            tc = extras["tet_count"][..., 0]
+            max_T = extras["tet_count"][..., 1].float() / 65535
             
             # --- Create a single mask for valid updates ---
             # Mask for tets that have a reasonable number of samples in the current view
@@ -141,7 +142,9 @@ class BaseModel(nn.Module):
             _, image_Terr, image_ssim = image_votes[:, 2], image_votes[:, 4], image_votes[:, 5]
             N = tc
 
-            contrib = (image_T / N.clip(min=1)).reshape(-1)
+            # contrib = (image_T / N.clip(min=1)).reshape(-1)
+            # contrib = (image_T / N.clip(min=1)).reshape(-1)
+            contrib = max_T
             prev_top1 = top1
             top1 = torch.maximum(prev_top1, contrib)
             top2 = torch.maximum(top2, torch.minimum(prev_top1, contrib))
@@ -165,7 +168,8 @@ class BaseModel(nn.Module):
         # mask = (peak_contrib > contrib_threshold) | (tet_alpha > alpha_threshold) | (tet_density > density_threshold)
 
         # mask = (peak_contrib > contrib_threshold) | (tet_alpha > alpha_threshold)
-        mask = (top2.reshape(-1) > contrib_threshold) | (tet_density.reshape(-1) > density_threshold)
+        mask = (top1.reshape(-1) > contrib_threshold) | (tet_density.reshape(-1) > density_threshold)
+        ic(top1.mean(), tet_density.mean(), mask.sum())
         # mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
 
         rgb = rgb[mask].detach()
@@ -200,7 +204,7 @@ class BaseModel(nn.Module):
             self.indices[mask].cpu().numpy())
         for i, mesh in enumerate(meshes):
             F = mesh['face']['vertex_indices'].shape[0]
-            if F > 100:
+            if F > 1:
                 mpath = path / f"{i}.ply"
                 print(f"Saving #F:{F} to {mpath}")
                 tinyplypy.write_ply(str(mpath), mesh, is_binary=False)

@@ -248,7 +248,7 @@ class iNGPDW(nn.Module):
         sh  = self.sh_net(hglo)
 
         rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
-        density = safe_exp(sigma+self.density_offset)
+        density = safe_exp(3*sigma+self.density_offset)
         grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
 
         # rgb = rgb.reshape(-1, 3, 1) + 0.5
@@ -322,7 +322,7 @@ class Heads(nn.Module):
 
         # rgb = rgb.reshape(-1, 3, 1) + 0.5
         rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
-        density = safe_exp(sigma+self.density_offset)
+        density = safe_exp(3*sigma+self.density_offset)
         grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
         # grd = field_samples.reshape(-1, 1, 3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)

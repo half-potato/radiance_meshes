@@ -532,7 +532,9 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 14), w * centroid.y, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 15), w * centroid.z, old_val);
 
-                    tet_count.InterlockedAdd(g_idx, 1, old_ival);
+                    tet_count.InterlockedAdd(uint2(g_idx, 0), 1, old_ival);
+                    int T_int = (65535 * T);
+                    tet_count.InterlockedMax(uint2(g_idx, 1), T_int, old_ival);
 
                     ao = new_ao;
                     if (new_ao.rgba.a < 1 / 255.f) {

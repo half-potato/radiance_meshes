@@ -118,10 +118,12 @@ def determine_cull_mask(
             glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
-        tc = extras["tet_count"]
+        tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
-        peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        peak_contrib = torch.maximum(max_T, peak_contrib)
 
     tet_density = model.calc_tet_density()
     alphas = model.calc_tet_alpha(mode="min", density=tet_density)
@@ -161,7 +163,8 @@ def collect_render_stats(
             glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
-        tc = extras["tet_count"]
+        tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
         
         update_mask = (tc >= args.min_tet_count) & (tc < 8000)
 
@@ -169,7 +172,8 @@ def collect_render_stats(
         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         total_err += image_Terr
-        peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        peak_contrib = torch.maximum(max_T, peak_contrib)
 
         # ray buffer: (enter | exit) → (N, 6)
         w = image_votes[:, 12:13]
