@@ -106,7 +106,7 @@ args.fnetwork_lr = 1e-3
 args.final_fnetwork_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 1e-4
+args.lambda_dist = 1e-3
 args.lambda_density = 0.0
 args.lambda_cost = 1e-3
 
@@ -143,6 +143,9 @@ args.bilateral_grid_lr = 0.003
 args.lambda_tv_grid = 0.0
 args.record_training = False
 args.checkpoint_iterations = []
+
+args.ablate_gradient = False
+args.ablate_circumsphere = False
 
 parser = args.get_parser()
 args = Args.from_namespace(parser.parse_args())

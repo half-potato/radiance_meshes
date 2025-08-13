@@ -1,15 +1,4 @@
 dataset_path,image_folder
-<<<<<<< Updated upstream
-/optane/nerf_datasets/360/bonsai,images_2
-/optane/nerf_datasets/360/room,images_2
-/optane/nerf_datasets/360/counter,images_2
-/optane/nerf_datasets/360/kitchen,images_2
-/optane/nerf_datasets/360/bicycle,images_4
-/optane/nerf_datasets/360/garden,images_4
-/optane/nerf_datasets/360/stump,images_4
-/optane/nerf_datasets/360/treehill,images_4
-/optane/nerf_datasets/360/flowers,images_4
-=======
 /data/nerf_datasets/360/bonsai,images_2
 /data/nerf_datasets/360/room,images_2
 /data/nerf_datasets/360/counter,images_2
@@ -19,4 +8,3 @@ dataset_path,image_folder
 /data/nerf_datasets/360/stump,images_4
 /data/nerf_datasets/360/treehill,images_4
 /data/nerf_datasets/360/flowers,images_4
->>>>>>> Stashed changes

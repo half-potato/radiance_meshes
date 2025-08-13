@@ -1,17 +1,11 @@
 import torch
 from torch import nn
 from utils import hashgrid
-import math
 
-from utils.graphics_utils import l2_normalize_th
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
+from utils.topo_utils import calculate_circumcenters_torch
 from utils.safe_math import safe_exp, safe_div, safe_sqrt
-from utils.contraction import contract_mean_std
-from utils.contraction import contract_points, inv_contract_points
-# from sh_slang.eval_sh_py import eval_sh
-from utils.hashgrid import HashEmbedderOptimized
 from icecream import ic
-import torch.nn.init as init # Common alias for torch.nn.init
+import math
 
 C0 = 0.28209479177387814
 def RGB2SH(rgb):
@@ -174,6 +168,7 @@ class iNGPDW(nn.Module):
                  d_init=0.1,
                  c_init=0.6,
                  density_offset=-4,
+                 ablate_gradient = False,
                  **kwargs):
         super().__init__()
         self.scale_multi = scale_multi
@@ -182,6 +177,9 @@ class iNGPDW(nn.Module):
         self.per_level_scale = per_level_scale
         self.base_resolution = base_resolution
         self.density_offset = density_offset
+
+        # self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
+        self.gmul = 1 if not ablate_gradient else 0
 
         self.encoding = hashgrid.HashEmbedderOptimized(
             [torch.zeros((3)), torch.ones((3))],
@@ -249,9 +247,13 @@ class iNGPDW(nn.Module):
         field_samples = self.gradient_net(hglo)
         sh  = self.sh_net(hglo)
 
-        rgb = rgb.reshape(-1, 3, 1) + 0.5
+        rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
         density = safe_exp(sigma+self.density_offset)
-        grd = field_samples.reshape(-1, 1, 3)
+        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
+
+        # rgb = rgb.reshape(-1, 3, 1) + 0.5
+        # density = safe_exp(sigma+self.density_offset)
+        # grd = field_samples.reshape(-1, 1, 3)
         return density, rgb.reshape(-1, 3), grd, sh
 
 class Heads(nn.Module):
@@ -272,6 +274,7 @@ class Heads(nn.Module):
                  d_init=0.1,
                  c_init=0.6,
                  density_offset=-4,
+                 ablate_gradient = False,
                  **kwargs):
         super().__init__()
         self.scale_multi = scale_multi
@@ -280,6 +283,8 @@ class Heads(nn.Module):
         self.per_level_scale = per_level_scale
         self.base_resolution = base_resolution
         self.density_offset = density_offset
+
+        self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
 
         def mk_head(n, hidden_dim):
             network = nn.Sequential(
@@ -315,9 +320,10 @@ class Heads(nn.Module):
         field_samples = self.gradient_net(hglo)
         sh  = self.sh_net(hglo)
 
-        rgb = rgb.reshape(-1, 3, 1) + 0.5
+        # rgb = rgb.reshape(-1, 3, 1) + 0.5
+        rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
         density = safe_exp(sigma+self.density_offset)
-        # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
-        grd = field_samples.reshape(-1, 1, 3)
+        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
+        # grd = field_samples.reshape(-1, 1, 3)
         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
         return density, rgb.reshape(-1, 3), grd, sh

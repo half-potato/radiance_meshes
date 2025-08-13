@@ -31,7 +31,7 @@ def generate_folder_name(test_params, args, base_dir="output"):
     parts = []
     # Iterate in the order provided by test_params (csv.DictReader preserves header order)
     for key, value in test_params.items():
-        if key in blacklist:
+        if key in blacklist or len(key.strip()) == 0:
             continue
         if key == "dataset_path":
             initials = key
@@ -64,7 +64,7 @@ def run_test(test_params, gpu_id, args):
     # Build command-line arguments. Override any CSV-specified output_path with our unique folder.
     cmd_args = []
     for arg, value in test_params.items():
-        if arg == "output_path":
+        if arg == "output_path" or len(arg.strip()) == 0:
             continue
         cmd_args.append(f"--{arg} {value}")
     cmd_args.append(f"--output_path {output_folder}")
@@ -160,7 +160,20 @@ def main():
     tests = []
     try:
         with open(args.queue_csv, newline='') as f:
-            reader = csv.DictReader(f)
+            # Sniff the first line to detect the CSV dialect (including the separator).
+            try:
+                dialect = csv.Sniffer().sniff(f.readline())
+            except csv.Error:
+                # If sniffing fails (e.g., on an empty file), default to comma.
+                dialect = 'excel' # 'excel' is the standard comma-separated dialect.
+                print(f"Warning: Could not detect separator for {args.queue_csv}. Defaulting to comma.")
+
+            # Rewind the file to the beginning so the header is read correctly.
+            f.seek(0)
+            
+            # Use the detected dialect to create the reader.
+            reader = csv.DictReader(f, dialect=dialect)
+            
             for row in reader:
                 tests.append(row)
     except FileNotFoundError:

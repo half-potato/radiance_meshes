@@ -34,6 +34,7 @@ class Model(BaseModel):
                  current_sh_deg=2,
                  max_sh_deg=2,
                  glo_dim=0,
+                 ablate_circumsphere=False,
                  **kwargs):
         super().__init__()
         self.device = vertices.device
@@ -50,6 +51,7 @@ class Model(BaseModel):
         self.linear = False
         self.feature_dim = 7
         self.current_sh_deg = current_sh_deg
+        self.ablate_circumsphere = ablate_circumsphere
 
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
@@ -77,9 +79,9 @@ class Model(BaseModel):
         cam_center = camera.camera_center.to(self.device)
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
+            tets = vertices[indices[start:end]]
             circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
                 vertices, indices, start, end, circumcenters=all_circumcenters, glo=glo)
-            tets = vertices[indices[start:end]]
             tet_color_raw = eval_sh(
                 tets.mean(dim=1).detach(),
                 RGB2SH(rgb),
@@ -126,6 +128,8 @@ class Model(BaseModel):
             circumcenter, radius = topo_utils.calculate_circumcenters_torch(tets.double())
         else:
             circumcenter = circumcenters[start:end]
+        if self.ablate_circumsphere:
+            circumcenter = tets.mean(dim=1)
         normalized = (circumcenter - self.center) / self.scene_scaling
         radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)

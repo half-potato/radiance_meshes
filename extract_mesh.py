@@ -1,16 +1,8 @@
-from utils.train_util import render
-import pickle
 import torch
-from tqdm import tqdm
 from pathlib import Path
-import imageio
-import numpy as np
 from data import loader
-from utils import test_util
 from utils.args import Args
-from utils import cam_util
-import mediapy
-from icecream import ic
+from models.ingp_color import Model, TetOptimizer
 
 args = Args()
 args.tile_size = 16
@@ -22,17 +14,18 @@ args.use_ply = False
 args.contrib_threshold = 0.1
 args.density_threshold = 0.5
 args.alpha_threshold = 0.5
+args.freeze_features = True
 args = Args.from_namespace(args.get_parser().parse_args())
 
 device = torch.device('cuda')
-if args.use_ply:
-    # from models.tet_color import Model
-    from models.frozen import FrozenTetModel as Model
-    model = Model.load_ply(args.output_path / "ckpt.ply", device)
-else:
-    # from models.ingp_color import Model
-    from models.frozen import FrozenTetModel as Model
-    model = Model.load_ckpt(args.output_path, device)
+try:
+    model = Model.load_ckpt(args.output_path, device, args)
+except:
+    if args.freeze_features:
+        from models.frozen_features import FrozenTetModel, FrozenTetOptimizer
+    else:
+        from models.frozen import FrozenTetModel, FrozenTetOptimizer
+    model = FrozenTetModel.load_ckpt(args.output_path, device)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=False)
