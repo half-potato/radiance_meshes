@@ -1,5 +1,9 @@
-dataset_path,error,gpu_id,image_folder,output_folder
-/data/nerf_datasets/360/room,Process failed and no JSON output file found,2,images_2,output/room_ifimages_2_r35
-/data/nerf_datasets/360/bonsai,Process failed and no JSON output file found,1,images_2,output/bonsai_ifimages_2_r35
-/data/nerf_datasets/360/counter,Process failed and no JSON output file found,3,images_2,output/counter_ifimages_2_r35
-/data/nerf_datasets/360/kitchen,Process failed and no JSON output file found,2,images_2,output/kitchen_ifimages_2_r35
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/room,2,images_2,output/room_ifimages_2_r35,31.985999345554553,0.27635231614112854,30.518138885498047,0.9196755886077881
+/optane/nerf_datasets/360/bonsai,1,images_2,output/bonsai_ifimages_2_r35,31.581861982109945,0.23852047324180603,31.409875869750977,0.9399656057357788
+/optane/nerf_datasets/360/counter,3,images_2,output/counter_ifimages_2_r35,29.86823941394262,0.24146167933940887,28.605398178100586,0.9067503213882446
+/optane/nerf_datasets/360/kitchen,2,images_2,output/kitchen_ifimages_2_r35,30.937013587585568,0.162947416305542,30.85824203491211,0.9229461550712585
+/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_r35,23.51089445834694,0.2712860107421875,24.5947322845459,0.7437111735343933
+/optane/nerf_datasets/360/garden,3,images_4,output/garden_ifimages_4_r35,26.871908562469365,0.15344926714897156,26.574533462524414,0.84342360496521
+/optane/nerf_datasets/360/stump,2,images_4,output/stump_ifimages_4_r35,28.469599603557104,0.26043757796287537,26.26755714416504,0.7628135681152344
+/optane/nerf_datasets/360/treehill,1,images_4,output/treehill_ifimages_4_r35,22.232294842319227,0.35914137959480286,22.226539611816406,0.6269229650497437
