@@ -161,7 +161,7 @@ class FrozenTetModel(BaseModel):
             sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
             cam_center,
             self.max_sh_deg).float()
-        cell_output = activate_output(cam_center, tet_color_raw,
+        cell_output = activate_output(tet_color_raw,
             density, grd,
             all_circumcenters,
             tets)

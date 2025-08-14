@@ -88,7 +88,7 @@ class Model(BaseModel):
                 sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
                 cam_center,
                 self.current_sh_deg).float()
-            dvrgbs = activate_output(cam_center, tet_color_raw,
+            dvrgbs = activate_output(tet_color_raw,
                                      density, grd,
                                      circumcenters,
                                      tets)
@@ -338,13 +338,13 @@ class TetOptimizer:
             )
             return [a, b]
         glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
-        self.sh_lr_div = sh_lr_div
         self.net_optim = SingleDeviceMuonWithAuxAdam(
             process(model.backbone.density_net, network_lr) + \
             process(model.backbone.color_net, network_lr) + \
             process(model.backbone.gradient_net, network_lr) + \
             glo_p
         )
+        self.sh_lr_div = sh_lr_div
         self.sh_net_optim = SingleDeviceMuonWithAuxAdam(
             process(model.backbone.sh_net, network_lr/self.sh_lr_div, weight_decay=sh_weight_decay)
         )

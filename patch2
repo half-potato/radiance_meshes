@@ -1,0 +1,3650 @@
+diff --git a/utils/model_util.py b/utils/model_util.py
+index 405d326..b4e38e4 100644
+--- a/utils/model_util.py
++++ b/utils/model_util.py
+@@ -1,17 +1,11 @@
+ import torch
+ from torch import nn
+ from utils import hashgrid
+-import math
+ 
+-from utils.graphics_utils import l2_normalize_th
+-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
++from utils.topo_utils import calculate_circumcenters_torch
+ from utils.safe_math import safe_exp, safe_div, safe_sqrt
+-from utils.contraction import contract_mean_std
+-from utils.contraction import contract_points, inv_contract_points
+-from sh_slang.eval_sh_py import eval_sh
+-from utils.hashgrid import HashEmbedderOptimized
+ from icecream import ic
+-import torch.nn.init as init # Common alias for torch.nn.init
++import math
+ 
+ C0 = 0.28209479177387814
+ def RGB2SH(rgb):
+@@ -105,24 +99,15 @@ def compute_vertex_colors_from_field(
+       color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
+     """
+     offsets = element_verts - circumcenters[:, None, :]
+-
+-    # grad_contrib: (T, V, C)
+-    # gradients: (T, C, D) = (T, 3, 3)
+-    # normalized_offsets: (T, V, D) = (T, 4, 3)
+-    # einsum: 'tcd,tvd->tvc'
+-    # t: batch (Elements)
+-    # c: color channels (of gradient)
+-    # d: spatial dimensions (of gradient and offset)
+-    # v: vertices
+-    # Output: for each element, for each vertex, for each color channel
+     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
+     vertex_colors = base[:, None, :] + grad_contrib 
+     
+     return vertex_colors
+ 
+ def offset_normalize(rgb, grd, circumcenters, tets):
+-    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
+-    radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
++    # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
++    grd = grd.reshape(-1, 1, 3)# * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
++    radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
+     normed_grd = safe_div(grd, radius)
+     vcolors = compute_vertex_colors_from_field(
+         tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
+@@ -130,34 +115,60 @@ def offset_normalize(rgb, grd, circumcenters, tets):
+     base_color_v0_raw = vcolors[:, 0]
+     return base_color_v0_raw, normed_grd
+ 
+-def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg):
+-    tets = vertices[indices]
+-    base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
+-    tet_color_raw = eval_sh(
+-        tets.mean(dim=1),
+-        RGB2SH(base_color_v0_raw),
+-        sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3).half(),
+-        camera_center,
+-        current_sh_deg).float()
+-    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+-    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
++@torch.jit.script
++def activate_output(camera_center, tet_color_raw, density, grd, circumcenters, tets):
++    tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
++    base_color_v0, normed_grd = offset_normalize(
++        tet_color, grd, circumcenters.detach(), tets.detach())
++    # offset = ((camera_center - tets[:, 0]) * normed_grd.reshape(-1, 3)).sum(dim=-1)
++    features = torch.cat([
++        density,
++        base_color_v0.reshape(-1, 3),# + offset.reshape(-1, 1),
++        normed_grd.reshape(-1, 3)
++    ], dim=1)
+     return features.float()
+ 
++class GloMLP(torch.nn.Module):
++    def __init__(self, input_dim: int, output_dim: int):
++        super().__init__()
++        self.mlp = torch.nn.Sequential(
++            torch.nn.Linear(input_dim, 128),
++            torch.nn.SiLU(),
++            torch.nn.Linear(128, 256),
++            torch.nn.SiLU(),
++            torch.nn.Linear(256, 128),
++            torch.nn.SiLU(),
++            torch.nn.Linear(128, output_dim*2),
++        )
++        last = self.mlp[-1]
++        with torch.no_grad():
++            nn.init.xavier_uniform_(last.weight, 1e-3)
++            last.bias.zero_()
++
++    def forward(self, glo_latent, input_x):
++        out = self.mlp(glo_latent)
++        a, b = torch.split(out, out.shape[-1] // 2, dim=-1)
++        return input_x * torch.exp(a.clip(max=3)).reshape(1, -1) + b.reshape(1, -1)
++
++
+ class iNGPDW(nn.Module):
+     def __init__(self, 
+                  sh_dim=0,
++                 glo_dim=0,
+                  scale_multi=0.5,
+                  log2_hashmap_size=16,
+                  base_resolution=16,
+                  per_level_scale=2,
+                  L=10,
+                  hashmap_dim=4,
++                 sh_hidden_dim=64,
+                  hidden_dim=64,
+                  g_init=1,
+                  s_init=1e-4,
+                  d_init=0.1,
+                  c_init=0.6,
+                  density_offset=-4,
++                 ablate_gradient = False,
+                  **kwargs):
+         super().__init__()
+         self.scale_multi = scale_multi
+@@ -167,45 +178,51 @@ class iNGPDW(nn.Module):
+         self.base_resolution = base_resolution
+         self.density_offset = density_offset
+ 
++        # self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
++        self.gmul = 1 if not ablate_gradient else 0
++
+         self.encoding = hashgrid.HashEmbedderOptimized(
+             [torch.zeros((3)), torch.ones((3))],
+             self.L, n_features_per_level=self.dim,
+             log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
+             finest_resolution=base_resolution*per_level_scale**self.L)
+ 
+-        def mk_head(n):
++        self.n_output_dims = self.encoding.n_output_dims
++
++        def mk_head(n, hidden_dim):
+             network = nn.Sequential(
+-                nn.Linear(self.encoding.n_output_dims, hidden_dim),
++                nn.Linear(self.n_output_dims, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
+                 nn.SELU(inplace=True),
+                 nn.Linear(hidden_dim, hidden_dim),
+                 nn.SELU(inplace=True),
+                 nn.Linear(hidden_dim, n)
+             )
+-            gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
++            gain = nn.init.calculate_gain('relu')
+             network.apply(lambda m: init_linear(m, gain))
+             return network
+-        self.network = mk_head(1+12+sh_dim)
++        self.hidden_dim = hidden_dim
++        self.sh_hidden_dim = sh_hidden_dim
+ 
+-        self.density_net   = mk_head(1)
+-        self.color_net     = mk_head(3)
+-        self.gradient_net  = mk_head(3)
+-        self.sh_net        = mk_head(sh_dim)
++        self.density_net   = mk_head(1, hidden_dim)
++        self.color_net     = mk_head(3, hidden_dim)
++        self.gradient_net  = mk_head(3, hidden_dim)
++        self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
++        self.glo_net = GloMLP(glo_dim, self.n_output_dims)
++        self.glo_dim = glo_dim
+ 
+-        last = self.network[-1]
+         with torch.no_grad():
+-            last.weight[4:, :].zero_()
+-            last.bias[4:].zero_()
+             for network, eps in zip(
+                 [self.gradient_net, self.sh_net, self.density_net, self.color_net], 
+                 [g_init, s_init, d_init, c_init]):
+                 last = network[-1]
+                 with torch.no_grad():
+-                    init.uniform_(last.weight.data, a=-eps, b=eps)
+-                    # nn.init.xavier_uniform_(m.weight, gain)
++                    # init.uniform_(last.weight.data, a=-eps, b=eps)
++                    nn.init.xavier_uniform_(last.weight, eps)
+                     last.bias.zero_()
+ 
+-
+-    def _encode(self, x: torch.Tensor, cr: torch.Tensor):
++    def encode(self, x: torch.Tensor, cr: torch.Tensor):
+         x = x.detach()
+         output = self.encoding(x).float()
+         output = output.reshape(-1, self.dim, self.L)
+@@ -215,21 +232,97 @@ class iNGPDW(nn.Module):
+                          safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
+         scaling = torch.erf(erf_x)
+         output = output * scaling
+-        return output
++        return output.reshape(-1, self.L * self.dim)
++
+ 
++    def forward(self, x, cr, glo):
++        h = self.encode(x, cr)
++
++        sigma = self.density_net(h)
++        if glo is not None:
++            hglo = self.glo_net(glo, h)
++        else:
++            hglo = h
++        rgb = self.color_net(hglo)
++        field_samples = self.gradient_net(hglo)
++        sh  = self.sh_net(hglo)
++
++        rgb = rgb.reshape(-1, 3, 1) + 0.5
++        # rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
++        density = safe_exp(3*sigma+self.density_offset)
++        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
++        # grd = field_samples.reshape(-1, 1, 3)
++        # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
++        return density, rgb.reshape(-1, 3), grd, sh
++
++class Heads(nn.Module):
++    def __init__(self, 
++                 n_output_dims,
++                 sh_dim,
++                 glo_dim=0,
++                 scale_multi=0.5,
++                 log2_hashmap_size=16,
++                 base_resolution=16,
++                 per_level_scale=2,
++                 L=10,
++                 hashmap_dim=4,
++                 sh_hidden_dim=64,
++                 hidden_dim=64,
++                 g_init=1,
++                 s_init=1e-4,
++                 d_init=0.1,
++                 c_init=0.6,
++                 density_offset=-4,
++                 ablate_gradient = False,
++                 **kwargs):
++        super().__init__()
++        self.scale_multi = scale_multi
++        self.L = L
++        self.dim = hashmap_dim
++        self.per_level_scale = per_level_scale
++        self.base_resolution = base_resolution
++        self.density_offset = density_offset
+ 
+-    def forward(self, x, cr):
+-        output = self._encode(x, cr)
++        self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
+ 
+-        h = output.reshape(-1, self.L * self.dim)
++        def mk_head(n, hidden_dim):
++            network = nn.Sequential(
++                nn.Linear(n_output_dims, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, n)
++            )
++            gain = nn.init.calculate_gain('relu')
++            network.apply(lambda m: init_linear(m, gain))
++            return network
+ 
++        self.hidden_dim = hidden_dim
++        self.sh_hidden_dim = sh_hidden_dim
++        self.density_net   = mk_head(1, hidden_dim)
++        self.color_net     = mk_head(3, hidden_dim)
++        self.gradient_net  = mk_head(3, hidden_dim)
++        self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
++        self.glo_net = GloMLP(glo_dim, n_output_dims)
++        self.glo_dim = glo_dim
++
++    def forward(self, h, glo):
++        h = h.float()
+         sigma = self.density_net(h)
+-        rgb = self.color_net(h)
+-        field_samples = self.gradient_net(h)
+-        sh  = self.sh_net(h).half()
++        if glo is not None:
++            hglo = self.glo_net(glo, h)
++        else:
++            hglo = h
++        rgb = self.color_net(hglo)
++        field_samples = self.gradient_net(hglo)
++        sh  = self.sh_net(hglo)
+ 
+         rgb = rgb.reshape(-1, 3, 1) + 0.5
+-        density = safe_exp(sigma+self.density_offset)
+-        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
++        # rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
++        density = safe_exp(3*sigma+self.density_offset)
++        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
++        # grd = field_samples.reshape(-1, 1, 3)
+         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
+         return density, rgb.reshape(-1, 3), grd, sh
+diff --git a/models/frozen.py b/models/frozen.py
+index 70e961c..21426b6 100644
+--- a/models/frozen.py
++++ b/models/frozen.py
+@@ -18,6 +18,7 @@ from utils.train_util import get_expon_lr_func, SpikingLR
+ from utils import mesh_util
+ from utils.args import Args
+ from models.base_model import BaseModel
++from sh_slang.eval_sh import eval_sh
+ 
+ 
+ class FrozenTetModel(BaseModel):
+@@ -36,7 +37,6 @@ class FrozenTetModel(BaseModel):
+     def __init__(
+         self,
+         int_vertices: torch.Tensor,          # (N_int, 3)
+-        ext_vertices: torch.Tensor,          # (N_ext, 3)
+         indices: torch.Tensor,               # (T, 4)
+         density: torch.Tensor,               # (T, 1)
+         rgb: torch.Tensor,                   # (T, 3)
+@@ -45,7 +45,6 @@ class FrozenTetModel(BaseModel):
+         center: torch.Tensor,                # (1, 3)
+         scene_scaling: torch.Tensor | float,
+         *,
+-        density_offset: float = -1.0,
+         max_sh_deg: int = 2,
+         chunk_size: int = 408_576,
+         **kwargs
+@@ -54,7 +53,6 @@ class FrozenTetModel(BaseModel):
+ 
+         # geometry ----------------------------------------------------------------
+         self.register_buffer("interior_vertices", int_vertices)          # immutable
+-        self.register_buffer("ext_vertices", ext_vertices)
+         self.register_buffer("indices", indices.int())
+         self.register_buffer("center", center.reshape(1, 3))
+         self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
+@@ -62,13 +60,12 @@ class FrozenTetModel(BaseModel):
+         # learnable per‑tet parameters -------------------------------------------
+         # self.density   = nn.Parameter(safe_log(density))    # (T, 1)
+         # self.gradient  = nn.Parameter(torch.atanh(gradient.clip(min=-0.99, max=0.99)))   # (T, 3, 3)
+-        self.density   = nn.Parameter(density)    # (T, 1)
+-        self.gradient  = nn.Parameter(gradient)   # (T, 3, 3)
+-        self.rgb       = nn.Parameter(rgb)        # (T, 3)
+-        self.sh        = nn.Parameter(sh.half())         # (T, SH, 3)
++        self.density   = nn.Parameter(density, requires_grad=True)    # (T, 1)
++        self.gradient  = nn.Parameter(gradient, requires_grad=True)   # (T, 3, 3)
++        self.rgb       = nn.Parameter(rgb, requires_grad=True)        # (T, 3)
++        self.sh        = nn.Parameter(sh, requires_grad=True)         # (T, SH, 3)
+ 
+         # misc --------------------------------------------------------------------
+-        self.density_offset  = density_offset
+         self.max_sh_deg      = max_sh_deg
+         self.chunk_size      = chunk_size
+         self.device          = self.density.device
+@@ -101,7 +98,6 @@ class FrozenTetModel(BaseModel):
+         
+         # Extract required parameters from checkpoint
+         int_vertices = ckpt['interior_vertices']
+-        ext_vertices = ckpt['ext_vertices']
+         indices = ckpt['indices']
+         density = ckpt['density']
+         rgb = ckpt['rgb']
+@@ -115,7 +111,6 @@ class FrozenTetModel(BaseModel):
+         # Create model instance
+         model = FrozenTetModel(
+             int_vertices=int_vertices.to(device),
+-            ext_vertices=ext_vertices.to(device),
+             indices=indices.to(device),
+             density=density.to(device),
+             rgb=rgb.to(device),
+@@ -123,7 +118,6 @@ class FrozenTetModel(BaseModel):
+             sh=sh.to(device),
+             center=center.to(device),
+             scene_scaling=scene_scaling.to(device),
+-            density_offset=config.density_offset,
+             max_sh_deg=config.max_sh_deg,
+             chunk_size=config.chunk_size if hasattr(config, 'chunk_size') else 408_576,
+         )
+@@ -134,78 +128,45 @@ class FrozenTetModel(BaseModel):
+         
+         return model
+ 
+-    # ------------------------------------------------------------------
+-    # convenience properties
+-    # ------------------------------------------------------------------
+     @property
+     def vertices(self) -> torch.Tensor:
+         """Concatenated vertex tensor (internal + exterior)."""
+-        return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
+-
+-
+-    # ------------------------------------------------------------------
+-    # core helper (network‑free)
+-    # ------------------------------------------------------------------
+-    def compute_batch_features(
+-        self,
+-        vertices: torch.Tensor,
+-        indices: torch.Tensor,
+-        mask: Optional[torch.Tensor] = None,
+-        circumcenters: Optional[torch.Tensor] = None,
+-    ):
+-        if circumcenters is None:
+-            circumcenter = pre_calc_cell_values(
+-                vertices, indices
+-            )
+-        else:
+-            circumcenter = circumcenters
+-        normalized = (circumcenter - self.center) / self.scene_scaling
+-
+-        if mask is not None:
+-            density  = self.density[mask]
+-            grd      = self.gradient[mask]
+-            rgb      = self.rgb[mask]
+-            sh       = self.sh[mask]
+-        else:
+-            density  = self.density
+-            grd      = self.gradient
+-            rgb      = self.rgb
+-            sh       = self.sh
++        return self.interior_vertices
+ 
+-        return circumcenter, normalized, density, rgb, grd, sh
+ 
+-    def compute_features(self, offset=False):
++    def compute_features(self):
+         vertices = self.vertices
+         indices = self.indices
+-        circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
+         tets = vertices[indices]
+-        if offset:
+-            base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
+-            return circumcenters, density, base_color_v0_raw, normed_grd, sh
+-        else:
+-            return circumcenters, density, rgb, grd, sh
++        circumcenters, radius = calculate_circumcenters_torch(tets.double())
++        return circumcenters, self.density, self.rgb, safe_div(self.gradient, radius.reshape(-1, 1, 1)), self.sh
+ 
+-    # ------------------------------------------------------------------
+-    # public renderer interface
+-    # ------------------------------------------------------------------
+-    def get_cell_values(
+-        self,
+-        camera: Camera,
+-        mask: Optional[torch.Tensor] = None,
+-        all_circumcenters: Optional[torch.Tensor] = None,
+-        radii: Optional[torch.Tensor] = None,
+-    ):
++    def get_cell_values(self, camera: Camera, mask=None,
++                        all_circumcenters=None, glo=None):
++        cam_center = camera.camera_center.to(self.device)
+         indices = self.indices[mask] if mask is not None else self.indices
+         vertices = self.vertices
+-        cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
+-            vertices, indices, mask, circumcenters=all_circumcenters
+-        )
+-        cell_output = activate_output(
+-            camera.camera_center.to(self.device),
+-            density, rgb, grd, sh, indices,
+-            cc, vertices,
+-            self.max_sh_deg, self.max_sh_deg,
+-        )
++        tets = vertices[indices]
++        if all_circumcenters is None:
++            all_circumcenters, radius = calculate_circumcenters_torch(tets.double())
++
++        rgb = self.rgb if mask is None else self.rgb[mask]
++        density = self.density if mask is None else self.density[mask]
++        grd = self.gradient if mask is None else self.gradient[mask]
++        sh = self.sh if mask is None else self.sh[mask]
++
++        tet_color_raw = eval_sh(
++            tets.mean(dim=1).detach(),
++            RGB2SH(rgb),
++            sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
++            cam_center,
++            self.max_sh_deg).float()
++        cell_output = activate_output(cam_center, tet_color_raw,
++            density, grd,
++            all_circumcenters,
++            tets)
++
++        normalized = (all_circumcenters - self.center) / self.scene_scaling
+         return normalized, cell_output
+ 
+     # ------------------------------------------------------------------
+@@ -218,69 +179,15 @@ class FrozenTetModel(BaseModel):
+     def num_int_verts(self):
+         return self.interior_vertices.shape[0]
+ 
++    def sh_up(self):
++        pass
++
+     def calc_tet_density(self):
+         densities = []
+         verts = self.vertices
+         _, _, densities, _, _, _ = self.compute_batch_features(verts, self.indices)
+         return densities.reshape(-1)
+ 
+-
+-# =============================================================================
+-# 2.  BAKING UTILITY                                                         |
+-# =============================================================================
+-
+-@torch.no_grad()
+-def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_576) -> FrozenTetModel:
+-    """Convert an existing neural‑field `Model` into a parameter‑only
+-    `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
+-    network and stored explicitly so that no backbone is needed afterwards."""
+-    device = base_model.device
+-
+-    vertices_full = base_model.vertices.detach() if detach else base_model.vertices
+-    int_vertices  = vertices_full[: base_model.num_int_verts]
+-    ext_vertices  = base_model.ext_vertices.detach() if detach else base_model.ext_vertices
+-    indices       = base_model.indices.detach() if detach else base_model.indices
+-
+-    d_list, rgb_list, grd_list, sh_list = [], [], [], []
+-    for start in range(0, indices.shape[0], chunk_size):
+-        end = min(start + chunk_size, indices.shape[0])
+-        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
+-            vertices_full, indices, start, end
+-        )
+-        d_list.append(density)
+-        rgb_list.append(rgb)
+-        grd_list.append(grd)
+-        sh_list.append(sh)
+-
+-    density  = torch.cat(d_list, 0)
+-    rgb      = torch.cat(rgb_list, 0)
+-    gradient = torch.cat(grd_list, 0)
+-    sh       = torch.cat(sh_list, 0)
+-
+-    if detach:
+-        density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
+-
+-    return FrozenTetModel(
+-        int_vertices=int_vertices.to(device),
+-        ext_vertices=ext_vertices.to(device),
+-        indices=indices.to(device),
+-        density=density.to(device),
+-        rgb=rgb.to(device),
+-        gradient=gradient.to(device),
+-        sh=sh.to(device),
+-        center=base_model.center.detach().to(device),
+-        scene_scaling=base_model.scene_scaling.detach().to(device),
+-        density_offset=base_model.density_offset,
+-        current_sh_deg=base_model.current_sh_deg,
+-        max_sh_deg=base_model.max_sh_deg,
+-        chunk_size=chunk_size,
+-    )
+-
+-
+-# =============================================================================
+-# 3.  OPTIMISER FOR FROZEN MODEL                                             |
+-# =============================================================================
+-
+ class FrozenTetOptimizer:
+     """Lightweight optimiser tailored to `FrozenTetModel`.
+ 
+@@ -312,15 +219,16 @@ class FrozenTetOptimizer:
+         # ------------------------------------------------------------------
+         # single optimiser with four parameter groups
+         # ------------------------------------------------------------------
+-        self.optim = torch.optim.RMSprop([
+-        # self.optim = torch.optim.Adam([
++        # self.optim = torch.optim.RMSprop([
++        self.optim = torch.optim.Adam([
+             {"params": [model.density],  "lr": freeze_lr,  "name": "density"},
+             {"params": [model.rgb],      "lr": freeze_lr,    "name": "color"},
+             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
+         ])
+-        self.sh_optim = torch.optim.RMSprop([
+-            {"params": [model.sh],       "lr": freeze_lr,       "name": "sh"},
+-        ], eps=1e-4)
++        # self.sh_optim = torch.optim.RMSprop([
++        self.sh_optim = torch.optim.Adam([
++            {"params": [model.sh],       "lr": freeze_lr / 20,       "name": "sh"},
++        ])#, eps=1e-6)
+         self.freeze_start = freeze_start
+         self.scheduler = get_expon_lr_func(lr_init=freeze_lr,
+                                            lr_final=final_freeze_lr,
+@@ -332,22 +240,15 @@ class FrozenTetOptimizer:
+         self.net_optim   = self.optim
+         self.vertex_optim = None  # geometry is frozen
+ 
+-        # TV structure (pairs & face areas) for regulariser ----------------
+-        if self.lambda_tv > 0:
+-            self.pairs, self.face_area = build_tv_struct(
+-                self.model.vertices.detach(), self.model.indices, device=model.device
+-            )
++    def update_triangulation(self, *_, **__):
++        return None
+ 
+-    # ------------------------------------------------------------------
+-    # public helpers ----------------------------------------------------
+-    # ------------------------------------------------------------------
+     def step(self):
+         self.optim.step()
+ 
+     def zero_grad(self):
+         self.optim.zero_grad()
+ 
+-    # compatibility shims ------------------------------------------------
+     def main_step(self):
+         self.step()
+ 
+@@ -365,20 +266,7 @@ class FrozenTetOptimizer:
+     def split(self, clone_indices, split_point, split_mode):
+         print("Split called on frozen optimizer")
+ 
+-    # ------------------------------------------------------------------
+-    # regularisers ------------------------------------------------------
+-    # ------------------------------------------------------------------
+     def regularizer(self, *_):
+-        # wd_loss = self.weight_decay * sum((p ** 2).mean() for p in [
+-        #     self.model.density, self.model.rgb, self.model.gradient, self.model.sh
+-        # ])
+-
+-        if self.lambda_density > 0:
+-            density = self.model.density.squeeze(-1)
+-            density_loss = density.mean()
+-        else:
+-            density_loss = 0.0
+-
+         if self.lambda_tv > 0:
+             # simple TV on densities as example
+             diff = (self.model.density[self.pairs[:, 0]] - self.model.density[self.pairs[:, 1]]).abs()
+@@ -386,7 +274,49 @@ class FrozenTetOptimizer:
+         else:
+             tv_loss = 0.0
+ 
+-        return self.lambda_density * density_loss + self.lambda_tv * tv_loss
++        return self.lambda_tv * tv_loss
++
++def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetModel:
++    """Convert an existing neural‑field `Model` into a parameter‑only
++    `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
++    network and stored explicitly so that no backbone is needed afterwards."""
++    device = base_model.device
++
++    vertices_full = base_model.vertices.detach()
++    int_vertices  = vertices_full[: base_model.num_int_verts]
++    indices       = base_model.indices[mask].detach()
++
++    d_list, rgb_list, grd_list, sh_list = [], [], [], []
++    for start in range(0, indices.shape[0], chunk_size):
++        end = min(start + chunk_size, indices.shape[0])
++        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
++            vertices_full, indices, start, end
++        )
++        d_list.append(density)
++        rgb_list.append(rgb)
++        grd_list.append(grd)
++        sh_list.append(sh)
++
++    density  = torch.cat(d_list, 0)
++    rgb      = torch.cat(rgb_list, 0)
++    gradient = torch.cat(grd_list, 0)
++    sh       = torch.cat(sh_list, 0)
++
++    density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
++
++    return FrozenTetModel(
++        int_vertices=int_vertices.to(device),
++        indices=indices.to(device),
++        density=density.to(device),
++        rgb=rgb.to(device),
++        gradient=gradient.to(device),
++        sh=sh.to(device),
++        center=base_model.center.detach().to(device),
++        scene_scaling=base_model.scene_scaling.detach().to(device),
++        max_sh_deg=base_model.max_sh_deg,
++        chunk_size=chunk_size,
++    )
++
+ 
+ def _offload_model_to_cpu(model: nn.Module):
+     """Move every parameter & buffer to CPU and drop gradients to free GPU VRAM."""
+@@ -399,14 +329,10 @@ def _offload_model_to_cpu(model: nn.Module):
+         b.data = b.data.cpu()
+     torch.cuda.empty_cache()
+ 
+-@torch.no_grad()
+ def freeze_model(
+     base_model,
+-    *,
+-    weight_decay: float = 1e-10,
+-    lambda_tv:    float = 0.0,
+-    lambda_density: float = 0.0,
+-    detach: bool = True,
++    mask,
++    args,
+     chunk_size: int = 408_576,
+     **kwargs
+ ) -> Tuple[FrozenTetModel, FrozenTetOptimizer]:
+@@ -422,14 +348,11 @@ def freeze_model(
+         Optimiser bound to the frozen model.
+     """
+     print("Freezing model")
+-    frozen_model = bake_from_model(base_model, detach=detach, chunk_size=chunk_size)
++    frozen_model = bake_from_model(base_model, mask, chunk_size=chunk_size)
+ 
+     frozen_optim = FrozenTetOptimizer(
+         frozen_model,
+-        weight_decay=weight_decay,
+-        lambda_tv=lambda_tv,
+-        lambda_density=lambda_density,
+-        **kwargs
++        **args.as_dict()
+     )
+ 
+     # free GPU memory used by the big backbone (optional but handy)
+diff --git a/models/frozen_features.py b/models/frozen_features.py
+new file mode 100644
+index 0000000..acc91f4
+--- /dev/null
++++ b/models/frozen_features.py
+@@ -0,0 +1,403 @@
++import torch
++from utils.contraction import contract_mean_std
++from utils.contraction import contract_points, inv_contract_points
++from models.base_model import BaseModel
++from muon import SingleDeviceMuonWithAuxAdam
++import math
++from data.camera import Camera
++from torch import nn
++from typing import Optional, Tuple
++from torch.utils.checkpoint import checkpoint
++import gc
++
++from utils.topo_utils import calculate_circumcenters_torch
++from utils.contraction import contract_mean_std
++from utils.contraction import contract_points, inv_contract_points
++
++from utils.train_util import get_expon_lr_func
++from pathlib import Path
++import numpy as np
++from utils.args import Args
++from utils.model_util import *
++from utils import safe_math
++from sh_slang.eval_sh import eval_sh
++
++class FrozenTetModel(BaseModel):
++    def __init__(self,
++                 int_vertices: torch.Tensor,
++                 indices: torch.Tensor,
++                 center: torch.Tensor,
++                 features: torch.Tensor,
++                 scene_scaling: float,
++                 max_sh_deg=2,
++                 glo_dim=0,
++                 **kwargs):
++        super().__init__()
++        self.device = int_vertices.device
++        self.max_sh_deg = max_sh_deg
++        self.dir_offset = torch.tensor([
++            [0, 0],
++            [math.pi, 0],
++        ], device=self.device)
++        sh_dim = ((1+max_sh_deg)**2-1)*3
++        self.backbone = torch.compile(Heads(
++            features.shape[1],
++            sh_dim,
++            glo_dim=glo_dim,
++            **kwargs)).to(self.device)
++        self.features = nn.Parameter(features, requires_grad=True)
++        self.default_glo = None if glo_dim == 0 else torch.zeros((1, glo_dim), device=self.device)
++        self.chunk_size = 408576
++        self.mask_values = True
++        self.frozen = True
++        self.alpha = 0
++        self.linear = False
++        self.feature_dim = 7
++
++        self.register_buffer("interior_vertices", int_vertices)          # immutable
++        self.register_buffer('indices', indices.to(self.device))
++        self.register_buffer('center', center.reshape(1, 3))
++        self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
++        self.update_triangulation()
++
++    def get_circumcenters(self):
++        circumcenter =  pre_calc_cell_values(
++            self.vertices, self.indices, self.center, self.scene_scaling)
++        return circumcenter
++
++    def get_cell_values(self, camera: Camera, mask=None,
++                        all_circumcenters=None, glo=None):
++        indices = self.indices[mask] if mask is not None else self.indices
++        vertices = self.vertices
++        glo = glo if glo is not None else self.default_glo
++
++        outputs = []
++        normed_cc = []
++        start = 0
++        features = self.features[mask] if mask is not None else self.features
++        cam_center = camera.camera_center.to(self.device)
++        for start in range(0, indices.shape[0], self.chunk_size):
++            end = min(start + self.chunk_size, indices.shape[0])
++            circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
++                vertices, indices, start, end, features=features, circumcenters=all_circumcenters, glo=glo)
++            tets = vertices[indices[start:end]]
++            tet_color_raw = eval_sh(
++                tets.mean(dim=1).detach(),
++                RGB2SH(rgb),
++                sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
++                cam_center,
++                self.max_sh_deg).float()
++            dvrgbs = activate_output(cam_center, tet_color_raw,
++                                     density, grd,
++                                     circumcenters,
++                                     tets)
++            normed_cc.append(normalized)
++            outputs.append(dvrgbs)
++        features = torch.cat(outputs, dim=0)
++        normed_cc = torch.cat(normed_cc, dim=0)
++        return normed_cc, features
++
++    def compute_batch_features(self, vertices, indices, start, end, features=None, circumcenters=None, glo=None):
++        if circumcenters is None:
++            tets = vertices[indices[start:end]]
++            circumcenter, radius = calculate_circumcenters_torch(tets.double())
++        else:
++            circumcenter = circumcenters[start:end]
++        if self.training:
++            circumcenter += self.alpha*torch.rand_like(circumcenter)
++        normalized = (circumcenter - self.center) / self.scene_scaling
++
++        glo = glo if glo is not None else self.default_glo
++
++        if features is not None:
++            output = checkpoint(self.backbone, features[start:end], glo, use_reentrant=True)
++        else:
++            output = checkpoint(self.backbone, self.features[start:end], glo, use_reentrant=True)
++        return circumcenter, normalized, *output
++
++    def compute_features(self):
++        vertices = self.vertices
++        indices = self.indices
++        features = self.features
++        cs, ds, rs, gs, ss = [], [], [], [], []
++        for start in range(0, indices.shape[0], self.chunk_size):
++            end = min(start + self.chunk_size, indices.shape[0])
++
++            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, features=features, glo=self.default_glo)
++            tets = vertices[indices[start:end]]
++            radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
++            cs.append(circumcenters)
++            ds.append(density)
++            ss.append(sh)
++            rs.append(rgb)
++            gs.append(safe_math.safe_div(grd, radius))
++        cs = torch.cat(cs, dim=0)
++        ds = torch.cat(ds, dim=0)
++        rs = torch.cat(rs, dim=0)
++        gs = torch.cat(gs, dim=0)
++        ss = torch.cat(ss, dim=0)
++        return cs, ds, rs, gs, ss
++
++
++    @staticmethod
++    def load_ckpt(path: Path, device, **overrides):
++        ckpt_path = path / "ckpt.pth"
++        config_path = path / "config.json"
++        config = Args.load_from_json(str(config_path))
++        for k, v in overrides.items():
++            config[k] = v
++        ckpt = torch.load(ckpt_path)
++        vertices = ckpt['interior_vertices']
++        indices = ckpt["indices"]  # shape (N,4)
++        print(f"Loaded {vertices.shape[0]} vertices")
++        model = FrozenTetModel(
++            int_vertices=vertices.to(device),
++            features=ckpt['features'],
++            indices=indices,
++            center=ckpt['center'],
++            scene_scaling=ckpt['scene_scaling'],
++            **config.as_dict())
++        model.load_state_dict(ckpt)
++        # model.min_t = model.scene_scaling * config.base_min_t
++        model.min_t = config.base_min_t
++        model.indices = torch.as_tensor(indices).cuda()
++        return model
++
++    def calc_tet_density(self):
++        densities = []
++        verts = self.vertices
++        for start in range(0, self.indices.shape[0], self.chunk_size):
++            end = min(start + self.chunk_size, self.indices.shape[0])
++            
++            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end, glo=self.default_glo)
++
++            densities.append(density.reshape(-1))
++        return torch.cat(densities)
++
++    def inv_contract(self, points):
++        return inv_contract_points(points) * self.scene_scaling + self.center
++
++    def contract(self, points):
++        return contract_points((points - self.center) / self.scene_scaling)
++
++    @property
++    def vertices(self):
++        verts = self.interior_vertices
++        return verts
++
++    def sh_up(self):
++        pass
++
++    @torch.no_grad()
++    def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
++        pass
++
++    def __len__(self):
++        return self.vertices.shape[0]
++
++
++class FrozenTetOptimizer:
++    def __init__(self,
++                 model: FrozenTetModel,
++                 feature_lr: float=1e-3,
++                 final_feature_lr: float=1e-4,
++                 fnetwork_lr: float=1e-3,
++                 final_fnetwork_lr: float=1e-3,
++
++                 weight_decay=1e-10,
++                 lr_delay: int = 500,
++                 lambda_tv: float = 0.0,
++                 lambda_density: float = 0.0,
++                 sh_weight_decay: float = 1e-5,
++
++                 glo_net_decay: float = 0,
++                 glo_network_lr: float = 1e-3,
++
++                 freeze_start: int = 15000,
++                 iterations: int = 30000,
++                 sh_lr_div: int = 20,
++
++                 **kwargs):
++        self.weight_decay = weight_decay
++        self.lambda_tv = lambda_tv
++        self.lambda_density = lambda_density
++        def process(body, lr, weight_decay=0):
++            hidden_weights = [p for p in body.parameters() if p.ndim >= 2]
++            hidden_gains_biases = [p for p in body.parameters() if p.ndim < 2]
++            a = dict(
++                params=hidden_weights,
++                use_muon = True,
++                momentum=0.95,
++                lr=lr,
++                weight_decay=weight_decay,
++            )
++            b = dict(
++                params=hidden_gains_biases,
++                use_muon = False,
++                betas=(0.9, 0.999),
++                eps=1e-15,
++                weight_decay=weight_decay,
++            )
++            return [a, b]
++        glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
++        self.net_optim = SingleDeviceMuonWithAuxAdam(
++            process(model.backbone.density_net, fnetwork_lr) + \
++            process(model.backbone.color_net, fnetwork_lr) + \
++            process(model.backbone.gradient_net, fnetwork_lr) + \
++            glo_p
++        )
++        self.sh_lr_div = sh_lr_div
++        self.sh_net_optim = SingleDeviceMuonWithAuxAdam(
++            process(model.backbone.sh_net, fnetwork_lr/self.sh_lr_div, weight_decay=sh_weight_decay)
++        )
++        self.feature_optim = torch.optim.Adam([
++            {"params": [model.features],       "lr": feature_lr,       "name": "sh"},
++        ])
++        self.sh_optim = None
++        self.model = model
++        self.freeze_start = freeze_start
++        self.net_scheduler = get_expon_lr_func(lr_init=fnetwork_lr,
++                                                lr_final=final_fnetwork_lr,
++                                                lr_delay_mult=1e-8,
++                                                lr_delay_steps=lr_delay,
++                                                max_steps=iterations - self.freeze_start)
++
++        self.feature_scheduler = get_expon_lr_func(lr_init=feature_lr,
++                                                lr_final=final_feature_lr,
++                                                lr_delay_mult=1e-8,
++                                                lr_delay_steps=lr_delay,
++                                                max_steps=iterations - self.freeze_start)
++        self.iteration = 0
++
++    def update_learning_rate(self, iteration):
++        ''' Learning rate scheduling per step '''
++        self.iteration = iteration
++        for param_group in self.net_optim.param_groups:
++            lr = self.net_scheduler(iteration - self.freeze_start)
++            param_group['lr'] = lr
++        for param_group in self.sh_net_optim.param_groups:
++            lr = self.net_scheduler(iteration)
++            param_group['lr'] = lr/self.sh_lr_div
++        for param_group in self.feature_optim.param_groups:
++            lr = self.feature_scheduler(iteration - self.freeze_start)
++            param_group['lr'] = lr
++
++    def step(self):
++        self.net_optim.step()
++        self.feature_optim.step()
++
++    def zero_grad(self):
++        self.net_optim.zero_grad()
++        self.feature_optim.zero_grad()
++
++    # compatibility shims ------------------------------------------------
++    def main_step(self):
++        self.step()
++
++    def main_zero_grad(self):
++        self.zero_grad()
++
++    @torch.no_grad()
++    def split(self, clone_indices, split_point, split_mode):
++        print("Split called on frozen optimizer")
++
++    def regularizer(self, *_):
++        if self.lambda_tv > 0:
++            # simple TV on densities as example
++            diff = (self.model.density[self.pairs[:, 0]] - self.model.density[self.pairs[:, 1]]).abs()
++            tv_loss = (self.face_area * diff).sum() / self.face_area.sum()
++        else:
++            tv_loss = 0.0
++
++        return self.lambda_tv * tv_loss
++
++    def update_triangulation(self, *_, **__):
++        return None
++
++
++def bake_from_model(base_model, mask, args, chunk_size: int = 408_576) -> FrozenTetModel:
++    """Convert an existing neural‑field `Model` into a parameter‑only
++    `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
++    network and stored explicitly so that no backbone is needed afterwards."""
++    device = base_model.device
++
++    vertices = base_model.vertices.detach()
++    int_vertices  = vertices[: base_model.num_int_verts]
++    indices       = base_model.indices[mask].detach()
++
++    features = []
++    for start in range(0, indices.shape[0], chunk_size):
++        end = min(start + chunk_size, indices.shape[0])
++
++        tets = vertices[indices[start:end]]
++        circumcenter, radius = calculate_circumcenters_torch(tets.double())
++        normalized = (circumcenter - base_model.center) / base_model.scene_scaling
++        radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
++        cv, cr = contract_mean_std(normalized, radius / base_model.scene_scaling)
++        x = (cv/2 + 1)/2
++        output = base_model.backbone.encode(x, cr)
++        features.append(output)
++
++    features  = torch.cat(features, 0)
++
++    fmodel = FrozenTetModel(
++        int_vertices=int_vertices.to(device),
++        indices=indices.to(device),
++        features=features.to(device),
++        center=base_model.center.detach().to(device),
++        scene_scaling=base_model.scene_scaling.detach().to(device),
++        density_offset=base_model.density_offset,
++        max_sh_deg=base_model.max_sh_deg,
++        chunk_size=chunk_size,
++        sh_hidden_dim=base_model.backbone.sh_hidden_dim,
++        hidden_dim=base_model.backbone.hidden_dim,
++        glo_dim=base_model.glo_dim,
++    )
++    fmodel.backbone.load_state_dict(base_model.backbone.state_dict(), strict=False)
++    return fmodel
++
++def _offload_model_to_cpu(model: nn.Module):
++    """Move every parameter & buffer to CPU and drop gradients to free GPU VRAM."""
++    if model is None:
++        return
++    for p in model.parameters(recurse=True):
++        p.grad = None
++        p.data = p.data.cpu()
++    for b in model.buffers(recurse=True):
++        b.data = b.data.cpu()
++    torch.cuda.empty_cache()
++
++
++@torch.no_grad()
++def freeze_model(
++    base_model,
++    mask,
++    args,
++    chunk_size: int = 408_576,
++) -> Tuple[FrozenTetModel, FrozenTetOptimizer]:
++    """Utility wrapper to *freeze* a trained neural‑field `Model`, produce the
++    corresponding `FrozenTetModel`, and return a ready‑to‑use
++    `FrozenTetOptimizer` so training can continue seamlessly.
++
++    Returns
++    -------
++    FrozenTetModel
++        Parameter‑only representation of the field.
++    FrozenTetOptimizer
++        Optimiser bound to the frozen model.
++    """
++    print("Freezing model")
++    frozen_model = bake_from_model(base_model, mask, args, chunk_size=chunk_size)
++
++    frozen_optim = FrozenTetOptimizer(
++        frozen_model,
++        **args.as_dict()
++    )
++
++    # free GPU memory used by the big backbone (optional but handy)
++    _offload_model_to_cpu(base_model)
++    del base_model
++    gc.collect()
++    torch.cuda.empty_cache()
++
++    return frozen_model, frozen_optim
+diff --git a/models/ingp_color.py b/models/ingp_color.py
+index 75f5165..faebdb9 100644
+--- a/models/ingp_color.py
++++ b/models/ingp_color.py
+@@ -2,32 +2,25 @@ import torch
+ import math
+ from data.camera import Camera
+ from utils import optim
+-from sh_slang.eval_sh import eval_sh
+-from gDel3D.build.gdel3d import Del
++from gdel3d import Del
+ from torch import nn
+ from icecream import ic
+ 
+-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
+ from utils import topo_utils
+-from utils.safe_math import safe_exp, safe_div, safe_sqrt
+ from utils.contraction import contract_mean_std
+-from utils.contraction import contract_points, inv_contract_points
+ 
+-from utils.train_util import get_expon_lr_func, SpikingLR
++from utils.train_util import get_expon_lr_func, SpikingLR, TwoPhaseLR
+ from utils.graphics_utils import l2_normalize_th
+ from torch.utils.checkpoint import checkpoint
+ from pathlib import Path
+ import numpy as np
+ from utils.args import Args
+-import tinyplypy
+-from scipy.spatial import ConvexHull
+ from scipy.spatial import  Delaunay
+-import open3d as o3d
+-from data.types import BasicPointCloud
+-from simple_knn._C import distCUDA2
+-from utils import mesh_util
++# import open3d as o3d
++from sh_slang.eval_sh import eval_sh
+ from utils.model_util import *
+ from models.base_model import BaseModel
++from muon import SingleDeviceMuonWithAuxAdam
+ 
+ torch.set_float32_matmul_precision('high')
+ 
+@@ -35,45 +28,39 @@ torch.set_float32_matmul_precision('high')
+ class Model(BaseModel):
+     def __init__(self,
+                  vertices: torch.Tensor,
+-                 ext_vertices: torch.Tensor,
+                  center: torch.Tensor,
+                  scene_scaling: float,
+-                 contract_vertices=True,
+                  density_offset=-1,
+                  current_sh_deg=2,
+                  max_sh_deg=2,
++                 glo_dim=0,
++                 ablate_circumsphere=False,
+                  **kwargs):
+         super().__init__()
+         self.device = vertices.device
+         self.density_offset = density_offset
+         self.max_sh_deg = max_sh_deg
+-        self.current_sh_deg = current_sh_deg
+-        self.dir_offset = torch.tensor([
+-            [0, 0],
+-            [math.pi, 0],
+-        ], device=self.device)
+-        sh_dim = ((1+max_sh_deg)**2-1)*3
+-        self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
++        self.sh_dim = ((1+max_sh_deg)**2-1)*3
++        self.backbone = torch.compile(iNGPDW(self.sh_dim, glo_dim=glo_dim, **kwargs)).to(self.device)
++        self.default_glo = None if glo_dim == 0 else torch.zeros((1, glo_dim), device=self.device)
++        self.glo_dim = glo_dim
+         self.chunk_size = 408576
+         self.mask_values = True
+         self.frozen = False
+         self.alpha = 0
+         self.linear = False
+         self.feature_dim = 7
++        self.current_sh_deg = current_sh_deg
++        self.ablate_circumsphere = ablate_circumsphere
+ 
+-        self.register_buffer('ext_vertices', ext_vertices.to(self.device))
+         self.register_buffer('center', center.reshape(1, 3))
+         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
+-        self.contract_vertices = contract_vertices
+-        if self.contract_vertices:
+-            self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
+-        else:
+-            self.contracted_vertices = nn.Parameter(vertices.detach())
++        self.interior_vertices = nn.Parameter(vertices.detach())
+         self.update_triangulation()
+ 
+     @property
+     def num_int_verts(self):
+-        return self.contracted_vertices.shape[0]
++        return self.interior_vertices.shape[0]
+ 
+     def get_circumcenters(self):
+         circumcenter =  pre_calc_cell_values(
+@@ -81,120 +68,96 @@ class Model(BaseModel):
+         return circumcenter
+ 
+     def get_cell_values(self, camera: Camera, mask=None,
+-                        all_circumcenters=None, radii=None):
++                        all_circumcenters=None, glo=None):
+         indices = self.indices[mask] if mask is not None else self.indices
+         vertices = self.vertices
+-
+-        # vertex_color_raw = eval_sh(
+-        #     vertices,
+-        #     torch.zeros((vertices.shape[0], 3), device=vertices.device),
+-        #     self.vertex_lights.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
+-        #     camera.camera_center.to(self.device),
+-        #     self.current_sh_deg) - 0.5
++        glo = glo if glo is not None else self.default_glo
+ 
+         outputs = []
+         normed_cc = []
+         start = 0
++        cam_center = camera.camera_center.to(self.device)
+         for start in range(0, indices.shape[0], self.chunk_size):
+             end = min(start + self.chunk_size, indices.shape[0])
++            tets = vertices[indices[start:end]]
+             circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
+-                vertices, indices, start, end, circumcenters=all_circumcenters)
+-            dvrgbs = activate_output(camera.camera_center.to(self.device),
+-                                     density, rgb, grd, sh, indices[start:end],
++                vertices, indices, start, end, circumcenters=all_circumcenters, glo=glo)
++            tet_color_raw = eval_sh(
++                tets.mean(dim=1).detach(),
++                RGB2SH(rgb),
++                sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
++                cam_center,
++                self.current_sh_deg).float()
++            dvrgbs = activate_output(cam_center, tet_color_raw,
++                                     density, grd,
+                                      circumcenters,
+-                                     vertices, self.current_sh_deg, self.max_sh_deg)
++                                     tets)
+             normed_cc.append(normalized)
+             outputs.append(dvrgbs)
+         features = torch.cat(outputs, dim=0)
+         normed_cc = torch.cat(normed_cc, dim=0)
+         return normed_cc, features
+ 
+-    @staticmethod
+-    def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
+-                      voxel_size=0.00, **kwargs):
+-        torch.manual_seed(2)
+-
+-        ccenters = torch.stack([c.camera_center.reshape(3) for c in cameras], dim=0).to(device)
+-        center = ccenters.mean(dim=0)
+-        scaling = torch.linalg.norm(ccenters - center.reshape(1, 3), dim=1, ord=torch.inf).max()
+-        print(f"Scene scaling: {scaling}. Center: {center}")
+-
+-        vertices = torch.as_tensor(point_cloud.points).float()
+-
+-        dist = torch.clamp_min(distCUDA2(vertices.cuda()), 0.0000001).sqrt().cpu()
+-
+-        # vertices = vertices.reshape(-1, 1, 3).expand(-1, init_repeat, 3)
+-        # vertices = vertices + torch.randn(*vertices.shape) * dist.reshape(-1, 1, 1).clip(min=0.01)
+-        # vertices = vertices.reshape(-1, 3)
+-
+-        # Convert BasicPointCloud to Open3D PointCloud
+-        o3d_pcd = o3d.geometry.PointCloud()
+-        o3d_pcd.points = o3d.utility.Vector3dVector(vertices.numpy())
+-
+-        # Perform voxel downsampling
+-        if voxel_size > 0:
+-            o3d_pcd = o3d_pcd.voxel_down_sample(voxel_size=voxel_size)
+-
+-        N = point_cloud.points.shape[0]
+-        vertices = torch.as_tensor(np.asarray(o3d_pcd.points)).float()
+-        vertices = vertices + torch.randn(*vertices.shape) * 1e-3
+-
+-        # add sphere
+-        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
+-        new_radius = pcd_scaling.cpu().item()
+-
+-        # vertices = sample_uniform_in_sphere(10000, 3, base_radius=0, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
+-
+-        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
+-        # v = Del(vertices.shape[0])
+-        # indices_np, prev = v.compute(vertices.detach().cpu().double())
+-        # indices_np = indices_np.numpy()
+-        # indices_np = indices_np[(indices_np < vertices.shape[0]).all(axis=1)]
+-        # vertices = vertices[indices_np].mean(dim=1)
+-        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
++    def compute_features(self):
++        vertices = self.vertices
++        indices = self.indices
++        cs, ds, rs, gs, ss = [], [], [], [], []
++        for start in range(0, indices.shape[0], self.chunk_size):
++            end = min(start + self.chunk_size, indices.shape[0])
+ 
+-        # within_sphere = sample_uniform_in_sphere(10000, 3, base_radius=new_radius, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
+-        # vertices = torch.cat([vertices, within_sphere], dim=0)
+-        num_ext = 1000
+-        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+-        num_ext = ext_vertices.shape[0]
++            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end, glo=self.default_glo)
++            tets = vertices[indices[start:end]]
++            radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
++            cs.append(circumcenters)
++            ds.append(density)
++            ss.append(sh)
++            rs.append(rgb)
++            gs.append(grd)
++            gs.append(safe_div(grd, radius))
++        cs = torch.cat(cs, dim=0)
++        ds = torch.cat(ds, dim=0)
++        rs = torch.cat(rs, dim=0)
++        gs = torch.cat(gs, dim=0)
++        ss = torch.cat(ss, dim=0)
++        return cs, ds, rs, gs, ss
+ 
+-        model = Model(vertices.cuda(), ext_vertices, center, scaling,
+-                      max_sh_deg=max_sh_deg, **kwargs)
+-        return model
+ 
+-    def compute_batch_features(self, vertices, indices, start, end, circumcenters=None):
++    def compute_batch_features(self, vertices, indices, start, end, circumcenters=None, glo=None):
++        tets = vertices[indices[start:end]]
+         if circumcenters is None:
+-            tets = vertices[indices[start:end]]
+-            circumcenter, radius = calculate_circumcenters_torch(tets.double())
++            circumcenter, radius = topo_utils.calculate_circumcenters_torch(tets.double())
+         else:
+             circumcenter = circumcenters[start:end]
+-        if self.training:
+-            circumcenter += self.alpha*torch.rand_like(circumcenter)
++        if self.ablate_circumsphere:
++            circumcenter = tets.mean(dim=1)
+         normalized = (circumcenter - self.center) / self.scene_scaling
+         radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
+         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
+         x = (cv/2 + 1)/2
+-        output = checkpoint(self.backbone, x, cr, use_reentrant=True)
+-        return circumcenter, normalized, *output
++
++        glo = glo if glo is not None else self.default_glo
++
++        density, rgb, grd, sh = checkpoint(self.backbone, x, cr, glo, use_reentrant=True)
++        # density = safe_div(density, radius.reshape(-1, 1).detach())
++        # vol = topo_utils.tet_volumes(tets).clip(min=1, max=1000)
++        # density = safe_div(density, vol.reshape(-1, 1).detach())
++        return circumcenter, normalized, density, rgb, grd, sh
+ 
+     @staticmethod
+-    def load_ckpt(path: Path, device):
++    def load_ckpt(path: Path, device, config=None):
+         ckpt_path = path / "ckpt.pth"
+-        config_path = path / "config.json"
+-        config = Args.load_from_json(str(config_path))
++        if config is None:
++            config_path = path / "config.json"
++            config = Args.load_from_json(str(config_path))
+         ckpt = torch.load(ckpt_path)
+-        vertices = ckpt['contracted_vertices']
++        vertices = ckpt['interior_vertices']
+         indices = ckpt["indices"]  # shape (N,4)
+         del ckpt["indices"]
+         print(f"Loaded {vertices.shape[0]} vertices")
+-        temp = config.contract_vertices
+-        config.contract_vertices = False
+-        ext_vertices = ckpt['ext_vertices']
+-        model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
++        model = Model(vertices.to(device), ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
+         model.load_state_dict(ckpt)
+-        model.contract_vertices = temp
+-        model.min_t = model.scene_scaling * config.base_min_t
++        # model.min_t = model.scene_scaling * config.base_min_t
++        model.min_t = config.base_min_t
+         model.indices = torch.as_tensor(indices).cuda()
+         return model
+ 
+@@ -204,53 +167,17 @@ class Model(BaseModel):
+         for start in range(0, self.indices.shape[0], self.chunk_size):
+             end = min(start + self.chunk_size, self.indices.shape[0])
+             
+-            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
++            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end, glo=self.default_glo)
+ 
+             densities.append(density.reshape(-1))
+         return torch.cat(densities)
+ 
+-    def compute_features(self, offset=False):
+-        vertices = self.vertices
+-        indices = self.indices
+-        cs, ds, rs, gs, ss = [], [], [], [], []
+-        for start in range(0, indices.shape[0], self.chunk_size):
+-            end = min(start + self.chunk_size, indices.shape[0])
+-
+-            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
+-            tets = vertices[indices[start:end]]
+-            cs.append(circumcenters)
+-            ds.append(density)
+-            ss.append(sh)
+-            if offset:
+-                base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
+-                rs.append(base_color_v0_raw)
+-                gs.append(normed_grd)
+-            else:
+-                rs.append(rgb)
+-                gs.append(grd)
+-        cs = torch.cat(cs, dim=0)
+-        ds = torch.cat(ds, dim=0)
+-        rs = torch.cat(rs, dim=0)
+-        gs = torch.cat(gs, dim=0)
+-        ss = torch.cat(ss, dim=0)
+-        return cs, ds, rs, gs, ss
+-
+-    def inv_contract(self, points):
+-        return inv_contract_points(points) * self.scene_scaling + self.center
+-
+-    def contract(self, points):
+-        return contract_points((points - self.center) / self.scene_scaling)
+-
+     @property
+     def vertices(self):
+-        if self.contract_vertices:
+-            verts = self.inv_contract(self.contracted_vertices)
+-        else:
+-            verts = self.contracted_vertices
+-        return torch.cat([verts, self.ext_vertices])
++        return self.interior_vertices
+ 
+     def sh_up(self):
+-        self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
++        self.current_sh_deg = min(self.current_sh_deg + 1, self.max_sh_deg)
+ 
+     @torch.no_grad()
+     def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
+@@ -266,11 +193,23 @@ class Model(BaseModel):
+             indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
+             del prev
+         
+-        self.indices = torch.as_tensor(indices_np).cuda()
++        # Ensure volume is positive
++        indices = torch.as_tensor(indices_np).cuda()
++        vols = topo_utils.tet_volumes(verts[indices])
++        reverse_mask = vols < 0
++        if reverse_mask.sum() > 0:
++            indices[reverse_mask] = indices[reverse_mask][:, [1, 0, 2, 3]]
++
++        # Cull tets with low density
++        self.indices = indices
++        denom = topo_utils.tet_denom(self.vertices.detach()[self.indices]).detach()
+         if density_threshold > 0 or alpha_threshold > 0:
+             tet_density = self.calc_tet_density()
+             tet_alpha = self.calc_tet_alpha(mode="min", density=tet_density)
+-            mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
++            mask = ((tet_density > density_threshold) | (tet_alpha > alpha_threshold)) & (denom > 1e-10)
++            self.indices = self.indices[mask]
++        else:
++            mask = (denom > 1e-10)
+             self.indices = self.indices[mask]
+             
+         torch.cuda.empty_cache()
+@@ -279,6 +218,73 @@ class Model(BaseModel):
+         return self.vertices.shape[0]
+         
+ 
++    @staticmethod
++    def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
++                      ext_convex_hull, voxel_size=0.00, **kwargs):
++        torch.manual_seed(2)
++
++        ccenters = torch.stack([c.camera_center.reshape(3) for c in cameras], dim=0).to(device)
++        center = ccenters.mean(dim=0)
++        scaling = torch.linalg.norm(ccenters - center.reshape(1, 3), dim=1, ord=torch.inf).max()
++        print(f"Scene scaling: {scaling}. Center: {center}")
++
++        vertices = torch.as_tensor(point_cloud.points).float()
++
++        # dist = torch.clamp_min(distCUDA2(vertices.cuda()), 0.0000001).sqrt().cpu()
++
++        # vertices = vertices.reshape(-1, 1, 3).expand(-1, init_repeat, 3)
++        # vertices = vertices + torch.randn(*vertices.shape) * dist.reshape(-1, 1, 1).clip(min=0.01)
++        # vertices = vertices.reshape(-1, 3)
++
++        # Convert BasicPointCloud to Open3D PointCloud
++        # o3d_pcd = o3d.geometry.PointCloud()
++        # o3d_pcd.points = o3d.utility.Vector3dVector(vertices.numpy())
++        #
++        # # Perform voxel downsampling
++        # if voxel_size > 0:
++        #     o3d_pcd = o3d_pcd.voxel_down_sample(voxel_size=voxel_size)
++        #
++        # N = point_cloud.points.shape[0]
++        # vertices = torch.as_tensor(np.asarray(o3d_pcd.points)).float()
++
++        vertices = vertices + torch.randn(*vertices.shape) * 1e-3
++
++        # add sphere
++        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2)
++        pcd_scaling = (vertices - vertices.mean(dim=0, keepdim=True)).abs().max(dim=0).values
++        new_radius = math.sqrt(2) * pcd_scaling.cpu()
++
++        # vertices = topo_util.sample_uniform_in_sphere(10000, 3, base_radius=0, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
++
++        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
++        # v = Del(vertices.shape[0])
++        # indices_np, prev = v.compute(vertices.detach().cpu().double())
++        # indices_np = indices_np.numpy()
++        # indices_np = indices_np[(indices_np < vertices.shape[0]).all(axis=1)]
++        # vertices = vertices[indices_np].mean(dim=1)
++        # vertices = vertices + torch.randn(*vertices.shape) * 1e-3
++
++        # within_sphere = topo_util.sample_uniform_in_sphere(10000, 3, base_radius=new_radius, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
++        # vertices = torch.cat([vertices, within_sphere], dim=0)
++        if ext_convex_hull:
++            num_ext = 5000
++            ext_vertices = topo_utils.expand_convex_hull(vertices, 1, device=vertices.device)
++            if ext_vertices.shape[0] > num_ext:
++                inds = np.random.default_rng().permutation(ext_vertices.shape[0])[:num_ext]
++                ext_vertices = ext_vertices[inds]
++            else:
++                num_ext = ext_vertices.shape[0]
++        else:
++            num_ext = 5000
++            ext_vertices = topo_utils.fibonacci_spiral_on_sphere(num_ext, new_radius.reshape(1, 3), device='cpu') + center.reshape(1, 3).cpu()
++            # ext_vertices = torch.empty((0, 3), device='cpu')
++            num_ext = ext_vertices.shape[0]
++        vertices = torch.cat([vertices, ext_vertices], dim=0)
++
++        model = Model(vertices.cuda(), center, scaling,
++                      max_sh_deg=max_sh_deg, **kwargs)
++        return model
++
+ class TetOptimizer:
+     def __init__(self,
+                  model: Model,
+@@ -289,13 +295,12 @@ class TetOptimizer:
+                  vertices_lr: float=4e-4,
+                  final_vertices_lr: float=4e-7,
+                  vertices_lr_delay_multi: float=0.01,
++
+                  weight_decay=1e-10,
+-                 lambda_color=1e-10,
+                  split_std: float = 0.5,
+                  lr_delay: int = 500,
+-                 freeze_start: int = 10000,
++                 final_iter: int = 10000,
+                  vert_lr_delay: int = 500,
+-                 sh_interval: int = 1000,
+                  lambda_tv: float = 0.0,
+                  lambda_density: float = 0.0,
+ 
+@@ -304,83 +309,107 @@ class TetOptimizer:
+                  densify_interval: int = 500,
+                  densify_end: int = 15000,
+                  midpoint: int = 2000,
++                 sh_lr_div: int = 20,
+ 
+-                 density_lr:  float = 1e-3,
+-                 color_lr:    float = 1e-3,
+-                 gradient_lr: float = 1e-3,
+-                 sh_lr:       float = 1e-3,
+-
+-                 lambda_dist: float = 1e-5,
++                 glo_net_decay: float = 0,
++                 glo_network_lr: float = 1e-3,
+                  percent_alpha: float = 0.02,
+-                 dist_delay: int = 2000,
+-
++                 sh_weight_decay: float = 1e-5,
+                  **kwargs):
+-        self.weight_decay = weight_decay
+-        self.lambda_color = lambda_color
+-        self.lambda_tv = lambda_tv
+-        self.lambda_density = lambda_density
+         self.optim = optim.CustomAdam([
+             {"params": model.backbone.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
+         ], ignore_param_list=["encoding", "network"], betas=[0.9, 0.999], eps=1e-15)
+-        self.net_optim = optim.CustomAdam([
+-            {"params": model.backbone.network.parameters(), "lr": network_lr, "name": "network"},
+-            {"params": model.backbone.density_net.parameters(),   "lr": network_lr,  "name": "density"},
+-            {"params": model.backbone.color_net.parameters(),     "lr": network_lr,    "name": "color"},
+-            {"params": model.backbone.gradient_net.parameters(),  "lr": network_lr, "name": "gradient"},
+-            {"params": model.backbone.sh_net.parameters(),        "lr": network_lr,       "name": "sh"},
+-        ], ignore_param_list=[], betas=[0.9, 0.999])
+-        self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
++        def process(body, lr, weight_decay=0):
++            hidden_weights = [p for p in body.parameters() if p.ndim >= 2]
++            hidden_gains_biases = [p for p in body.parameters() if p.ndim < 2]
++            a = dict(
++                params=hidden_weights,
++                use_muon = True,
++                momentum=0.95,
++                lr=lr,
++                weight_decay=weight_decay,
++            )
++            b = dict(
++                params=hidden_gains_biases,
++                use_muon = False,
++                betas=(0.9, 0.999),
++                eps=1e-15,
++                weight_decay=weight_decay,
++            )
++            return [a, b]
++        glo_p = process(model.backbone.glo_net, glo_network_lr, weight_decay=glo_net_decay) if model.backbone.glo_dim > 0 else []
++        self.sh_lr_div = sh_lr_div
++        self.net_optim = SingleDeviceMuonWithAuxAdam(
++            process(model.backbone.density_net, network_lr) + \
++            process(model.backbone.color_net, network_lr) + \
++            process(model.backbone.gradient_net, network_lr) + \
++            glo_p
++        )
++        self.sh_net_optim = SingleDeviceMuonWithAuxAdam(
++            process(model.backbone.sh_net, network_lr/self.sh_lr_div, weight_decay=sh_weight_decay)
++        )
++        self.vert_lr_multi = float(model.scene_scaling.cpu())
+         self.vertex_optim = optim.CustomAdam([
+-            {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
++            {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},
+         ])
+         self.model = model
+         self.vertex_rgbs_param_grad = None
+         self.vertex_grad = None
+         self.split_std = split_std
++        def make_spiking(init_lr, final_peak_lr, final_lr):
++            return TwoPhaseLR(
++                final_iter, densify_start, densify_interval, densify_end, init_lr, final_peak_lr, (init_lr + final_lr) / 2, final_lr)
+ 
+         self.alpha_sched = get_expon_lr_func(lr_init=percent_alpha*float(model.scene_scaling.cpu()),
+                                                 lr_final=1e-20,
+                                                 lr_delay_mult=1e-8,
+                                                 lr_delay_steps=0,
+-                                                max_steps=freeze_start//3)
++                                                max_steps=final_iter//3)
+ 
+         base_net_scheduler = get_expon_lr_func(lr_init=network_lr,
+                                                 lr_final=final_network_lr,
+                                                 lr_delay_mult=1e-8,
+                                                 lr_delay_steps=lr_delay,
+-                                                max_steps=freeze_start)
++                                                max_steps=final_iter)
+ 
+         self.net_scheduler_args = SpikingLR(
+-            spike_duration, freeze_start, base_net_scheduler,
++            spike_duration, final_iter, base_net_scheduler,
+             midpoint, densify_interval, densify_end,
+             network_lr, network_lr)
++        # self.net_scheduler_args = make_spiking(
++        #     network_lr, network_lr, final_network_lr)
+             # network_lr, final_network_lr)
+ 
+         base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
+                                                 lr_final=final_encoding_lr,
+                                                 lr_delay_mult=1e-8,
+                                                 lr_delay_steps=lr_delay,
+-                                                max_steps=freeze_start)
++                                                max_steps=final_iter)
+ 
+         self.encoder_scheduler_args = SpikingLR(
+-            spike_duration, freeze_start, base_encoder_scheduler,
++            spike_duration, final_iter, base_encoder_scheduler,
+             midpoint, densify_interval, densify_end,
+             encoding_lr, encoding_lr)
+             # encoding_lr, final_encoding_lr)
++        # self.encoder_scheduler_args = make_spiking(
++        #     encoding_lr, encoding_lr, final_encoding_lr)
+ 
+         self.vertex_lr = self.vert_lr_multi*vertices_lr
+         base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
+                                                 lr_final=self.vert_lr_multi*final_vertices_lr,
+                                                 lr_delay_mult=vertices_lr_delay_multi,
+-                                                max_steps=freeze_start,
++                                                max_steps=final_iter,
+                                                 lr_delay_steps=vert_lr_delay)
+ 
+         self.vertex_scheduler_args = base_vertex_scheduler
+         self.vertex_scheduler_args = SpikingLR(
+-            spike_duration, freeze_start, base_vertex_scheduler,
++            spike_duration, final_iter, base_vertex_scheduler,
+             midpoint, densify_interval, densify_end,
+             # self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
+             self.vertex_lr, self.vertex_lr)
++
++        # self.vertex_scheduler_args = make_spiking(
++        #     self.vertex_lr, self.vertex_lr, self.vert_lr_multi*final_vertices_lr)
+         self.iteration = 0
+ 
+     def update_learning_rate(self, iteration):
+@@ -390,120 +419,55 @@ class TetOptimizer:
+         for param_group in self.net_optim.param_groups:
+             lr = self.net_scheduler_args(iteration)
+             param_group['lr'] = lr
++        for param_group in self.sh_net_optim.param_groups:
++            lr = self.net_scheduler_args(iteration)
++            param_group['lr'] = lr/self.sh_lr_div
+         for param_group in self.optim.param_groups:
+             if param_group["name"] == "encoding":
+                 lr = self.encoder_scheduler_args(iteration)
+                 param_group['lr'] = lr
+         for param_group in self.vertex_optim.param_groups:
+-            if param_group["name"] == "contracted_vertices":
++            if param_group["name"] == "interior_vertices":
+                 lr = self.vertex_scheduler_args(iteration)
+                 self.vertex_lr = lr
+                 param_group['lr'] = lr
+ 
+     def add_points(self, new_verts: torch.Tensor, raw_verts=False):
+-        if self.model.contract_vertices and not raw_verts:
+-            new_verts = self.model.contract(new_verts)
+-        self.model.contracted_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
+-            contracted_vertices = new_verts
+-        ))['contracted_vertices']
++        self.model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
++            interior_vertices = new_verts
++        ))['interior_vertices']
+         self.model.update_triangulation()
+ 
+     def remove_points(self, keep_mask: torch.Tensor):
+-        keep_mask = keep_mask[:self.model.contracted_vertices.shape[0]]
+-        self.model.contracted_vertices = self.vertex_optim.prune_optimizer(keep_mask)['contracted_vertices']
++        keep_mask = keep_mask[:self.model.interior_vertices.shape[0]]
++        self.model.interior_vertices = self.vertex_optim.prune_optimizer(keep_mask)['interior_vertices']
+         self.model.update_triangulation()
+ 
+     @torch.no_grad()
+-    def split(self, clone_indices, split_point, split_mode, split_std, **kwargs):
++    def split(self, clone_indices, split_point, split_std, **kwargs):
+         device = self.model.device
+-        clone_vertices = self.model.vertices[clone_indices]
+-
+-        if split_mode == "circumcenter":
+-            circumcenters, radius = calculate_circumcenters_torch(clone_vertices)
+-            radius = radius.reshape(-1, 1)
+-            circumcenters = circumcenters.reshape(-1, 3)
+-            sphere_loc = sample_uniform_in_sphere(circumcenters.shape[0], 3).to(device)
+-            r = torch.randn((clone_indices.shape[0], 1), device=self.model.device)
+-            r[r.abs() < 1e-2] = 1e-2
+-            sampled_radius = (r * self.split_std + 1) * radius
+-            new_vertex_location = l2_normalize_th(sphere_loc) * sampled_radius + circumcenters
+-        elif split_mode == "barycenter":
+-            barycentric_weights = 0.25*torch.ones((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
+-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
+-        elif split_mode == "barycentric":
+-            barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
+-            barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
+-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
+-        elif split_mode == "split_point":
+-            _, radius = calculate_circumcenters_torch(self.model.vertices[clone_indices])
+-            split_point += (split_std * radius.reshape(-1, 1)).clip(min=1e-3, max=3) * torch.randn(*split_point.shape, device=self.model.device)
+-            new_vertex_location = split_point
+-            # new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
+-        elif split_mode == "split_point_c":
+-            barycentric_weights = calc_barycentric(split_point, clone_vertices).clip(min=0)
+-            barycentric_weights = barycentric_weights / (1e-3+barycentric_weights.sum(dim=1, keepdim=True))
+-            barycentric_weights += 1e-4*torch.randn(*barycentric_weights.shape, device=self.model.device)
+-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
+-        else:
+-            raise Exception(f"Split mode: {split_mode} not supported")
+-        self.add_points(new_vertex_location)
++        _, radius = topo_utils.calculate_circumcenters_torch(self.model.vertices[clone_indices])
++        split_point += (split_std * radius.reshape(-1, 1)).clip(min=1e-3, max=3) * torch.randn(*split_point.shape, device=self.model.device)
++        self.add_points(split_point)
+ 
+     def main_step(self):
+         self.optim.step()
+         self.net_optim.step()
++        self.sh_net_optim.step()
+ 
+     def main_zero_grad(self):
+         self.optim.zero_grad(set_to_none=True)
+         self.net_optim.zero_grad(set_to_none=True)
++        self.sh_net_optim.zero_grad(set_to_none=True)
+ 
+     @property
+     def sh_optim(self):
+         return None
+ 
+-    def regularizer(self, render_pkg):
+-        weight_decay = self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
+-
+-        if self.lambda_density > 0 or self.lambda_tv > 0:
+-            density = self.model.calc_tet_density()
+-            density_loss = (self.model.calc_tet_area().detach() * density).sum()
+-            if self.lambda_tv > 0:
+-                diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
+-                tv_loss  = (self.face_area * diff.abs())
+-                tv_loss  = tv_loss.sum() / self.face_area.sum()
+-            else:
+-                tv_loss = 0
+-        else:
+-            density_loss = 0
+-            tv_loss = 0
++    def regularizer(self, render_pkg, weight_decay, lambda_tv, **kwargs):
++        weight_decay = weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
+ 
+-        return weight_decay + self.lambda_tv * tv_loss + self.lambda_density * density_loss
++        return weight_decay
+ 
+     def update_triangulation(self, **kwargs):
+         self.model.update_triangulation(**kwargs)
+-        if self.lambda_tv > 0:
+-            self.build_tv()
+-
+-    def build_tv(self):
+-        self.pairs, self.face_area = topo_utils.build_tv_struct(
+-            self.model.vertices.detach(), self.model.indices, device='cuda')
+-
+-    def prune(self, diff_threshold, **kwargs):
+-        if diff_threshold <= 0:
+-            return
+-        density = self.model.calc_tet_density()
+-        self.build_tv()
+-        diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
+-        tet_diff  = (self.face_area * diff.abs()).reshape(-1)
+-
+-        indices = self.model.indices.long()
+-        device = indices.device
+-        vert_diff = torch.zeros((self.model.vertices.shape[0],), device=device)
+-
+-        reduce_type = "amax"
+-        vert_diff.scatter_reduce_(dim=0, index=indices[..., 0], src=tet_diff, reduce=reduce_type)
+-        vert_diff.scatter_reduce_(dim=0, index=indices[..., 1], src=tet_diff, reduce=reduce_type)
+-        vert_diff.scatter_reduce_(dim=0, index=indices[..., 2], src=tet_diff, reduce=reduce_type)
+-        vert_diff.scatter_reduce_(dim=0, index=indices[..., 3], src=tet_diff, reduce=reduce_type)
+-        keep_mask = vert_diff > diff_threshold
+-        print(f"Pruned {(~keep_mask).sum()} points. VD: {vert_diff.mean()} TD: {tet_diff.mean()}")
+-        self.remove_points(keep_mask)
+diff --git a/train.py b/train.py
+index 4d84285..4fe9622 100644
+--- a/train.py
++++ b/train.py
+@@ -17,85 +17,76 @@ from tqdm import tqdm
+ import numpy as np
+ from utils import cam_util
+ from utils.train_util import *
++from delaunay_rasterization import render
+ # from models.vertex_color import Model, TetOptimizer
+ from models.ingp_color import Model, TetOptimizer
+ # from models.ingp_linear import Model, TetOptimizer
+-from models.frozen import freeze_model
+ from fused_ssim import fused_ssim
+ from pathlib import Path, PosixPath
+ from utils.args import Args
+-import json
+-import imageio
+ from utils import test_util
+-import termplotlib as tpl
+ from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
+ from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
+ import gc
+-from utils.densification import collect_render_stats, apply_densification
++from utils.densification import collect_render_stats, apply_densification, determine_cull_mask
+ import mediapy
++from torch import nn
+ 
+-torch.set_num_threads(1)
+ 
+-class CustomEncoder(json.JSONEncoder):
+-    def default(self, o):
+-        if isinstance(o, PosixPath):
+-            return str(o)
+-        return super().default(o)
+-
+-class SimpleSampler:
+-    def __init__(self, total_num_samples, batch_size):
+-        self.total_num_samples = total_num_samples
+-        self.batch_size = batch_size
+-        self.curr = total_num_samples
+-        self.ids = None
+-
+-    def nextids(self, batch_size=None):
+-        batch_size = self.batch_size if batch_size is None else batch_size
+-        self.curr += batch_size
+-        if self.curr + batch_size > self.total_num_samples:
+-            # self.ids = torch.LongTensor(np.random.permutation(self.total_num_samples))
+-            self.ids = torch.randperm(self.total_num_samples, dtype=torch.long, device=device)
+-            self.curr = 0
+-        ids = self.ids[self.curr : self.curr + batch_size]
+-        return ids
++torch.set_num_threads(1)
+ 
+ eps = torch.finfo(torch.float).eps
+ args = Args()
+-args.tile_size = 4
++args.tile_size = 16
+ args.image_folder = "images_4"
+ args.eval = False
+-args.dataset_path = Path("/data/nerf_datasets/360/bicycle")
++args.dataset_path = Path("/optane/nerf_datasets/360/garden")
+ args.output_path = Path("output/test/")
+ args.iterations = 30000
+ args.ckpt = ""
+ args.render_train = False
++args.delaunay_interval = 10
++args.orient_scene = True
++args.freeze_features = True
+ 
+ # Light Settings
+ args.max_sh_deg = 3
+-args.sh_interval = 0
++args.sh_interval = 2000
+ args.sh_step = 1
++args.bake_model = True
++
++args.glo_dim = 0
++args.glo_lr = 1e-3
++args.glo_network_lr = 5e-5
++args.glo_weight_decay = 1e-1
++args.glo_net_decay = 1e-6
+ 
+ # iNGP Settings
++args.base_resolution = 64
+ args.encoding_lr = 3e-3
+ args.final_encoding_lr = 3e-4
+ args.network_lr = 1e-3
+ args.final_network_lr = 1e-4
+-args.hidden_dim = 64
+ args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
+-args.log2_hashmap_size = 22
++args.log2_hashmap_size = 23
+ args.per_level_scale = 2
+-args.L = 10
+-args.density_offset = -4
+-args.weight_decay = 0.01
+-args.hashmap_dim = 16
+-args.percent_alpha = 0.02 # preconditioning
+-args.spike_duration = 500
+-
+-args.dg_init=1e-4
+-args.g_init=1.0
+-args.s_init=1e-4
++args.L = 6
++args.density_offset = -3
++args.weight_decay = 0.1
++args.final_weight_decay = 0.1
++args.hashmap_dim = 8
++args.percent_alpha = 0.04 # preconditioning
++args.spike_duration = 0
++args.hidden_dim = 64
++args.sh_hidden_dim = 256
++args.sh_weight_decay = 1e-5
++args.sh_lr_div = 1
++
++args.dg_init=0.1
++args.g_init=0.1
++args.s_init=0.1
+ args.d_init=0.1
+-args.c_init=0.8
++args.c_init=0.1
+ 
+ # Vertex Settings
+ args.lr_delay = 0
+@@ -103,79 +94,104 @@ args.vert_lr_delay = 0
+ args.vertices_lr = 1e-4
+ args.final_vertices_lr = 1e-6
+ args.vertices_lr_delay_multi = 1e-8
+-args.vertices_beta = [0.9, 0.99]
+-args.contract_vertices = False
+ args.clip_multi = 0
+ args.delaunay_start = 30000
+ 
+-args.freeze_start = 22500
+-args.freeze_lr = 1e-3
++args.freeze_start = 16000
++args.freeze_lr = 5e-3
+ args.final_freeze_lr = 1e-4
++args.feature_lr = 1e-3
++args.final_feature_lr = 1e-4
++args.fnetwork_lr = 1e-3
++args.final_fnetwork_lr = 1e-4
+ 
+ # Distortion Settings
+ args.lambda_dist = 1e-4
++args.lambda_density = 0.0
++args.lambda_cost = 0.0
++args.lambda_color = 0.0
+ 
+ # Clone Settings
+ args.num_samples = 200
+-args.clone_lambda_ssim = 0.0
+ args.split_std = 1e-1
+-args.split_mode = "split_point"
+-args.clone_schedule = "quadratic"
+ args.min_tet_count = 9
+ args.densify_start = 2000
+-args.densify_end = 20000
++args.densify_end = 16000
+ args.densify_interval = 500
+ args.budget = 2_000_000
+-args.clone_velocity = 0.0
+-args.speed_mul = 10
+-args.percent_within = 0.70
+-args.percent_total = 0.30
+-args.diff_threshold = 0.0
+ args.clone_min_alpha = 0.025
+ args.clone_min_density = 0.025
+-args.clone_min_ratio = 1.0
+ 
++args.lambda_alpha = 1e-4
+ args.lambda_ssim = 0.2
+ args.base_min_t = 0.2
+-args.sample_cam = 8
++args.sample_cam = 1
+ args.data_device = 'cpu'
+ args.lambda_tv = 0.0
+-args.density_threshold = 0.001
+-args.alpha_threshold = 0.001
+-
++args.contrib_threshold = 0.01
++args.density_threshold = 0.1
++args.alpha_threshold = 0.1
++args.total_thresh = 0.1#025
++args.within_thresh = 0.4
++args.density_intercept = 0.2
+ args.voxel_size = 0.01
++args.start_threshold = 10000000
++args.ext_convex_hull = True
+ 
+ args.use_bilateral_grid = False
+ args.bilateral_grid_shape = [16, 16, 8]
+ args.bilateral_grid_lr = 0.003
+ args.lambda_tv_grid = 0.0
+-
++args.record_training = False
+ args.checkpoint_iterations = []
+ 
+-args = Args.from_namespace(args.get_parser().parse_args())
++args.ablate_gradient = False
++args.ablate_circumsphere = False
++
++parser = args.get_parser()
++args = Args.from_namespace(parser.parse_args())
++
++# if a ckpt is loaded, load config, then override config with user specified flags
++if len(args.ckpt) > 0: 
++    config_path = Path(args.ckpt) / "config.json"
++    config = Args.load_from_json(str(config_path))
++    parser.set_defaults(**config.as_dict())
++args = Args.from_namespace(parser.parse_args())
+ 
+ args.output_path.mkdir(exist_ok=True, parents=True)
+-# args.checkpoint_iterations.append(args.freeze_start-1)
++args.checkpoint_iterations = [int(i) for i in args.checkpoint_iterations]
++print(args.checkpoint_iterations)
+ 
+ train_cameras, test_cameras, scene_info = loader.load_dataset(
+     args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval)
+ 
++np.savetxt(str(args.output_path / "transform.txt"), scene_info.transform)
+ 
+ args.num_samples = min(len(train_cameras), args.num_samples)
+ 
+ with (args.output_path / "config.json").open("w") as f:
+     json.dump(args.as_dict(), f, cls=CustomEncoder)
+ 
++final_iter = args.freeze_start if args.bake_model else args.iterations
+ device = torch.device('cuda')
+ if len(args.ckpt) > 0: 
+-    model = Model.load_ckpt(Path(args.ckpt), device)
++    try:
++        model = Model.load_ckpt(Path(args.ckpt), device, args)
++        tet_optim = TetOptimizer(model, final_iter=final_iter, **args.as_dict())
++    except:
++        if args.freeze_features:
++            from models.frozen_features import FrozenTetModel, FrozenTetOptimizer
++        else:
++            from models.frozen import FrozenTetModel, FrozenTetOptimizer
++        model = FrozenTetModel.load_ckpt(Path(args.ckpt), device)
++        tet_optim = FrozenTetOptimizer(model, final_iter=final_iter, **args.as_dict())
+ else:
+     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
+                                 current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
+                                 **args.as_dict())
+-min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
++    tet_optim = TetOptimizer(model, final_iter=final_iter, **args.as_dict())
+ 
+-tet_optim = TetOptimizer(model, **args.as_dict())
++min_t = args.min_t = args.base_min_t# * model.scene_scaling.item()
+ if args.eval:
+     sample_camera = test_cameras[args.sample_cam]
+     # sample_camera = train_cameras[args.sample_cam]
+@@ -196,69 +212,17 @@ num_densify_iter = args.densify_end - args.densify_start
+ N = num_densify_iter // args.densify_interval + 1
+ S = model.vertices.shape[0]
+ 
+-def target_num(x):
+-    if args.clone_schedule == "linear":
+-        k = (args.budget - S) // N
+-        return k * x + S
+-    elif args.clone_schedule == "quadratic":
+-        k = 2 * (args.budget - S) // N
+-        a = (args.budget - S - k * N) // N**2
+-        return a * x**2 + k * x + S
+-    else:
+-        raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
+-
+-# ----------------------------------------------------------------
+-# new helper: front‑loaded (high‑frequency‑then‑slow‑down) schedule
+-def densify_schedule(start: int,
+-                     end: int,
+-                     n_events: int,
+-                     mode: str = "sqrt"):
+-    """
+-    Generate `n_events` iteration indices between `start` and `end`
+-    with decreasing frequency.  Modes:
+-        • 'sqrt'    – spacing ∝ √t   (simple, monotone)
+-        • 'exp'     – exponential easing
+-        • 'logistic'– S‑curve
+-    """
+-    t = np.linspace(0.0, 1.0, n_events)
+-    if mode == "linear":
+-        w = t
+-    elif mode == "sqrt":
+-        w = t**2                         # lots of points early, sparse later
+-    elif mode == "exp":
+-        g = 4.0
+-        w = (np.exp(g*t) - 1) / (np.exp(g) - 1)
+-    elif mode == "logistic":
+-        k = 10.0
+-        w = 1 / (1 + np.exp(-k*(t-0.5)))
+-        w = (w - w.min()) / (w.max() - w.min())
+-    else:
+-        raise ValueError("mode must be 'sqrt', 'exp', or 'logistic'")
+-    iters = np.round(start + w * (end - start)).astype(int)
+-    iters[0] = start                     # make sure start & end are included
+-    iters[-1] = end
+-    return list(np.unique(iters))
+-
+-# dschedule = densify_schedule(args.densify_start,
+-#                             args.densify_end,
+-#                             N,
+-#                             mode="linear")
+ dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
+-targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
+-fig = tpl.figure()
+-fig.plot(dschedule, targets, width=100, height=20)
+-fig.show()
+-
+-print("Encoding LR")
+-xs = list(range(args.iterations))
+-ys = [tet_optim.encoder_scheduler_args(x) for x in xs]
+-fig = tpl.figure()
+-fig.plot(xs, ys, width=150, height=20)
+-fig.show()
++
++# print("Encoding LR")
++# xs = list(range(args.iterations))
++# ys = [tet_optim.encoder_scheduler_args(x) for x in xs]
++# fig = tpl.figure()
++# fig.plot(xs, ys, width=150, height=20)
++# fig.show()
+ 
+ densification_sampler = SimpleSampler(len(train_cameras), args.num_samples)
+ 
+-# ----- Initialize bilateral grid if enabled -----
+ bil_grids = None
+ bil_optimizer = None
+ if args.use_bilateral_grid:
+@@ -274,9 +238,6 @@ if args.use_bilateral_grid:
+     ).to("cuda")
+     bil_optimizer = torch.optim.Adam([bil_grids.grids], lr=args.bilateral_grid_lr, eps=1e-15)
+     
+-    # Create a chained scheduler with warmup like in gsplat
+-    # First 1000 iterations: linear warmup from 1% to 100% of learning rate
+-    # Then exponential decay to 1% of initial learning rate by the end of training
+     bil_warmup = LinearLR(bil_optimizer, start_factor=0.01, total_iters=1000)
+     bil_decay = ExponentialLR(bil_optimizer, gamma=0.01**(1.0/args.iterations))
+     bil_scheduler = ChainedScheduler([bil_warmup, bil_decay])
+@@ -284,28 +245,62 @@ if args.use_bilateral_grid:
+     print(f"- Number of grids: {len(train_cameras)}")
+     print("- Using LinearLR warmup + ExponentialLR decay scheduler")
+     print("Bilateral Grid initialized successfully!\n")
+-# ------------------------------------------------
+ 
+-video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*'avc1'), 30,
++glo_list = lambda x: None
++glo_optim = None
++if args.glo_dim > 0:
++    glo_list = nn.Embedding(len(train_cameras), args.glo_dim)
++    with torch.no_grad():
++        glo_list.weight *= 0
++    glo_list = glo_list.cuda()
++    glo_optim = torch.optim.Adam(glo_list.parameters(), lr=args.glo_lr)
++
++if args.record_training:
++    video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
+                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
+ 
+-tet_optim.build_tv()
+ progress_bar = tqdm(range(args.iterations))
+ torch.cuda.empty_cache()
++
++weight_decay_fn = get_expon_lr_func(
++    lr_init=args.weight_decay,
++    lr_final=args.final_weight_decay,
++    lr_delay_mult=1e-8,
++    lr_delay_steps=0,
++    max_steps=args.freeze_start)
++
++densification_cam_buffer = []
++
+ for iteration in progress_bar:
+-    delaunay_interval = 10 if iteration < args.delaunay_start else 100
++    delaunay_interval = args.delaunay_interval if iteration < args.delaunay_start else 100
+     do_delaunay = iteration % delaunay_interval == 0 and iteration < args.freeze_start
+     do_freeze = iteration == args.freeze_start
+-    do_cloning = iteration in dschedule
++    do_cloning = iteration in dschedule and iteration < args.freeze_start
+     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
+     do_sh_step = iteration % args.sh_step == 0
+ 
+     if do_delaunay or do_freeze:
+         st = time.time()
+-        tet_optim.update_triangulation(density_threshold=args.density_threshold, alpha_threshold=args.alpha_threshold, high_precision=do_freeze)
+-        if do_freeze:
++        dt = args.density_threshold if iteration > args.start_threshold else 0
++        at = args.alpha_threshold if iteration > args.start_threshold else 0
++        tet_optim.update_triangulation(
++            density_threshold=dt, alpha_threshold=at, high_precision=do_freeze)
++        if do_freeze and args.bake_model and not model.frozen:
++            # model.save2ply(args.output_path / "ckpt_prefreeze.ply")
++            sd = model.state_dict()
++            sd['indices'] = model.indices
++            torch.save(sd, args.output_path / "ckpt_prefreeze.pth")
++            if args.freeze_features:
++                from models.frozen_features import freeze_model
++            else:
++                from models.frozen import freeze_model
+             del tet_optim
+-            model, tet_optim = freeze_model(model, **args.as_dict())
++            model.eval()
++            mask = determine_cull_mask(train_cameras, model, glo_list, args, device)
++            model.train()
++            print(f"Kept {mask.sum()} tets")
++            model, tet_optim = freeze_model(model, mask, args)
++            del mask
+             gc.collect()
+             torch.cuda.empty_cache()
+ 
+@@ -314,12 +309,15 @@ for iteration in progress_bar:
+         random.shuffle(inds)
+         psnrs.append([])
+     ind = inds.pop()
++    densification_cam_buffer.append(ind)
+     camera = train_cameras[ind]
+     target = camera.original_image.cuda()
+ 
+     st = time.time()
+     ray_jitter = torch.rand((camera.image_height, camera.image_width, 2), device=device)
+-    render_pkg = render(camera, model, scene_scaling=model.scene_scaling, ray_jitter=ray_jitter, **args.as_dict())
++    tid = torch.LongTensor([camera.uid]).cuda()
++    render_pkg = render(camera, model, scene_scaling=model.scene_scaling,
++                        ray_jitter=ray_jitter, glo=glo_list(tid), **args.as_dict())
+     image = render_pkg['render']
+ 
+     if args.use_bilateral_grid:
+@@ -339,18 +337,37 @@ for iteration in progress_bar:
+ 
+     l1_loss = (target - image).abs().mean()
+     l2_loss = ((target - image)**2).mean()
+-    reg = tet_optim.regularizer(render_pkg)
++    reg = tet_optim.regularizer(render_pkg, weight_decay_fn(iteration), args.lambda_tv)
+     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
+     dl_loss = render_pkg['distortion_loss']
++    a = args.density_intercept
++    mask = render_pkg['mask']
++    area = topo_utils.tet_surface_areas(model.vertices[model.indices])
++    density = render_pkg['density'].reshape(-1)
++
++    # density_loss = ((-(density - a)**2 / a**2 + 1).clip(min=0) * area)[mask].mean()
++    density_loss = density[mask].mean()
++    lambda_dist = args.lambda_dist if iteration > 5000 else 0
++    lambda_density = lambda_dist * args.lambda_density if iteration > 5000 else 0
++    # area = topo_utils.tet_volumes(model.vertices[model.indices])
++    render_cost = (density.clip(max=2*args.density_threshold) * area.reshape(-1))[mask].mean()
++    lambda_alpha = args.lambda_alpha if iteration > 5000 else 0
+     loss = (1-args.lambda_ssim)*l1_loss + \
+            args.lambda_ssim*ssim_loss + \
+            reg + \
+-           args.lambda_dist * dl_loss
++           lambda_dist * dl_loss + \
++           lambda_density * density_loss + \
++           lambda_alpha * (1-render_pkg['alpha']).mean() + \
++           args.lambda_color * (render_pkg['color']).abs().mean() + \
++           args.lambda_cost * render_cost
+ 
+     if args.use_bilateral_grid:
+         tvloss = args.lambda_tv_grid * total_variation_loss(bil_grids.grids)
+         loss += tvloss
+ 
++    if args.glo_dim > 0:
++        loss += args.glo_weight_decay * (glo_list.weight**2).mean()
++
+     mask = render_pkg['mask']
+     st = time.time()
+ 
+@@ -367,6 +384,10 @@ for iteration in progress_bar:
+         tet_optim.vertex_optim.step()
+         tet_optim.vertex_optim.zero_grad()
+ 
++    if glo_optim:
++        glo_optim.step()
++        glo_optim.zero_grad()
++
+     if args.use_bilateral_grid:
+         bil_optimizer.step()
+         bil_optimizer.zero_grad(set_to_none=True)
+@@ -374,11 +395,8 @@ for iteration in progress_bar:
+ 
+     tet_optim.update_learning_rate(iteration)
+ 
+-    if do_sh_up:
+-        model.sh_up()
+-
+     with torch.no_grad():
+-        if iteration % 10 == 0:
++        if iteration % 10 == 0 and args.record_training:
+             render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+             sample_image = render_pkg['render']
+             sample_image = sample_image.permute(1, 2, 0)
+@@ -388,12 +406,17 @@ for iteration in progress_bar:
+ 
+     if do_cloning and not model.frozen:
+         with torch.no_grad():
+-            sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
++            # sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
++            sampled_cams = [train_cameras[i] for i in np.unique(densification_cam_buffer)]
+ 
+             model.eval()
+-            stats = collect_render_stats(sampled_cams, model, args, device)
++            stats = collect_render_stats(sampled_cams, model, glo_list, args, device)
+             model.train()
+-            target_addition = targets[dschedule.index(iteration)] - model.vertices.shape[0]
++            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
++            sample_image = render_pkg['render']
++            sample_image = sample_image.permute(1, 2, 0)
++            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
++            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+ 
+             apply_densification(
+                 stats,
+@@ -404,25 +427,19 @@ for iteration in progress_bar:
+                 device      = device,
+                 sample_cam  = sample_camera,
+                 sample_image= sample_image,     # whatever RGB debug frame you use
+-                target_addition= target_addition
+-
++                budget      = max(args.budget - model.vertices.shape[0], 0)
+             )
+-            # tet_optim.prune(**args.as_dict())
+             gc.collect()
+             torch.cuda.empty_cache()
++            densification_cam_buffer = []
+ 
+     # Save checkpoints at specified iterations
+     if iteration in args.checkpoint_iterations:
+-        checkpoint_dir = args.output_path / f"checkpoint_{iteration}"
+-        checkpoint_dir.mkdir(exist_ok=True, parents=True)
+-        model.save2ply(checkpoint_dir / "ckpt.ply")
+-        sd = model.state_dict()
+-        sd['indices'] = model.indices
+-        torch.save(sd, checkpoint_dir / "ckpt.pth")
++        model.save2ply(args.output_path / f"ckpt_{iteration}.ply")
+         print(f"Saved checkpoint at iteration {iteration}")
+ 
+-        with (checkpoint_dir / "config.json").open("w") as f:
+-            json.dump(args.as_dict(), f, cls=CustomEncoder)
++    if do_sh_up:
++        model.sh_up()
+ 
+     psnr = 20 * math.log10(1.0 / math.sqrt(l2_loss.detach().cpu().item()))
+     psnrs[-1].append(psnr)
+@@ -435,10 +452,14 @@ for iteration in progress_bar:
+         "#V": len(model),
+         "#T": model.indices.shape[0],
+         "DL": repr(f"{dl_loss:>5.2f}"),
++        "Density": repr(f"{density_loss.item():.3f}")
+     })
+ 
+ avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
+-video_writer.release()
++if args.record_training:
++    video_writer.release()
++
++model.save2ply(args.output_path / "ckpt.ply")
+ 
+ torch.cuda.synchronize()
+ torch.cuda.empty_cache()
+@@ -457,17 +478,22 @@ with (args.output_path / "results.json").open("w") as f:
+     json.dump(all_data, f, cls=CustomEncoder)
+ 
+ with torch.no_grad():
++    if args.glo_dim > 0:
++        mean_glo = glo_list.weight.data.mean(dim=0)
++    else:
++        mean_glo = None
+     epath = cam_util.generate_cam_path(train_cameras, 400)
+     eimages = []
+     for camera in tqdm(epath):
+-        render_pkg = render(camera, model, min_t=min_t, tile_size=args.tile_size)
++        render_pkg = render(camera, model, glo=mean_glo, min_t=min_t, tile_size=args.tile_size)
+         image = render_pkg['render']
+         image = image.permute(1, 2, 0)
+         image = image.detach().cpu().numpy()
+         eimages.append(pad_image2even(image))
+ mediapy.write_video(args.output_path / "rotating.mp4", eimages)
+ 
+-model.save2ply(args.output_path / "ckpt.ply")
+ sd = model.state_dict()
+ sd['indices'] = model.indices
+ torch.save(sd, args.output_path / "ckpt.pth")
++if args.glo_dim > 0:
++    torch.save(glo_list.state_dict(), args.output_path / "glo.pth")
+diff --git a/utils/densification.py b/utils/densification.py
+index 707527d..311dd4c 100644
+--- a/utils/densification.py
++++ b/utils/densification.py
+@@ -4,65 +4,154 @@ from utils import safe_math
+ from typing import NamedTuple, List
+ import gc
+ from delaunay_rasterization.internal.render_err import render_err
++from delaunay_rasterization import render_debug
+ import torch
+-from utils.train_util import *
+-from utils import topo_utils
++from icecream import ic
++
++def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
++    """
++    Calculates the approximate intersection point for pairs of line segments.
++
++    The intersection is defined as the midpoint of the shortest segment
++    connecting the two input line segments.
++
++    Args:
++        split_rays_data (torch.Tensor): Tensor of shape (N, 2, 6).
++            - N: Number of segment pairs.
++            - 2: Represents the two segments in a pair.
++            - 6: Contains [Ax, Ay, Az, Bx, By, Bz] for each segment,
++                 where A and B are the segment endpoints.
++                 Based on current Python code:
++                 A = average_P_exit, B = average_P_entry
++        epsilon (float): Small value to handle parallel lines and avoid
++                         division by zero if a segment has zero length.
++
++    Returns:
++        torch.Tensor: Tensor of shape (N, 3) representing the approximate
++                      "intersection" points (midpoints of closest approach).
++    """
++    # Segment 1 endpoints
++    p1_a = split_rays_data[:, 0, 0:3]  # Endpoint A of first segments (N, 3)
++    p1_b = split_rays_data[:, 0, 3:6]  # Endpoint B of first segments (N, 3)
++    # Segment 2 endpoints
++    p2_a = split_rays_data[:, 1, 0:3]  # Endpoint A of second segments (N, 3)
++    p2_b = split_rays_data[:, 1, 3:6]  # Endpoint B of second segments (N, 3)
++
++    # Define segment origins and direction vectors
++    # Segment S1: o1 + s * d1, for s in [0, 1]
++    # Segment S2: o2 + t * d2, for t in [0, 1]
++    o1 = p1_a
++    d1 = p1_b - p1_a  # Direction vector for segment 1 (from A to B)
++    o2 = p2_a
++    d2 = p2_b - p2_a  # Direction vector for segment 2 (from A to B)
++
++    # Calculate terms for finding closest points on the infinite lines
++    # containing the segments (based on standard formulas, e.g., Christer Ericson's "Real-Time Collision Detection")
++    v_o = o1 - o2 # Vector from origin of line 2 to origin of line 1
++
++    a = torch.sum(d1 * d1, dim=1)  # Squared length of d1
++    b = torch.sum(d1 * d2, dim=1)  # Dot product of d1 and d2
++    c = torch.sum(d2 * d2, dim=1)  # Squared length of d2
++    d = torch.sum(d1 * v_o, dim=1) # d1 dot (o1 - o2)
++    e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
++
++    denom = a * c - b * b
++    s_line_num = (b * e) - (c * d)
++    t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
++
++    # Handle near-zero denominator (lines are parallel or one segment is a point)
++    # We compute with a safe denominator, then clamp. Clamping is key for segments.
++    denom_safe = torch.where(denom.abs() < epsilon, torch.ones_like(denom), denom)
++    
++    s_line = s_line_num / denom_safe
++    t_line = t_line_num / denom_safe # Note: This t_line is for the parameter of d2 (from o2)
++
++    # Clamp parameters to [0, 1] to stay within the segments
++    bad_intersect = (s_line < 0) | (t_line < 0) | (s_line > 1) | (t_line > 1)
++    s_seg = torch.clamp(s_line, 0.0, 1.0)
++    t_seg = torch.clamp(t_line, 0.0, 1.0)
+ 
++    # Points of closest approach on the segments
++    pc1 = o1 + s_seg.unsqueeze(1) * d1
++    pc2 = o2 + t_seg.unsqueeze(1) * d2
++    
++    p_int = (pc1 + pc2) / 2.0
++                        
++    return p_int, bad_intersect
+ 
+ # -----------------------------------------------------------------------------
+ # 1.  Aggregation helper
+ # -----------------------------------------------------------------------------
+ class RenderStats(NamedTuple):
+-    total_within_var_votes: torch.Tensor    # (T, 2)
+-    total_within_var: torch.Tensor    # (T, 2)
+-    within_var_rays: torch.Tensor         # (T, 2, 6)
+-    total_var_moments: torch.Tensor     # (T, 3)
+-    between_var_moments: torch.Tensor   # (T, 3)
+-    tet_moments: torch.Tensor           # (T, 4)
+-    tet_view_count: torch.Tensor             # (T,)
+-    total_var_count: torch.Tensor         # (T,)
+-    tet_size: torch.Tensor              # (T,)
+-    peak_contrib: torch.Tensor              # (T,)
+-    total_T: torch.Tensor
++    within_var_rays: torch.Tensor
++    total_var_moments: torch.Tensor
++    tet_moments: torch.Tensor
++    tet_view_count: torch.Tensor
+     total_err: torch.Tensor
+-    total_ssim: torch.Tensor
+-    max_ssim: torch.Tensor
+     top_ssim: torch.Tensor
+     top_size: torch.Tensor
++    total_count: torch.Tensor
++    peak_contrib: torch.Tensor
++    alphas: torch.Tensor
++    density: torch.Tensor
+ 
++@torch.no_grad()
++def determine_cull_mask(
++    sampled_cameras: List["Camera"],
++    model,
++    glo_list,
++    args,
++    device: torch.device,
++):
++    """Accumulate densification statistics for one iteration."""
++    n_tets = model.indices.shape[0]
++    peak_contrib = torch.zeros((n_tets), device=device)
++
++    for cam in sampled_cameras:
++        target = cam.original_image.cuda()
++
++        image_votes, extras = render_err(
++            target, cam, model,
++            scene_scaling=model.scene_scaling,
++            tile_size=args.tile_size,
++            lambda_ssim=0,
++            glo=glo_list(torch.LongTensor([cam.uid]).to(device))
++        )
++
++        tc = extras["tet_count"][..., 0]
++        max_T = extras["tet_count"][..., 1].float() / 65535
++        image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
++        _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
++        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
++        peak_contrib = torch.maximum(max_T, peak_contrib)
++
++    tet_density = model.calc_tet_density()
++    alphas = model.calc_tet_alpha(mode="min", density=tet_density)
++    mask = ((peak_contrib > args.contrib_threshold))
++    return mask
+ 
+ @torch.no_grad()
+ def collect_render_stats(
+     sampled_cameras: List["Camera"],
+     model,
++    glo_list,
+     args,
+     device: torch.device,
+ ):
+     """Accumulate densification statistics for one iteration."""
+     n_tets = model.indices.shape[0]
+-
+-    # Pre-allocate accumulators ------------------------------------------------
+     tet_moments = torch.zeros((n_tets, 4), device=device)
+     tet_view_count = torch.zeros((n_tets,), device=device)
+-    tet_size = torch.zeros_like(tet_view_count)
+-    total_var_count = torch.zeros((n_tets,), device=device)
+ 
+-    total_within_var = torch.zeros((n_tets), device=device)
+-    max_ssim = torch.zeros((n_tets), device=device)
+-    total_ssim = torch.zeros((n_tets), device=device)
++    peak_contrib = torch.zeros((n_tets), device=device)
+     top_ssim = torch.zeros((n_tets, 2), device=device)
+     top_size = torch.zeros((n_tets, 2), device=device)
+-    total_T = torch.zeros((n_tets), device=device)
+     total_err = torch.zeros((n_tets), device=device)
+-    peak_contrib = torch.zeros((n_tets), device=device)
+-    total_within_var_votes = torch.zeros((n_tets, 2), device=device)
++    total_count = torch.zeros((n_tets), device=device, dtype=int)
+     within_var_rays = torch.zeros((n_tets, 2, 6), device=device)
+     total_var_moments = torch.zeros((n_tets, 3), device=device)
+-    between_var_moments = torch.zeros((n_tets, 3), device=device)
+     top_moments = torch.zeros((n_tets, 2, 4), device=device)
+ 
+-
+-    # Main per-camera loop -----------------------------------------------------
+     for cam in sampled_cameras:
+         target = cam.original_image.cuda()
+ 
+@@ -70,45 +159,28 @@ def collect_render_stats(
+             target, cam, model,
+             scene_scaling=model.scene_scaling,
+             tile_size=args.tile_size,
+-            lambda_ssim=args.clone_lambda_ssim
++            lambda_ssim=0,
++            glo=glo_list(torch.LongTensor([cam.uid]).to(device))
+         )
+ 
+-        tc = extras["tet_count"]
++        tc = extras["tet_count"][..., 0]
++        max_T = extras["tet_count"][..., 1].float() / 65535
+         
+-        # --- Create a single mask for valid updates ---
+-        # Mask for tets that have a reasonable number of samples in the current view
+         update_mask = (tc >= args.min_tet_count) & (tc < 8000)
+ 
+         # --- Moments (s0: sum of T, s1: sum of err, s2: sum of err^2)
+         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
+-        # total_T_p, image_err, image_err2 = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+-        N = tc
+-        peak_contrib = torch.maximum(image_T, peak_contrib)
+-        total_T += image_T
+         total_err += image_Terr
+-        total_ssim += image_ssim
+-        max_ssim = torch.maximum(image_ssim, max_ssim)
+-
+-        # -------- Within-Image Variance (Top-2 per tet) -----------------------
+-        within_var_mu = safe_math.safe_div(image_err, N)
+-        within_var_std = (safe_math.safe_div(image_err2, N) - within_var_mu**2).clip(min=0)
+-        within_var_std[N < 10] = 0
+-        within_var_std[~update_mask] = 0 # Use the unified mask
+-
+-        within_var_votes = image_T * within_var_std
++        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
++        peak_contrib = torch.maximum(max_T, peak_contrib)
+ 
+         # ray buffer: (enter | exit) → (N, 6)
+         w = image_votes[:, 12:13]
+         seg_exit = safe_math.safe_div(image_votes[:, 9:12], w)
+         seg_enter = safe_math.safe_div(image_votes[:, 6:9], w)
+ 
+-        # keep top-2 candidates per tet across all views
+-        total_within_var += within_var_votes
+-        votes_3 = torch.cat([total_within_var_votes, within_var_votes[:, None]], dim=1)
+-        votes_sorted, idx_sorted = votes_3.sort(1, descending=True)
+-        total_within_var_votes = votes_sorted[:, :2]
+-
++        image_ssim[~update_mask] = 0
+         top_ssim, idx_sorted = torch.cat([top_ssim[:, :2], image_ssim.reshape(-1, 1)], dim=1).sort(1, descending=True)
+         top_size = torch.gather(
+             torch.cat([top_size, tc.reshape(-1, 1)], dim=1), 1,
+@@ -136,47 +208,34 @@ def collect_render_stats(
+         )
+ 
+         # -------- Total Variance (accumulated across images) ------------------
+-        total_var_moments[update_mask, 0] += N[update_mask]
+-        # total_var_moments[update_mask, 0] += image_T[update_mask]
+-        total_var_moments[update_mask, 1] += image_err[update_mask]
+-        total_var_moments[update_mask, 2] += image_err2[update_mask]
+-        total_var_count[update_mask] += N[update_mask]
+-
+-        # -------- Between-Image Variance (accumulated across images) ----------
+-        # We compute the variance of the mean error across different views
+-        mean_err_per_view = within_var_mu
+-        mean_err_per_view[N < 10] = 0
+-
+-        between_var_moments[update_mask, 0] += image_T[update_mask] # Use summed image_T as weight
+-        between_var_moments[update_mask, 1] += mean_err_per_view[update_mask]
+-        between_var_moments[update_mask, 2] += (mean_err_per_view[update_mask])**2
++        # total_var_moments[update_mask, 0] += tc[update_mask]
++        total_var_moments[update_mask, 0] += image_T[update_mask]
++        total_var_moments[update_mask, 1] += image_T[update_mask] * image_err[update_mask]
++        total_var_moments[update_mask, 2] += image_T[update_mask] * image_err2[update_mask]
++        # total_count += N
++        total_count[update_mask] += 1
+ 
+         # -------- Other stats -------------------------------------------------
+         tet_moments[update_mask, :3] += image_votes[update_mask, 13:16]
+         tet_moments[update_mask, 3] += w[update_mask].reshape(-1)
+ 
+         tet_view_count[update_mask] += 1 # Count views per tet
+-        tet_size += tc
+ 
++    tet_density = model.calc_tet_density()
++    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
+     # done
+     return RenderStats(
+-        total_within_var_votes = total_within_var_votes,
+-        total_within_var = total_within_var,
+         within_var_rays = within_var_rays,
+         total_var_moments = total_var_moments,
+-        between_var_moments = between_var_moments,
+         tet_moments = tet_moments,
+-        # tet_moments = top_moments.sum(dim=1),
+         tet_view_count = tet_view_count,
+-        total_var_count = total_var_count,
+-        tet_size = tet_size,
+-        peak_contrib = peak_contrib,
+-        total_T = total_T,
+         total_err = total_err,
+-        total_ssim = total_ssim,
+-        max_ssim = max_ssim,
++        total_count = total_count,
+         top_ssim = top_ssim[:, :2],
+         top_size = top_size[:, :2],
++        peak_contrib = peak_contrib,
++        density=tet_density,
++        alphas=alphas
+     )
+ 
+ @torch.no_grad()
+@@ -189,118 +248,67 @@ def apply_densification(
+     device: torch.device,
+     sample_cam,
+     sample_image,
+-    target_addition
++    budget: int
+ ):
+-    """Turns accumulated statistics into actual vertex cloning / splitting."""
+-    # ---------- Calculate scores from variances ------------------------------
+-    total_T, s1_b, s2_b = stats.between_var_moments.T
+-    # 1. Total Variance Score (for growing)
+     s0_t, s1_t, s2_t = stats.total_var_moments.T
+-    N_t = stats.total_var_count
+     total_var_mu = safe_math.safe_div(s1_t, s0_t)
+     total_var_std = (safe_math.safe_div(s2_t, s0_t) - total_var_mu**2).clip(min=0)
+-    total_var_std[s0_t < 1] = 0
+-
+-    # 2. Between-Image Variance Score (for splitting)
+-    N_b = stats.tet_view_count # Num views
+-    between_var_mu = safe_math.safe_div(s1_b, N_b)
+-    between_var_std = (safe_math.safe_div(s2_b, N_b) - between_var_mu**2).clip(min=0)
+-    between_var_std[N_b < 2] = 0 # Need at least 2 views for variance
++    total_var_std[s0_t < 1e-2] = 0
+ 
+-    # 3. Within-Image Variance Score (for splitting)
+-    within_var = stats.total_within_var_votes[:, 0]
+-    # within_var = stats.total_ssim / stats.tet_size.clip(min=1).sqrt()
+     within_var = stats.top_ssim.sum(dim=1) / stats.top_size.sum(dim=1).clip(min=1).sqrt()
+-    # within_var = stats.top_ssim[:, 0] / stats.tet_size.clip(min=1).sqrt()
+-
+-    between_var = stats.total_T * between_var_std # Weighted by summed s0
+-    total_var = stats.total_err * total_var_std
+-    # total_var = stats.total_T * safe_math.safe_div(total_var_std, between_var_std).clip(min=0, max=10)
+-    total_var[(N_b < 2) | (s0_t < 1)] = 0
+-    # within_var = stats.total_within_var / stats.tet_view_count.clip(min=1)
+-    # within_var = safe_math.safe_div(stats.total_within_var, total_T)
+-    # total_var += within_var
+-    vertices = model.vertices
+-    # circumcenters, _, tet_density, rgb, grd, sh = model.compute_batch_features(vertices, model.indices, 0, model.indices.shape[0])
+-
+-    # --- Masking and target calculation --------------------------------------
+-    tet_density = model.calc_tet_density()
+-    alphas = model.calc_tet_alpha(mode="max", density=tet_density)
+-    mask_alive = (alphas >= args.clone_min_alpha) & (tet_density.reshape(-1) >= args.clone_min_density)
+-    # area = topo_utils.tet_volumes(model.vertices[model.indices])
+-    # ratio = safe_math.safe_div(alphas, area)
+-    # mask_alive = ratio > args.clone_min_ratio
++
++    total_var = (stats.total_err / stats.total_count.clip(min=1)) * total_var_std
++    # N_b = stats.tet_view_count # Num views
++    # total_var[(N_b < 2) | (s0_t < 1)] = 0
++
++    # mask_alive = (stats.alphas >= args.clone_min_alpha) & (stats.density.reshape(-1) >= args.clone_min_density)
++
++
++    mask_alive = ((stats.peak_contrib > args.contrib_threshold) | (stats.alphas > args.clone_min_alpha)).int()
++    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=stats.alphas.device)
++    indices = model.indices.long()
++    reduce_type = "sum"
++    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive, reduce=reduce_type)
++    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive, reduce=reduce_type)
++    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive, reduce=reduce_type)
++    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive, reduce=reduce_type)
++
++
+     total_var[~mask_alive] = 0
+     within_var[~mask_alive] = 0
+-    between_var[~mask_alive] = 0
+-    # total_var = (total_var - between_var).clip(min=0)
+-
+-    target_addition = min(target_addition, stats.tet_view_count.shape[0])
+-    if target_addition < 0:
+-        return
+-
+-    # Assume args.percent_total_var and args.percent_within_var exist
+-    target_total = int(args.percent_total * target_addition)
+-    target_within = int(args.percent_within * target_addition)
+-    target_between = int(max(0, target_addition - target_total - target_within))
+-
+-    grow_mask = torch.zeros_like(total_var, dtype=torch.bool)
+-    within_mask = torch.zeros_like(grow_mask)
+-    between_mask = torch.zeros_like(grow_mask)
+-
+-    # To prevent overlap, we select candidates sequentially
+-    # and zero out the scores of selected tets in other categories.
+-    temp_total_score = total_var.clone()
+-    temp_within_score = within_var.clone()
+-    temp_between_score = between_var.clone()
+-
+-    if target_total > 0:
+-        top_total = torch.topk(temp_total_score, target_total).indices
+-        grow_mask[top_total] = temp_total_score[top_total] > 0
+-        temp_within_score[grow_mask] = 0
+-        temp_between_score[grow_mask] = 0
+-
+-    if target_within > 0:
+-        top_within = torch.topk(temp_within_score, target_within).indices
+-        within_mask[top_within] = temp_within_score[top_within] > 0
+-        temp_between_score[within_mask] = 0
+-    
+-    if target_between > 0:
+-        top_between = torch.topk(temp_between_score, target_between).indices
+-        between_mask[top_between] = temp_between_score[top_between] > 0
+-
+-    split_mask = within_mask | between_mask
+-    clone_mask = split_mask | grow_mask
++    within_mask = (within_var > args.within_thresh)
++    total_mask = (total_var > args.total_thresh)
++    clone_mask = within_mask | total_mask
++    if clone_mask.sum() > budget:
++        true_indices = clone_mask.nonzero().squeeze(-1)
++        perm = torch.randperm(true_indices.size(0))
++        selected_indices = true_indices[perm[:budget]]
++        
++        clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
++        clone_mask[selected_indices] = True
+ 
+-    # ---------- debug renders -------------------------------------------------
+     if args.output_path is not None:
+ 
+         f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
+         color = torch.rand_like(f[:, :3])
+-        # color = rgb + 0.5#torch.rand_like(f[:, :3])
+         f[:, :3] = color
+         f[:, 3] *= 2.0    # alpha
+-        imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+-                        render_debug(f, model, sample_cam, 10))
++        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
++        #                 render_debug(f, model, sample_cam, 10))
+         f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
+         f[:, :3] = color
+         f[:, 3] *= 2.0    # alpha
+-        imageio.imwrite(args.output_path / f"densify{iteration}.png",
+-                        render_debug(f, model, sample_cam, 10))
+-        imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+-                        render_debug(total_var[:, None],
+-                                     model, sample_cam))
+-        imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+-                        render_debug(within_var[:, None],
+-                                     model, sample_cam))
+-        imageio.imwrite(args.output_path / f"between_var{iteration}.png",
+-                        render_debug(between_var[:, None],
+-                                     model, sample_cam))
++        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
++        #                 render_debug(f, model, sample_cam, 10))
++        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
++        #                 render_debug(total_var[:, None],
++        #                              model, sample_cam))
++        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
++        #                 render_debug(within_var[:, None],
++        #                              model, sample_cam))
+         imageio.imwrite(args.output_path / f"im{iteration}.png",
+                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+ 
+-
+-    # ---------- pick clone positions -----------------------------------------
+     clone_indices = model.indices[clone_mask]
+     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
+     grow_point = safe_math.safe_div(
+@@ -315,36 +323,17 @@ def apply_densification(
+     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
+     split_point[bad] = random_locations[bad]    # fall back
+ 
++    keep_verts = keep_verts > 0
++    print(f"Pruned: {(~keep_verts).sum()}")
++    # tet_optim.remove_points(keep_verts.reshape(-1))
+     tet_optim.split(clone_indices,
+                     split_point,
+                     **args.as_dict())
+ 
+-    # ---------- velocity-based additions -------------------------------------
+-    raw_verts = model.contracted_vertices
+-    vstate = tet_optim.vertex_optim.get_state_by_name("contracted_vertices")
+-    velocity = vstate["exp_avg"] * args.speed_mul
+-
+-    if model.contract_vertices:
+-        J_d = topo_utils.contraction_jacobian_d_in_chunks(
+-            model.vertices[:raw_verts.shape[0]]).view(-1, 1)
+-        speed = torch.linalg.norm(velocity * J_d, dim=1)
+-    else:
+-        speed = torch.linalg.norm(velocity, dim=1)
+-        
+-    if args.clone_velocity > 0:
+-        new_verts = (raw_verts + velocity)[speed > args.clone_velocity]
+-        tet_optim.add_points(new_verts, raw_verts=True)
+-        num_cloned = new_verts.shape[0]
+-    else:
+-        num_cloned = 0
+-
+-    # ---------- housekeeping --------------------------------------------------
+     gc.collect()
+     torch.cuda.empty_cache()
+ 
+     print(
+-        f"#Grow: {grow_mask.sum():4d} #Split: {split_mask.sum():4d} | "
+-        f"T_Total: {target_total:4d} T_Within: {target_within:4d} T_Between: {target_between:4d} | "
+-        f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} Between Avg: {between_var.mean():.4f}  | "
+-        f"By Vel: {num_cloned}"
++        f"#Within: {within_mask.sum():4d} #Total: {total_mask.sum():4d} | "
++        f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f}"
+     )
+diff --git a/utils/hashgrid.py b/utils/hashgrid.py
+index 5e6753a..cdf7f7c 100644
+--- a/utils/hashgrid.py
++++ b/utils/hashgrid.py
+@@ -63,12 +63,15 @@ class HashEmbedderOptimized(nn.Module):
+ 
+         self.hash_mask = (1 << log2_hashmap_size) - 1
+         self.out_dim = n_levels * n_features_per_level
+-        self.n_output_dims = self.out_dim  # backwards compat
++        self.n_output_dims = self.out_dim
+ 
+     def ingp_hash(self, coords):
+-        xor_result = torch.zeros_like(coords[..., 0])
++        UINT32_MASK = 0xFFFFFFFF
++        xor_result = torch.zeros_like(coords[..., 0]).clone()
+         for i in range(coords.shape[-1]):
+-             xor_result ^= coords[..., i] * self.primes[i]
++            term = (coords[..., i] * self.primes[i]) & UINT32_MASK
++            xor_result ^= term
++
+         return xor_result & self.hash_mask
+ 
+     def get_voxel_vertices(self, x, level_idx):
+@@ -89,7 +92,6 @@ class HashEmbedderOptimized(nn.Module):
+         num_voxels = resolution ** 3
+ 
+         if self.use_conditional_hashing and (num_voxels <= hashmap_size):
+-            # --- Collision-free path: Use modulo for wrap-around ---
+             res_sq = res_long * res_long
+             wrapped_indices = voxel_indices % res_long
+             hashed_voxel_indices = (
+@@ -98,7 +100,6 @@ class HashEmbedderOptimized(nn.Module):
+                 wrapped_indices[..., 2] * res_sq
+             )
+         else:
+-            # --- Standard iNGP hash: Use raw integer indices ---
+             hashed_voxel_indices = self.ingp_hash(voxel_indices)
+         
+         return fracs, hashed_voxel_indices
+@@ -124,10 +125,6 @@ class HashEmbedderOptimized(nn.Module):
+         return torch.cat(x_embedded_all, dim=-1)
+ 
+     def forward_in_chunks(self, x, chunk_size=548576):
+-    # def forward_in_chunks(self, x, chunk_size=65536):
+-        """
+-        Same as forward(), but processes 'x' in chunks to reduce memory usage.
+-        """
+         outputs = []
+         start = 0
+         while start < x.shape[0]:
+@@ -135,4 +132,4 @@ class HashEmbedderOptimized(nn.Module):
+             x_chunk = x[start:end]
+             outputs.append(self.forward(x_chunk))
+             start = end
+-        return torch.cat(outputs, dim=0)
+\ No newline at end of file
++        return torch.cat(outputs, dim=0)
+diff --git a/utils/model_util.py b/utils/model_util.py
+index 405d326..b4e38e4 100644
+--- a/utils/model_util.py
++++ b/utils/model_util.py
+@@ -1,17 +1,11 @@
+ import torch
+ from torch import nn
+ from utils import hashgrid
+-import math
+ 
+-from utils.graphics_utils import l2_normalize_th
+-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
++from utils.topo_utils import calculate_circumcenters_torch
+ from utils.safe_math import safe_exp, safe_div, safe_sqrt
+-from utils.contraction import contract_mean_std
+-from utils.contraction import contract_points, inv_contract_points
+-from sh_slang.eval_sh_py import eval_sh
+-from utils.hashgrid import HashEmbedderOptimized
+ from icecream import ic
+-import torch.nn.init as init # Common alias for torch.nn.init
++import math
+ 
+ C0 = 0.28209479177387814
+ def RGB2SH(rgb):
+@@ -105,24 +99,15 @@ def compute_vertex_colors_from_field(
+       color = base_for_channel + dot(gradient_for_channel, normalized(vertex - circumcenter))
+     """
+     offsets = element_verts - circumcenters[:, None, :]
+-
+-    # grad_contrib: (T, V, C)
+-    # gradients: (T, C, D) = (T, 3, 3)
+-    # normalized_offsets: (T, V, D) = (T, 4, 3)
+-    # einsum: 'tcd,tvd->tvc'
+-    # t: batch (Elements)
+-    # c: color channels (of gradient)
+-    # d: spatial dimensions (of gradient and offset)
+-    # v: vertices
+-    # Output: for each element, for each vertex, for each color channel
+     grad_contrib = torch.einsum('tcd,tvd->tvc', gradients, offsets)
+     vertex_colors = base[:, None, :] + grad_contrib 
+     
+     return vertex_colors
+ 
+ def offset_normalize(rgb, grd, circumcenters, tets):
+-    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
+-    radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
++    # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
++    grd = grd.reshape(-1, 1, 3)# * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
++    radius = torch.linalg.norm(tets[:, :1] - circumcenters[:, None, :], dim=-1, keepdim=True)
+     normed_grd = safe_div(grd, radius)
+     vcolors = compute_vertex_colors_from_field(
+         tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())
+@@ -130,34 +115,60 @@ def offset_normalize(rgb, grd, circumcenters, tets):
+     base_color_v0_raw = vcolors[:, 0]
+     return base_color_v0_raw, normed_grd
+ 
+-def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg):
+-    tets = vertices[indices]
+-    base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
+-    tet_color_raw = eval_sh(
+-        tets.mean(dim=1),
+-        RGB2SH(base_color_v0_raw),
+-        sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3).half(),
+-        camera_center,
+-        current_sh_deg).float()
+-    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+-    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
++@torch.jit.script
++def activate_output(camera_center, tet_color_raw, density, grd, circumcenters, tets):
++    tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
++    base_color_v0, normed_grd = offset_normalize(
++        tet_color, grd, circumcenters.detach(), tets.detach())
++    # offset = ((camera_center - tets[:, 0]) * normed_grd.reshape(-1, 3)).sum(dim=-1)
++    features = torch.cat([
++        density,
++        base_color_v0.reshape(-1, 3),# + offset.reshape(-1, 1),
++        normed_grd.reshape(-1, 3)
++    ], dim=1)
+     return features.float()
+ 
++class GloMLP(torch.nn.Module):
++    def __init__(self, input_dim: int, output_dim: int):
++        super().__init__()
++        self.mlp = torch.nn.Sequential(
++            torch.nn.Linear(input_dim, 128),
++            torch.nn.SiLU(),
++            torch.nn.Linear(128, 256),
++            torch.nn.SiLU(),
++            torch.nn.Linear(256, 128),
++            torch.nn.SiLU(),
++            torch.nn.Linear(128, output_dim*2),
++        )
++        last = self.mlp[-1]
++        with torch.no_grad():
++            nn.init.xavier_uniform_(last.weight, 1e-3)
++            last.bias.zero_()
++
++    def forward(self, glo_latent, input_x):
++        out = self.mlp(glo_latent)
++        a, b = torch.split(out, out.shape[-1] // 2, dim=-1)
++        return input_x * torch.exp(a.clip(max=3)).reshape(1, -1) + b.reshape(1, -1)
++
++
+ class iNGPDW(nn.Module):
+     def __init__(self, 
+                  sh_dim=0,
++                 glo_dim=0,
+                  scale_multi=0.5,
+                  log2_hashmap_size=16,
+                  base_resolution=16,
+                  per_level_scale=2,
+                  L=10,
+                  hashmap_dim=4,
++                 sh_hidden_dim=64,
+                  hidden_dim=64,
+                  g_init=1,
+                  s_init=1e-4,
+                  d_init=0.1,
+                  c_init=0.6,
+                  density_offset=-4,
++                 ablate_gradient = False,
+                  **kwargs):
+         super().__init__()
+         self.scale_multi = scale_multi
+@@ -167,45 +178,51 @@ class iNGPDW(nn.Module):
+         self.base_resolution = base_resolution
+         self.density_offset = density_offset
+ 
++        # self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
++        self.gmul = 1 if not ablate_gradient else 0
++
+         self.encoding = hashgrid.HashEmbedderOptimized(
+             [torch.zeros((3)), torch.ones((3))],
+             self.L, n_features_per_level=self.dim,
+             log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
+             finest_resolution=base_resolution*per_level_scale**self.L)
+ 
+-        def mk_head(n):
++        self.n_output_dims = self.encoding.n_output_dims
++
++        def mk_head(n, hidden_dim):
+             network = nn.Sequential(
+-                nn.Linear(self.encoding.n_output_dims, hidden_dim),
++                nn.Linear(self.n_output_dims, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
+                 nn.SELU(inplace=True),
+                 nn.Linear(hidden_dim, hidden_dim),
+                 nn.SELU(inplace=True),
+                 nn.Linear(hidden_dim, n)
+             )
+-            gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
++            gain = nn.init.calculate_gain('relu')
+             network.apply(lambda m: init_linear(m, gain))
+             return network
+-        self.network = mk_head(1+12+sh_dim)
++        self.hidden_dim = hidden_dim
++        self.sh_hidden_dim = sh_hidden_dim
+ 
+-        self.density_net   = mk_head(1)
+-        self.color_net     = mk_head(3)
+-        self.gradient_net  = mk_head(3)
+-        self.sh_net        = mk_head(sh_dim)
++        self.density_net   = mk_head(1, hidden_dim)
++        self.color_net     = mk_head(3, hidden_dim)
++        self.gradient_net  = mk_head(3, hidden_dim)
++        self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
++        self.glo_net = GloMLP(glo_dim, self.n_output_dims)
++        self.glo_dim = glo_dim
+ 
+-        last = self.network[-1]
+         with torch.no_grad():
+-            last.weight[4:, :].zero_()
+-            last.bias[4:].zero_()
+             for network, eps in zip(
+                 [self.gradient_net, self.sh_net, self.density_net, self.color_net], 
+                 [g_init, s_init, d_init, c_init]):
+                 last = network[-1]
+                 with torch.no_grad():
+-                    init.uniform_(last.weight.data, a=-eps, b=eps)
+-                    # nn.init.xavier_uniform_(m.weight, gain)
++                    # init.uniform_(last.weight.data, a=-eps, b=eps)
++                    nn.init.xavier_uniform_(last.weight, eps)
+                     last.bias.zero_()
+ 
+-
+-    def _encode(self, x: torch.Tensor, cr: torch.Tensor):
++    def encode(self, x: torch.Tensor, cr: torch.Tensor):
+         x = x.detach()
+         output = self.encoding(x).float()
+         output = output.reshape(-1, self.dim, self.L)
+@@ -215,21 +232,97 @@ class iNGPDW(nn.Module):
+                          safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
+         scaling = torch.erf(erf_x)
+         output = output * scaling
+-        return output
++        return output.reshape(-1, self.L * self.dim)
++
+ 
++    def forward(self, x, cr, glo):
++        h = self.encode(x, cr)
++
++        sigma = self.density_net(h)
++        if glo is not None:
++            hglo = self.glo_net(glo, h)
++        else:
++            hglo = h
++        rgb = self.color_net(hglo)
++        field_samples = self.gradient_net(hglo)
++        sh  = self.sh_net(hglo)
++
++        rgb = rgb.reshape(-1, 3, 1) + 0.5
++        # rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
++        density = safe_exp(3*sigma+self.density_offset)
++        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
++        # grd = field_samples.reshape(-1, 1, 3)
++        # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
++        return density, rgb.reshape(-1, 3), grd, sh
++
++class Heads(nn.Module):
++    def __init__(self, 
++                 n_output_dims,
++                 sh_dim,
++                 glo_dim=0,
++                 scale_multi=0.5,
++                 log2_hashmap_size=16,
++                 base_resolution=16,
++                 per_level_scale=2,
++                 L=10,
++                 hashmap_dim=4,
++                 sh_hidden_dim=64,
++                 hidden_dim=64,
++                 g_init=1,
++                 s_init=1e-4,
++                 d_init=0.1,
++                 c_init=0.6,
++                 density_offset=-4,
++                 ablate_gradient = False,
++                 **kwargs):
++        super().__init__()
++        self.scale_multi = scale_multi
++        self.L = L
++        self.dim = hashmap_dim
++        self.per_level_scale = per_level_scale
++        self.base_resolution = base_resolution
++        self.density_offset = density_offset
+ 
+-    def forward(self, x, cr):
+-        output = self._encode(x, cr)
++        self.gmul = 1 / math.sqrt(3) if not ablate_gradient else 0
+ 
+-        h = output.reshape(-1, self.L * self.dim)
++        def mk_head(n, hidden_dim):
++            network = nn.Sequential(
++                nn.Linear(n_output_dims, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, hidden_dim),
++                nn.SELU(inplace=True),
++                nn.Linear(hidden_dim, n)
++            )
++            gain = nn.init.calculate_gain('relu')
++            network.apply(lambda m: init_linear(m, gain))
++            return network
+ 
++        self.hidden_dim = hidden_dim
++        self.sh_hidden_dim = sh_hidden_dim
++        self.density_net   = mk_head(1, hidden_dim)
++        self.color_net     = mk_head(3, hidden_dim)
++        self.gradient_net  = mk_head(3, hidden_dim)
++        self.sh_net        = mk_head(sh_dim, sh_hidden_dim)
++        self.glo_net = GloMLP(glo_dim, n_output_dims)
++        self.glo_dim = glo_dim
++
++    def forward(self, h, glo):
++        h = h.float()
+         sigma = self.density_net(h)
+-        rgb = self.color_net(h)
+-        field_samples = self.gradient_net(h)
+-        sh  = self.sh_net(h).half()
++        if glo is not None:
++            hglo = self.glo_net(glo, h)
++        else:
++            hglo = h
++        rgb = self.color_net(hglo)
++        field_samples = self.gradient_net(hglo)
++        sh  = self.sh_net(hglo)
+ 
+         rgb = rgb.reshape(-1, 3, 1) + 0.5
+-        density = safe_exp(sigma+self.density_offset)
+-        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
++        # rgb = torch.sigmoid(rgb.reshape(-1, 3, 1))
++        density = safe_exp(3*sigma+self.density_offset)
++        grd = torch.tanh(field_samples.reshape(-1, 1, 3)) * self.gmul
++        # grd = field_samples.reshape(-1, 1, 3)
+         # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
+         return density, rgb.reshape(-1, 3), grd, sh
+diff --git a/utils/train_util.py b/utils/train_util.py
+index 3e342ae..f810d03 100644
+--- a/utils/train_util.py
++++ b/utils/train_util.py
+@@ -1,24 +1,38 @@
+ import torch
+ import time
+ import math
+-from data.camera import Camera
+-from utils import optim
+-from sh_slang.eval_sh import eval_sh
+-from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render
+-from delaunay_rasterization.internal.alphablend_tiled_slang_linear import AlphaBlendTiledRender as LinearRender
+-from delaunay_rasterization.internal.render_grid import RenderGrid
+-from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader, point2image
+ import numpy as np
+ from utils import topo_utils
+ from icecream import ic
+ import math
+-from utils.contraction import contraction_jacobian
+ from utils.graphics_utils import l2_normalize_th
+-import matplotlib.pyplot as plt
+-from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
+ from data.camera import focal2fov
++from pathlib import Path, PosixPath
++import json
++
++class CustomEncoder(json.JSONEncoder):
++    def default(self, o):
++        if isinstance(o, PosixPath):
++            return str(o)
++        return super().default(o)
++
++class SimpleSampler:
++    def __init__(self, total_num_samples, batch_size):
++        self.total_num_samples = total_num_samples
++        self.batch_size = batch_size
++        self.curr = total_num_samples
++        self.ids = None
++
++    def nextids(self, batch_size=None):
++        batch_size = self.batch_size if batch_size is None else batch_size
++        self.curr += batch_size
++        if self.curr + batch_size > self.total_num_samples:
++            # self.ids = torch.LongTensor(np.random.permutation(self.total_num_samples))
++            self.ids = torch.randperm(self.total_num_samples, dtype=torch.long, device=device)
++            self.curr = 0
++        ids = self.ids[self.curr : self.curr + batch_size]
++        return ids
+ 
+-cmap = plt.get_cmap("jet")
+ 
+ class ClippedGradients(torch.autograd.Function):
+     @staticmethod
+@@ -47,139 +61,6 @@ class ScaledGradients(torch.autograd.Function):
+         lr_matrix, = ctx.saved_tensors
+         return grad_output * lr_matrix, None
+ 
+-def get_slang_projection_matrix(znear, zfar, fy, fx, height, width, device):
+-    tanHalfFovX = width/(2*fx)
+-    tanHalfFovY = height/(2*fy)
+-
+-    top = tanHalfFovY * znear
+-    bottom = -top
+-    right = tanHalfFovX * znear
+-    left = -right
+-
+-    z_sign = 1.0
+-
+-    P = torch.tensor([
+-       [2.0 * znear / (right - left),     0.0,                          (right + left) / (right - left), 0.0 ],
+-       [0.0,                              2.0 * znear / (top - bottom), (top + bottom) / (top - bottom), 0.0 ],
+-       [0.0,                              0.0,                          z_sign * zfar / (zfar - znear),  -(zfar * znear) / (zfar - znear) ],
+-       [0.0,                              0.0,                          z_sign,                          0.0 ]
+-    ], device=device)
+-
+-    return P
+-
+-def common_camera_properties_from_gsplat(viewmats, Ks, height, width):
+-    """ Fetches all the Camera properties from the inria defined object"""
+-    zfar = 100.0
+-    znear = 0.01
+-  
+-    world_view_transform = viewmats
+-    fx = Ks[0,0]
+-    fy = Ks[1,1]
+-    projection_matrix = get_slang_projection_matrix(znear, zfar, fy, fx, height, width, Ks.device)
+-    fovx = focal2fov(fx, width)
+-    fovy = focal2fov(fy, height)
+-
+-    cam_pos = viewmats.inverse()[:, 3]
+-
+-    return world_view_transform, projection_matrix, cam_pos, fovy, fovx
+-
+-def inverse_sigmoid(y):
+-    return torch.log(y / (1 - y))
+-
+-def rgbs_activation(rgbs_raw):
+-    # rgbs = torch.cat([torch.nn.functional.softplus(1e-1*rgbs_raw[:, :3]), safe_exp(rgbs_raw[:, 3:])], dim=1)
+-    rgbs = torch.cat([torch.sigmoid(rgbs_raw[:, :3]), safe_exp(rgbs_raw[:, 3:])], dim=1)
+-    return rgbs
+-
+-def safe_exp(x):
+-    return x.clip(max=5).exp()
+-
+-def safe_trig_helper(x, fn, t=100 * torch.pi):
+-    """Helper function used by safe_cos/safe_sin: mods x before sin()/cos()."""
+-    return fn(torch.nan_to_num(torch.where(torch.abs(x) < t, x, x % t)))
+-
+-
+-def safe_cos(x):
+-    """jnp.cos() on a TPU may NaN out for large values."""
+-    return safe_trig_helper(x, torch.cos)
+-
+-
+-def safe_sin(x):
+-    """jnp.sin() on a TPU may NaN out for large values."""
+-    return safe_trig_helper(x, torch.sin)
+-
+-
+-def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
+-           scene_scaling=1, clip_multi=0, ray_jitter=None,
+-           **kwargs):
+-    device = model.device
+-    if ray_jitter is None:
+-        ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
+-    else:
+-        assert(ray_jitter.shape[0] == camera.image_height)
+-        assert(ray_jitter.shape[1] == camera.image_width)
+-        assert(ray_jitter.shape[2] == 2)
+-    vertices = model.vertices
+-    
+-    render_grid = RenderGrid(camera.image_height,
+-                             camera.image_width,
+-                             tile_height=tile_size,
+-                             tile_width=tile_size)
+-    tcam = dict(
+-        tile_height=tile_size,
+-        tile_width=tile_size,
+-        grid_height=render_grid.grid_height,
+-        grid_width=render_grid.grid_width,
+-        min_t=min_t,
+-        **camera.to_dict(device)
+-    )
+-    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _ = vertex_and_tile_shader(
+-        model.indices,
+-        vertices,
+-        tcam,
+-        render_grid)
+-    extras = {}
+-    if cell_values is None:
+-        cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
+-        if mask.sum() > 0 and model.mask_values:
+-            normed_cc, cell_values[mask] = model.get_cell_values(camera, mask, circumcenter[mask])
+-        else:
+-            normed_cc, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+-        if clip_multi > 0 and not model.frozen:
+-            with torch.no_grad():
+-                tet_sens, sensitivity = topo_utils.compute_vertex_sensitivity(model.indices[mask],
+-                                                                            vertices, normed_cc, True)
+-                                                                            # vertices, normed_cc, model.contract_vertices)
+-                scaling = clip_multi*sensitivity.reshape(-1, 1).clip(min=1e-5)
+-            vertices = ClippedGradients.apply(vertices, scaling)
+-
+-    mod = LinearRender if model.linear else Render
+-    image_rgb, distortion_img, tet_alive = mod.apply(
+-        sorted_tetra_idx,
+-        tile_ranges,
+-        model.indices,
+-        vertices,
+-        cell_values,
+-        render_grid,
+-        tcam,
+-        ray_jitter)
+-    alpha = image_rgb.permute(2,0,1)[3, ...]
+-    total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
+-    distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
+-    
+-    render_pkg = {
+-        'render': image_rgb.permute(2,0,1)[:3, ...],
+-        'alpha': alpha,
+-        'distortion_img': distortion_img,
+-        'distortion_loss': distortion_loss.mean(),
+-        'visibility_filter': mask,
+-        'circumcenters': circumcenter,
+-        'density': cell_values[:, 0],
+-        'mask': mask,
+-        **extras
+-    }
+-    return render_pkg
+-
+ def get_expon_lr_func(
+     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+ ):
+@@ -253,6 +134,8 @@ class SpikingLR:
+ 
+     def __call__(self, iteration):
+         base_f = self.base_function(iteration)
++        if self.duration == 0:
++            return base_f
+         if iteration < self.peak_start:
+             return base_f
+         elif iteration > self.peak_end:
+@@ -263,116 +146,50 @@ class SpikingLR:
+         height = self.peak_height_fn(peak_ind) - self.base_function(peak_ind)
+         return base_f + self.peak_fn(last_peak, height)
+ 
+-def render_debug(render_tensor, model, camera, density_multi=1):
+-
+-    # Convert to RGB (NxMx3) using the colormap
+-    _, features = model.get_cell_values(camera)
+-    tet_grad_color = torch.zeros((features.shape[0], 4), device=features.device)
+-    if render_tensor.shape[1] == 1:
+-        tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
+-        normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
+-        normalized_tensor = torch.as_tensor(
+-            cmap(normalized_tensor.reshape(-1).cpu().numpy())).float().cuda()
+-    else:
+-        normalized_tensor = render_tensor
+-    tet_grad_color[:, :normalized_tensor.shape[1]] = normalized_tensor
+-    if render_tensor.shape[1] < 4:
+-        tet_grad_color[:, 3] = features[:, 0] * density_multi# * render_tensor.reshape(-1)
+-    render_pkg = render_constant_color(model.indices, model.vertices, None, camera, cell_values=tet_grad_color)
+-
+-    image = render_pkg['render']
+-    image = image.permute(1, 2, 0)
+-    image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
+-
+-    del render_pkg, render_tensor
+-    return image
+-
+-def select_n(tet_err_weight, N):
+-    rgbs_threshold = torch.sort(tet_err_weight).values[-min(int(N), tet_err_weight.shape[0])]
+-    clone_mask = (tet_err_weight > rgbs_threshold)
+-    return clone_mask
+-
+-def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
+-    """
+-    Calculates the approximate intersection point for pairs of line segments.
+-
+-    The intersection is defined as the midpoint of the shortest segment
+-    connecting the two input line segments.
+-
+-    Args:
+-        split_rays_data (torch.Tensor): Tensor of shape (N, 2, 6).
+-            - N: Number of segment pairs.
+-            - 2: Represents the two segments in a pair.
+-            - 6: Contains [Ax, Ay, Az, Bx, By, Bz] for each segment,
+-                 where A and B are the segment endpoints.
+-                 Based on current Python code:
+-                 A = average_P_exit, B = average_P_entry
+-        epsilon (float): Small value to handle parallel lines and avoid
+-                         division by zero if a segment has zero length.
+-
+-    Returns:
+-        torch.Tensor: Tensor of shape (N, 3) representing the approximate
+-                      "intersection" points (midpoints of closest approach).
+-    """
+-    # Segment 1 endpoints
+-    p1_a = split_rays_data[:, 0, 0:3]  # Endpoint A of first segments (N, 3)
+-    p1_b = split_rays_data[:, 0, 3:6]  # Endpoint B of first segments (N, 3)
+-    # Segment 2 endpoints
+-    p2_a = split_rays_data[:, 1, 0:3]  # Endpoint A of second segments (N, 3)
+-    p2_b = split_rays_data[:, 1, 3:6]  # Endpoint B of second segments (N, 3)
+-
+-    # Define segment origins and direction vectors
+-    # Segment S1: o1 + s * d1, for s in [0, 1]
+-    # Segment S2: o2 + t * d2, for t in [0, 1]
+-    o1 = p1_a
+-    d1 = p1_b - p1_a  # Direction vector for segment 1 (from A to B)
+-    o2 = p2_a
+-    d2 = p2_b - p2_a  # Direction vector for segment 2 (from A to B)
+-
+-    # Calculate terms for finding closest points on the infinite lines
+-    # containing the segments (based on standard formulas, e.g., Christer Ericson's "Real-Time Collision Detection")
+-    v_o = o1 - o2 # Vector from origin of line 2 to origin of line 1
+-
+-    a = torch.sum(d1 * d1, dim=1)  # Squared length of d1
+-    b = torch.sum(d1 * d2, dim=1)  # Dot product of d1 and d2
+-    c = torch.sum(d2 * d2, dim=1)  # Squared length of d2
+-    d = torch.sum(d1 * v_o, dim=1) # d1 dot (o1 - o2)
+-    e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
+-
+-    denom = a * c - b * b
+-    
+-    # Parameters for closest points on the *infinite lines*
+-    # s_line = (b*e - c*d) / denom
+-    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
+-    # The t_line should be for the parameterization o2 + t*d2.
+-    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
+-    # by setting derivatives w.r.t s and t to 0, we get:
+-    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
+-    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
+-    # Solving this system:
+-    # s_line = (d*c - e*b) / denom
+-    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
+-    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
+-    
+-    s_line_num = (b * e) - (c * d)
+-    t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
+-
+-    # Handle near-zero denominator (lines are parallel or one segment is a point)
+-    # We compute with a safe denominator, then clamp. Clamping is key for segments.
+-    denom_safe = torch.where(denom.abs() < epsilon, torch.ones_like(denom), denom)
+-    
+-    s_line = s_line_num / denom_safe
+-    t_line = t_line_num / denom_safe # Note: This t_line is for the parameter of d2 (from o2)
+-
+-    # Clamp parameters to [0, 1] to stay within the segments
+-    bad_intersect = (s_line < 0) | (t_line < 0) | (s_line > 1) | (t_line > 1)
+-    s_seg = torch.clamp(s_line, 0.0, 1.0)
+-    t_seg = torch.clamp(t_line, 0.0, 1.0)
+-
+-    # Points of closest approach on the segments
+-    pc1 = o1 + s_seg.unsqueeze(1) * d1
+-    pc2 = o2 + t_seg.unsqueeze(1) * d2
+-    
+-    p_int = (pc1 + pc2) / 2.0
+-                        
+-    return p_int, bad_intersect
++class TwoPhaseLR:
++    def __init__(self, max_i, start_i, period_i, settle_i, 
++                 lr_peak, lr_end_peak, lr_trough, lr_final):
++        self.max_i = max_i
++        self.start_i = start_i
++        self.settle_i = settle_i
++        self.period_i = period_i
++        self.lr_peak = lr_peak
++        self.lr_end_peak = lr_end_peak
++        self.lr_trough = lr_trough
++        self.lr_final = lr_final
++
++        n_cycles = settle_i / period_i
++        self.gamma = (lr_end_peak / lr_peak) ** (1 / n_cycles) if n_cycles > 0 else 1
++
++    def __call__(self, i):
++        # Phase 1: Spiking with decaying cosine annealing
++        if i < self.start_i:
++            return get_expon_lr_func(self.lr_peak, self.lr_trough, max_steps=self.start_i)(i)
++        elif self.start_i <= i <= self.settle_i:
++            cycle = math.floor((i-self.start_i) / self.period_i)
++            t_cycle = (i-self.start_i) % self.period_i
++            
++            lr_max = self.lr_peak * (self.gamma ** cycle)
++            
++            height = (lr_max - self.lr_trough)
++            # lr = self.lr_trough + 0.5 * height * \
++            #      (1 + math.cos(math.pi * t_cycle / self.period_i))
++            t = t_cycle / self.period_i
++            lr = self.lr_trough + np.exp(np.log(height) * (1 - t) + np.log(1e-6) * t)
++            
++            return lr
++
++        # Phase 2: Final settling cosine decay
++        else:
++            if i >= self.max_i:
++                return self.lr_final
++
++            t_settle = i - self.settle_i
++            d_settle = self.max_i - self.settle_i
++            if d_settle <= 0:
++                return self.lr_final
++            
++            lr = self.lr_final + 0.5 * (self.lr_trough - self.lr_final) * \
++                 (1 + math.cos(math.pi * t_settle / d_settle))
++
++            return lr

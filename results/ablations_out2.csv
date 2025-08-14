@@ -1,2 +1,10 @@
 ,dataset_path,error,gpu_id,image_folder,lambda_cost,output_folder,total_thresh,within_thresh
 ,/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,0,images_4,1.00E-03,output/bicycle_ifimages_4_lc1.00E-03_tt1000_wt0.4,1000,0.4
+,/optane/nerf_datasets/360/garden,Process failed and no JSON output file found,0,images_4,1.00E-03,output/garden_ifimages_4_lc1.00E-03_tt1000_wt0.4,1000,0.4
+,/optane/nerf_datasets/360/room,Process failed and no JSON output file found,0,images_2,1.00E-03,output/room_ifimages_2_lc1.00E-03_tt1000_wt0.4,1000,0.4
+,/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,0,images_4,1.00E-03,output/bicycle_ifimages_4_lc1.00E-03_tt0.025_wt1000,0.025,1000
+,/optane/nerf_datasets/360/garden,Process failed and no JSON output file found,0,images_4,1.00E-03,output/garden_ifimages_4_lc1.00E-03_tt0.025_wt1000,0.025,1000
+,/optane/nerf_datasets/360/room,Process failed and no JSON output file found,0,images_2,1.00E-03,output/room_ifimages_2_lc1.00E-03_tt0.025_wt1000,0.025,1000
+,/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,0,images_4,1.00E-03,output/bicycle_ifimages_4_lc1.00E-03_tt0.025_wt0.4,0.025,0.4
+,/optane/nerf_datasets/360/garden,Process failed and no JSON output file found,0,images_4,1.00E-03,output/garden_ifimages_4_lc1.00E-03_tt0.025_wt0.4,0.025,0.4
+,/optane/nerf_datasets/360/room,Process failed and no JSON output file found,0,images_2,1.00E-03,output/room_ifimages_2_lc1.00E-03_tt0.025_wt0.4,0.025,0.4

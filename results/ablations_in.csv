@@ -1,7 +1,13 @@
 dataset_path	image_folder	lambda_cost	total_thresh	within_thresh		
-/optane/nerf_datasets/360/bicycle	images_4	1.00E-03	1000	0.4		
-/optane/nerf_datasets/360/garden	images_4	1.00E-03	1000	0.4		
-/optane/nerf_datasets/360/room	images_2	1.00E-03	1000	0.4		
-/optane/nerf_datasets/360/bicycle	images_4	1.00E-03	0.025	1000		
-/optane/nerf_datasets/360/garden	images_4	1.00E-03	0.025	1000		
-/optane/nerf_datasets/360/room	images_2	1.00E-03	0.025	1000		
+/data/nerf_datasets/360/bicycle	images_4	1.00E-03	1000	0.4		
+/data/nerf_datasets/360/garden	images_4	1.00E-03	1000	0.4		
+/data/nerf_datasets/360/room	images_2	1.00E-03	1000	0.4		
+/data/nerf_datasets/360/bicycle	images_4	1.00E-03	0.025	1000		
+/data/nerf_datasets/360/garden	images_4	1.00E-03	0.025	1000		
+/data/nerf_datasets/360/room	images_2	1.00E-03	0.025	1000		
+/data/nerf_datasets/360/bicycle	images_4	1.00E-03	0.025	0.4	--ablate_gradient	
+/data/nerf_datasets/360/garden	images_4	1.00E-03	0.025	0.4	--ablate_gradient	
+/data/nerf_datasets/360/room	images_2	1.00E-03	0.025	0.4	--ablate_gradient	
+/data/nerf_datasets/360/bicycle	images_4	1.00E-03	0.025	0.4		--ablate_circumsphere
+/data/nerf_datasets/360/garden	images_4	1.00E-03	0.025	0.4		--ablate_circumsphere
+/data/nerf_datasets/360/room	images_2	1.00E-03	0.025	0.4		--ablate_circumsphere

@@ -116,7 +116,7 @@ def offset_normalize(rgb, grd, circumcenters, tets):
     return base_color_v0_raw, normed_grd
 
 @torch.jit.script
-def activate_output(camera_center, tet_color_raw, density, grd, circumcenters, tets):
+def activate_output(tet_color_raw, density, grd, circumcenters, tets):
     tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
     base_color_v0, normed_grd = offset_normalize(
         tet_color, grd, circumcenters.detach(), tets.detach())
