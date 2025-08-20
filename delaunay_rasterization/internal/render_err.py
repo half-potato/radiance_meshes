@@ -109,7 +109,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         gridSize=(render_grid.grid_width, 
                     render_grid.grid_height, 1)
     )
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
+    torch.cuda.empty_cache()
     alpha = 1-output_img.permute(2,0,1)[3, ...]
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
     l1_err = ((render_img - gt_image)).mean(dim=0)
@@ -120,7 +121,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     assert(pixel_err.shape[1] == render_grid.image_width)
 
     tet_err = torch.zeros((tet_vertices.shape[0], 16), dtype=torch.float, device=device)
-    tet_count = torch.zeros((tet_vertices.shape[0]), dtype=torch.int32, device=device)
+    tet_count = torch.zeros((tet_vertices.shape[0], 2), dtype=torch.int32, device=device)
 
     debug_img = torch.zeros((render_grid.image_height, 
                                 render_grid.image_width, 4), 

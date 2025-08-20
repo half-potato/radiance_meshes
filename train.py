@@ -31,7 +31,7 @@ import termplotlib as tpl
 from utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice
 from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
-from utils.densification import collect_render_stats, apply_densification
+from utils.densification import collect_render_stats, apply_densification, determine_cull_mask
 import mediapy
 
 torch.set_num_threads(1)
@@ -72,7 +72,7 @@ args.render_train = False
 
 # Light Settings
 args.max_sh_deg = 3
-args.sh_interval = 0
+args.sh_interval = 2000
 args.sh_step = 1
 
 # iNGP Settings
@@ -142,6 +142,7 @@ args.data_device = 'cpu'
 args.lambda_tv = 0.0
 args.density_threshold = 0.001
 args.alpha_threshold = 0.001
+args.contrib_threshold = 0.005
 
 args.ablate_gradient = False
 args.ablate_circumsphere = False
@@ -308,7 +309,12 @@ for iteration in progress_bar:
         tet_optim.update_triangulation(density_threshold=args.density_threshold, alpha_threshold=args.alpha_threshold, high_precision=do_freeze)
         if do_freeze:
             del tet_optim
-            model, tet_optim = freeze_model(model, **args.as_dict())
+            model.eval()
+            mask = determine_cull_mask(train_cameras, model, args, device)
+            model.train()
+            print(f"Kept {mask.sum()} tets")
+            model, tet_optim = freeze_model(model, mask, args)
+            # model, tet_optim = freeze_model(model, **args.as_dict())
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -384,14 +390,15 @@ for iteration in progress_bar:
         with torch.no_grad():
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
 
-            with torch.no_grad():
-                render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-                sample_image = render_pkg['render']
-                sample_image = sample_image.permute(1, 2, 0)
-                sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-                sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-                # video_writer.write(pad_image2even(sample_image))
+            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+            sample_image = render_pkg['render']
+            sample_image = sample_image.permute(1, 2, 0)
+            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+            # video_writer.write(pad_image2even(sample_image))
 
+            gc.collect()
+            torch.cuda.empty_cache()
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()

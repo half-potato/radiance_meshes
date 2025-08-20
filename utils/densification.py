@@ -73,7 +73,7 @@ def collect_render_stats(
             lambda_ssim=args.clone_lambda_ssim
         )
 
-        tc = extras["tet_count"]
+        tc = extras["tet_count"][..., 0]
         
         # --- Create a single mask for valid updates ---
         # Mask for tets that have a reasonable number of samples in the current view
@@ -178,6 +178,41 @@ def collect_render_stats(
         top_ssim = top_ssim[:, :2],
         top_size = top_size[:, :2],
     )
+
+@torch.no_grad()
+def determine_cull_mask(
+    sampled_cameras: List["Camera"],
+    model,
+    # glo_list,
+    args,
+    device: torch.device,
+):
+    """Accumulate densification statistics for one iteration."""
+    n_tets = model.indices.shape[0]
+    peak_contrib = torch.zeros((n_tets), device=device)
+
+    for cam in sampled_cameras:
+        target = cam.original_image.cuda()
+
+        image_votes, extras = render_err(
+            target, cam, model,
+            scene_scaling=model.scene_scaling,
+            tile_size=args.tile_size,
+            lambda_ssim=0,
+            # glo=glo_list(torch.LongTensor([cam.uid]).to(device))
+        )
+
+        tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
+        image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
+        _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        peak_contrib = torch.maximum(max_T, peak_contrib)
+
+    tet_density = model.calc_tet_density()
+    alphas = model.calc_tet_alpha(mode="min", density=tet_density)
+    mask = ((peak_contrib > args.contrib_threshold))
+    return mask
 
 @torch.no_grad()
 def apply_densification(

@@ -225,57 +225,6 @@ class FrozenTetModel(BaseModel):
         return densities.reshape(-1)
 
 
-# =============================================================================
-# 2.  BAKING UTILITY                                                         |
-# =============================================================================
-
-@torch.no_grad()
-def bake_from_model(base_model, *, detach: bool = True, chunk_size: int = 408_576) -> FrozenTetModel:
-    """Convert an existing neural‑field `Model` into a parameter‑only
-    `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
-    network and stored explicitly so that no backbone is needed afterwards."""
-    device = base_model.device
-
-    vertices_full = base_model.vertices.detach() if detach else base_model.vertices
-    int_vertices  = vertices_full[: base_model.num_int_verts]
-    ext_vertices  = base_model.ext_vertices.detach() if detach else base_model.ext_vertices
-    indices       = base_model.indices.detach() if detach else base_model.indices
-
-    d_list, rgb_list, grd_list, sh_list = [], [], [], []
-    for start in range(0, indices.shape[0], chunk_size):
-        end = min(start + chunk_size, indices.shape[0])
-        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
-            vertices_full, indices, start, end
-        )
-        d_list.append(density)
-        rgb_list.append(rgb)
-        grd_list.append(grd)
-        sh_list.append(sh)
-
-    density  = torch.cat(d_list, 0)
-    rgb      = torch.cat(rgb_list, 0)
-    gradient = torch.cat(grd_list, 0)
-    sh       = torch.cat(sh_list, 0)
-
-    if detach:
-        density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
-
-    return FrozenTetModel(
-        int_vertices=int_vertices.to(device),
-        ext_vertices=ext_vertices.to(device),
-        indices=indices.to(device),
-        density=density.to(device),
-        rgb=rgb.to(device),
-        gradient=gradient.to(device),
-        sh=sh.to(device),
-        center=base_model.center.detach().to(device),
-        scene_scaling=base_model.scene_scaling.detach().to(device),
-        density_offset=base_model.density_offset,
-        current_sh_deg=base_model.current_sh_deg,
-        max_sh_deg=base_model.max_sh_deg,
-        chunk_size=chunk_size,
-    )
-
 
 # =============================================================================
 # 3.  OPTIMISER FOR FROZEN MODEL                                             |
@@ -388,6 +337,50 @@ class FrozenTetOptimizer:
 
         return self.lambda_density * density_loss + self.lambda_tv * tv_loss
 
+def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetModel:
+    """Convert an existing neural‑field `Model` into a parameter‑only
+    `FrozenTetModel`.  All per‑tet features are *evaluated once* through the
+    network and stored explicitly so that no backbone is needed afterwards."""
+    device = base_model.device
+
+    vertices_full = base_model.vertices.detach()
+    int_vertices  = vertices_full[: base_model.num_int_verts]
+    ext_vertices  = base_model.ext_vertices.detach()
+    indices       = base_model.indices[mask].detach()
+
+    d_list, rgb_list, grd_list, sh_list = [], [], [], []
+    for start in range(0, indices.shape[0], chunk_size):
+        end = min(start + chunk_size, indices.shape[0])
+        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
+            vertices_full, indices, start, end
+        )
+        d_list.append(density)
+        rgb_list.append(rgb)
+        grd_list.append(grd)
+        sh_list.append(sh)
+
+    density  = torch.cat(d_list, 0)
+    rgb      = torch.cat(rgb_list, 0)
+    gradient = torch.cat(grd_list, 0)
+    sh       = torch.cat(sh_list, 0)
+
+    density, rgb, gradient, sh = (x.clone().detach() for x in (density, rgb, gradient, sh))
+
+    return FrozenTetModel(
+        int_vertices=int_vertices.to(device),
+        ext_vertices=ext_vertices.to(device),
+        indices=indices.to(device),
+        density=density.to(device),
+        rgb=rgb.to(device),
+        gradient=gradient.to(device),
+        sh=sh.to(device),
+        center=base_model.center.detach().to(device),
+        scene_scaling=base_model.scene_scaling.detach().to(device),
+        max_sh_deg=base_model.max_sh_deg,
+        chunk_size=chunk_size,
+    )
+
+
 def _offload_model_to_cpu(model: nn.Module):
     """Move every parameter & buffer to CPU and drop gradients to free GPU VRAM."""
     if model is None:
@@ -399,14 +392,10 @@ def _offload_model_to_cpu(model: nn.Module):
         b.data = b.data.cpu()
     torch.cuda.empty_cache()
 
-@torch.no_grad()
 def freeze_model(
     base_model,
-    *,
-    weight_decay: float = 1e-10,
-    lambda_tv:    float = 0.0,
-    lambda_density: float = 0.0,
-    detach: bool = True,
+    mask,
+    args,
     chunk_size: int = 408_576,
     **kwargs
 ) -> Tuple[FrozenTetModel, FrozenTetOptimizer]:
@@ -422,14 +411,11 @@ def freeze_model(
         Optimiser bound to the frozen model.
     """
     print("Freezing model")
-    frozen_model = bake_from_model(base_model, detach=detach, chunk_size=chunk_size)
+    frozen_model = bake_from_model(base_model, mask, chunk_size=chunk_size)
 
     frozen_optim = FrozenTetOptimizer(
         frozen_model,
-        weight_decay=weight_decay,
-        lambda_tv=lambda_tv,
-        lambda_density=lambda_density,
-        **kwargs
+        **args.as_dict()
     )
 
     # free GPU memory used by the big backbone (optional but handy)

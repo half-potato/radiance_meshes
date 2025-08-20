@@ -102,10 +102,14 @@ DistortionState5 update_distortion_state(
     float density,
     float2 dist)
 {
-    no_diff float start = dist.x;//tukey_power_ladder(dist.x, ladder_p);
-    no_diff float end = dist.y;  // tukey_power_ladder(dist.y, ladder_p);
-    float scaling = 1;//no_diff scale_dist((dist.x+dist.y)*0.5);
-    float d = density;
+    // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
+    // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
+    // float start = (2*dist.x) / (2+dist.x);
+    // float end = (2*dist.y) / (2+dist.y);
+    float start = dist.x;
+    float end = dist.y;
+    float scaling = abs(safe_div(dist.y - dist.x, end - start));//no_diff scale_dist((dist.x+dist.y)*0.5);
+    float d = density * scaling;//safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
     float m0 = moment_0_int(start, end, d, T); // just weight
     float m1 = moment_1_int(start, end, d, T);
@@ -128,10 +132,14 @@ DistortionState5 undo_distortion_state(
     float density,
     float2 dist)
 {
+    // float start = (2*dist.x) / (2+dist.x);
+    // float end = (2*dist.y) / (2+dist.y);
     float start = dist.x;
     float end = dist.y;
-    float scaling = 1;
-    float d = density;
+    // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
+    // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
+    float scaling = abs(safe_div(dist.y - dist.x, end - start));//no_diff scale_dist((dist.x+dist.y)*0.5);
+    float d = density * scaling;//safe_clip(-safe_expm1(-density * (end-start)), 0.f, 1.f);
 
     float m0 = moment_0_int(start, end, d, T);
     float m1 = moment_1_int(start, end, d, T);
@@ -563,7 +571,9 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 14), w * centroid.y, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 15), w * centroid.z, old_val);
 
-                    tet_count.InterlockedAdd(g_idx, 1, old_ival);
+                    tet_count.InterlockedAdd(uint2(g_idx, 0), 1, old_ival);
+                    int T_int = (65535 * T);
+                    tet_count.InterlockedMax(uint2(g_idx, 1), T_int, old_ival);
 
                     ao = new_ao;
                     if (new_ao.rgba.a < 1 / 255.f) {

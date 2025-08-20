@@ -1,0 +1,5 @@
+dataset_path,image_folder
+/data/nerf_datasets/360/bicycle,images_4
+/data/nerf_datasets/360/garden,images_4
+/data/nerf_datasets/360/bonsai,images_2
+

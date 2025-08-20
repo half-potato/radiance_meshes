@@ -1,2 +1,7 @@
-dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
-/data/nerf_datasets/360/bicycle,0,images_4,output/bicycle_ifimages_4,24.251725399570645,0.38878241181373596,24.195650100708008,0.6854910850524902
+dataset_path,error,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/data/nerf_datasets/360/bicycle,,0,images_4,output/bicycle_ifimages_4,24.109974851156263,0.3547491133213043,24.44568634033203,0.7103757262229919
+/data/nerf_datasets/360/garden,,0,images_4,output/garden_ifimages_4,26.935374133593456,0.19088943302631378,26.231237411499023,0.8267648220062256
+/data/nerf_datasets/360/stump,,0,images_4,output/stump_ifimages_4,28.71179847537221,0.292066752910614,25.964387893676758,0.7534171342849731
+/data/nerf_datasets/360/treehill,Process failed and no JSON output file found,0,images_4,output/treehill_ifimages_4,,,,
+/data/nerf_datasets/360/flowers,Process failed and no JSON output file found,0,images_4,output/flowers_ifimages_4,,,,
+/data/nerf_datasets/360/room,Process failed and no JSON output file found,0,images_2,output/room_ifimages_2,,,,
