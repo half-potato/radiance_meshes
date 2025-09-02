@@ -142,7 +142,7 @@ args.data_device = 'cpu'
 args.lambda_tv = 0.0
 args.density_threshold = 0.001
 args.alpha_threshold = 0.001
-args.contrib_threshold = 0.005
+args.contrib_threshold = 0.003
 
 args.ablate_gradient = False
 args.ablate_circumsphere = False

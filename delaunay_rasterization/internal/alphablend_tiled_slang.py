@@ -13,10 +13,9 @@ def fov2focal(fov, pixels):
 def focal2fov(focal, pixels):
     return 2*math.atan(pixels/(2*focal))
 
-def render_constant_color(indices, vertices,
-                                       rgbs_fn,
-                                       camera,
-                                       cell_values=None, tile_size=16, min_t=0.1):
+def render_constant_color(
+    indices, vertices, rgbs_fn, camera, cell_values=None,
+    tile_size=16, min_t=0.1):
     device = indices.device
     
     render_grid = RenderGrid(camera.image_height,

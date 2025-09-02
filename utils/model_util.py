@@ -111,8 +111,7 @@ def compute_vertex_colors_from_field(
     return vertex_colors
 
 def offset_normalize(rgb, grd, circumcenters, tets):
-    # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
-    grd = grd.reshape(-1, 1, 3)# * rgb.reshape(-1, 3, 1).max(dim=1, keepdim=True).values.detach()
+    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
     radius = torch.linalg.norm(tets - circumcenters[:, None, :], dim=-1, keepdim=True)[:, :1]
     normed_grd = safe_div(grd, radius)
     vcolors = compute_vertex_colors_from_field(
@@ -123,20 +122,15 @@ def offset_normalize(rgb, grd, circumcenters, tets):
 
 def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg):
     tets = vertices[indices]
+    base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
     tet_color_raw = eval_sh(
-        tets.mean(dim=1).detach(),
-        RGB2SH(rgb),
+        tets.mean(dim=1),
+        RGB2SH(base_color_v0_raw),
         sh.reshape(-1, (max_sh_deg+1)**2 - 1, 3).half(),
         camera_center,
         current_sh_deg).float()
-    tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
-    base_color_v0, normed_grd = offset_normalize(
-        tet_color, grd, circumcenters.detach(), tets.detach())
-    features = torch.cat([
-        density,
-        base_color_v0.reshape(-1, 3),
-        normed_grd.reshape(-1, 3)
-    ], dim=1)
+    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+    features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3)], dim=1)
     return features.float()
 
 class iNGPDW(nn.Module):

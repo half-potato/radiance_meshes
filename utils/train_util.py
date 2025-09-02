@@ -263,7 +263,7 @@ class SpikingLR:
         height = self.peak_height_fn(peak_ind) - self.base_function(peak_ind)
         return base_f + self.peak_fn(last_peak, height)
 
-def render_debug(render_tensor, model, camera, density_multi=1):
+def render_debug(render_tensor, model, camera, density_multi=1, tile_size=16):
 
     # Convert to RGB (NxMx3) using the colormap
     _, features = model.get_cell_values(camera)
@@ -278,7 +278,7 @@ def render_debug(render_tensor, model, camera, density_multi=1):
     tet_grad_color[:, :normalized_tensor.shape[1]] = normalized_tensor
     if render_tensor.shape[1] < 4:
         tet_grad_color[:, 3] = features[:, 0] * density_multi# * render_tensor.reshape(-1)
-    render_pkg = render_constant_color(model.indices, model.vertices, None, camera, cell_values=tet_grad_color)
+    render_pkg = render_constant_color(model.indices, model.vertices, None, camera, cell_values=tet_grad_color, tile_size=tile_size)
 
     image = render_pkg['render']
     image = image.permute(1, 2, 0)

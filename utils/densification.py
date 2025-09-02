@@ -29,6 +29,7 @@ class RenderStats(NamedTuple):
     max_ssim: torch.Tensor
     top_ssim: torch.Tensor
     top_size: torch.Tensor
+    total_count: torch.Tensor
 
 
 @torch.no_grad()
@@ -60,7 +61,7 @@ def collect_render_stats(
     total_var_moments = torch.zeros((n_tets, 3), device=device)
     between_var_moments = torch.zeros((n_tets, 3), device=device)
     top_moments = torch.zeros((n_tets, 2, 4), device=device)
-
+    total_count = torch.zeros((n_tets), device=device, dtype=int)
 
     # Main per-camera loop -----------------------------------------------------
     for cam in sampled_cameras:
@@ -84,6 +85,7 @@ def collect_render_stats(
         # total_T_p, image_err, image_err2 = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         N = tc
+        image_ssim[~update_mask] = 0
         peak_contrib = torch.maximum(image_T, peak_contrib)
         total_T += image_T
         total_err += image_Terr
@@ -136,11 +138,12 @@ def collect_render_stats(
         )
 
         # -------- Total Variance (accumulated across images) ------------------
-        total_var_moments[update_mask, 0] += N[update_mask]
-        # total_var_moments[update_mask, 0] += image_T[update_mask]
+        # total_var_moments[update_mask, 0] += N[update_mask]
+        total_var_moments[update_mask, 0] += image_T[update_mask]
         total_var_moments[update_mask, 1] += image_err[update_mask]
         total_var_moments[update_mask, 2] += image_err2[update_mask]
         total_var_count[update_mask] += N[update_mask]
+        total_count[update_mask] += 1
 
         # -------- Between-Image Variance (accumulated across images) ----------
         # We compute the variance of the mean error across different views
@@ -173,6 +176,7 @@ def collect_render_stats(
         peak_contrib = peak_contrib,
         total_T = total_T,
         total_err = total_err,
+        total_count = total_count,
         total_ssim = total_ssim,
         max_ssim = max_ssim,
         top_ssim = top_ssim[:, :2],
@@ -249,7 +253,7 @@ def apply_densification(
     # within_var = stats.top_ssim[:, 0] / stats.tet_size.clip(min=1).sqrt()
 
     between_var = stats.total_T * between_var_std # Weighted by summed s0
-    total_var = stats.total_err * total_var_std
+    total_var = (stats.total_err / stats.total_count.clip(min=1)) * total_var_std
     # total_var = stats.total_T * safe_math.safe_div(total_var_std, between_var_std).clip(min=0, max=10)
     total_var[(N_b < 2) | (s0_t < 1)] = 0
     # within_var = stats.total_within_var / stats.tet_view_count.clip(min=1)
@@ -316,21 +320,21 @@ def apply_densification(
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
         imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
-                        render_debug(f, model, sample_cam, 10))
+                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
         f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
         imageio.imwrite(args.output_path / f"densify{iteration}.png",
-                        render_debug(f, model, sample_cam, 10))
+                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
         imageio.imwrite(args.output_path / f"total_var{iteration}.png",
                         render_debug(total_var[:, None],
-                                     model, sample_cam))
+                                     model, sample_cam, tile_size=args.tile_size))
         imageio.imwrite(args.output_path / f"within_var{iteration}.png",
                         render_debug(within_var[:, None],
-                                     model, sample_cam))
+                                     model, sample_cam, tile_size=args.tile_size))
         imageio.imwrite(args.output_path / f"between_var{iteration}.png",
                         render_debug(between_var[:, None],
-                                     model, sample_cam))
+                                     model, sample_cam, tile_size=args.tile_size))
         imageio.imwrite(args.output_path / f"im{iteration}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 

@@ -189,10 +189,10 @@ def query_tetrahedra_kernel(t_samples, ray_origins, ray_directions,
         #             vertex_color[i, 2].reshape(*padding, 3) * coords[..., 2].reshape(-1, 1) + \
         #             vertex_color[i, 3].reshape(*padding, 3) * coords[..., 3].reshape(-1, 1)
 
-        base_color = vertex_color[i, 0:3].reshape(1, 3)
-        raw_grd = vertex_color[i, 3:7, None].reshape(3, 1)
-        scale_factor = (1.0 + jnp.clip(jnp.dot(coords, raw_grd), -1, 1)).reshape(-1, 1)
-        tet_color = base_color.reshape(1, 3) * scale_factor
+        tet_color = vertex_color[i, 0:3].reshape(*padding, 3) + \
+                    vertex_color[i, 4].reshape(*padding, 1) * coords[..., 0].reshape(-1, 1) + \
+                    vertex_color[i, 5].reshape(*padding, 1) * coords[..., 1].reshape(-1, 1) + \
+                    vertex_color[i, 6].reshape(*padding, 1) * coords[..., 2].reshape(-1, 1)
         
         # Update density and color
         contrib_density = jnp.where(is_inside, tet_density, 0.0)

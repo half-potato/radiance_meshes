@@ -78,6 +78,9 @@ class FrozenTetModel(BaseModel):
         self.linear = False
         self.feature_dim = 7
 
+    def sh_up(self):
+        pass
+
     @staticmethod
     def load_ckpt(path: Path, device):
         """Load a checkpoint from a directory containing ckpt.pth and alldata.json.

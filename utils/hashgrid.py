@@ -124,7 +124,6 @@ class HashEmbedderOptimized(nn.Module):
         return torch.cat(x_embedded_all, dim=-1)
 
     def forward_in_chunks(self, x, chunk_size=548576):
-    # def forward_in_chunks(self, x, chunk_size=65536):
         """
         Same as forward(), but processes 'x' in chunks to reduce memory usage.
         """

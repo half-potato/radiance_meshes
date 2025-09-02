@@ -72,11 +72,11 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
 // }
 
 [Differentiable]
-inline float3 linear_color(float3 grad, float3 base_color, float3 v)
+inline float3 linear_color(float3 grad, float3 v)
 {
-    // return grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
-    float f = safe_clip(dot(grad, v), -1, 1);
-    return {base_color.r * f, base_color.g * f, base_color.b * f};
+    // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
+    float f = dot(grad, v);
+    return {f, f, f};
 }
 
 
@@ -124,8 +124,8 @@ bool evaluate_tetra_interp(
         float3 v_exit = exit * ray_d + ray_o - verts[0];
         // float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
         // float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
-        float3 c_enter = max(linear_color(g.grd, g.base_color, v_enter) + g.base_color, 0.f);
-        float3 c_exit = max(linear_color(g.grd, g.base_color, v_exit) + g.base_color, 0.f);
+        float3 c_enter = max(linear_color(g.grd, v_enter) + g.base_color, 0.f);
+        float3 c_exit = max(linear_color(g.grd, v_exit) + g.base_color, 0.f);
         //*/
 
         float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);

@@ -156,17 +156,17 @@ class Model(BaseModel):
         # within_sphere = sample_uniform_in_sphere(10000, 3, base_radius=new_radius, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
         # vertices = torch.cat([vertices, within_sphere], dim=0)
 
-        # num_ext = 1000
-        # ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
-        # num_ext = ext_vertices.shape[0]
-
         num_ext = 1000
-        ext_vertices = topo_utils.expand_convex_hull(vertices, 1, device=vertices.device)
-        if ext_vertices.shape[0] > num_ext:
-            inds = np.random.default_rng().permutation(ext_vertices.shape[0])[:num_ext]
-            ext_vertices = ext_vertices[inds]
-        else:
-            num_ext = ext_vertices.shape[0]
+        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+        num_ext = ext_vertices.shape[0]
+
+        # num_ext = 1000
+        # ext_vertices = topo_utils.expand_convex_hull(vertices, 1, device=vertices.device)
+        # if ext_vertices.shape[0] > num_ext:
+        #     inds = np.random.default_rng().permutation(ext_vertices.shape[0])[:num_ext]
+        #     ext_vertices = ext_vertices[inds]
+        # else:
+        #     num_ext = ext_vertices.shape[0]
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,
                       max_sh_deg=max_sh_deg, **kwargs)
