@@ -106,8 +106,8 @@ DistortionState5 update_distortion_state(
     // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
     // float start = (2*dist.x) / (2+dist.x);
     // float end = (2*dist.y) / (2+dist.y);
-    float start = dist.x;
-    float end = dist.y;
+    no_diff float start = dist.x;
+    no_diff float end = dist.y;
     float scaling = 1;
     float d = density;
     // float scaling = abs(safe_div(dist.y - dist.x, end - start));//no_diff scale_dist((dist.x+dist.y)*0.5);
