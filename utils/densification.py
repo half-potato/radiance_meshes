@@ -253,7 +253,9 @@ def apply_densification(
     # within_var = stats.top_ssim[:, 0] / stats.tet_size.clip(min=1).sqrt()
 
     between_var = stats.total_T * between_var_std # Weighted by summed s0
-    total_var = (stats.total_err / stats.total_count.clip(min=1)) * total_var_std
+    # total_var = (stats.total_err / stats.total_count.clip(min=1)) * total_var_std
+    total_var = stats.total_err * total_var_std
+
     # total_var = stats.total_T * safe_math.safe_div(total_var_std, between_var_std).clip(min=0, max=10)
     total_var[(N_b < 2) | (s0_t < 1)] = 0
     # within_var = stats.total_within_var / stats.tet_view_count.clip(min=1)

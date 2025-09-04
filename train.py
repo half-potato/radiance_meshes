@@ -79,8 +79,8 @@ args.sh_step = 1
 # iNGP Settings
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
-args.network_lr = 5e-4
-args.final_network_lr = 5e-5
+args.network_lr = 1e-3
+args.final_network_lr = 1e-4
 args.hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
 args.log2_hashmap_size = 22

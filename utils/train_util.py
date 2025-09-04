@@ -202,8 +202,12 @@ def get_expon_lr_func(
     :param max_steps: int, the number of steps during optimization.
     :return HoF which takes step as input
     """
+    lr_init = max(lr_init, 1e-20)
+    lr_final = max(lr_final, 1e-20)
 
     def helper(step):
+        if max_steps == 0:
+            return lr_init
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             # Disable this parameter
             return 0.0
@@ -252,7 +256,7 @@ class SpikingLR:
     
     def peak_fn(self, step, height):
         t = np.clip(step / self.duration, 0, 1)
-        log_lerp = np.exp(np.log(height) * (1 - t) + np.log(1e-6) * t)
+        log_lerp = np.exp(np.log(max(height, 1e-20)) * (1 - t) + np.log(1e-6) * t)
         return log_lerp
         # return height * math.exp(-step * 6/self.duration + 2/self.duration) / math.exp(2/self.duration)
 
