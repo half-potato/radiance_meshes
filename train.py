@@ -137,6 +137,7 @@ args.percent_within = 0.70
 args.percent_total = 0.30
 args.diff_threshold = 0.0
 args.clone_min_alpha = 0.025
+args.clone_min_contrib = 0.003
 args.clone_min_density = 0.025
 args.clone_min_ratio = 1.0
 
@@ -310,7 +311,9 @@ for iteration in progress_bar:
 
     if do_delaunay or do_freeze:
         st = time.time()
-        tet_optim.update_triangulation(density_threshold=args.density_threshold, alpha_threshold=args.alpha_threshold, high_precision=do_freeze)
+        tet_optim.update_triangulation(
+            density_threshold=args.density_threshold if iteration > 4500 else 0,
+            alpha_threshold=args.alpha_threshold if iteration > 4500 else 0, high_precision=do_freeze)
         if do_freeze:
             del tet_optim
             model.eval()

@@ -75,6 +75,8 @@ def collect_render_stats(
         )
 
         tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
+        peak_contrib = torch.maximum(max_T, peak_contrib)
         
         # --- Create a single mask for valid updates ---
         # Mask for tets that have a reasonable number of samples in the current view
@@ -86,7 +88,6 @@ def collect_render_stats(
         _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         N = tc
         image_ssim[~update_mask] = 0
-        peak_contrib = torch.maximum(image_T, peak_contrib)
         total_T += image_T
         total_err += image_Terr
         total_ssim += image_ssim
@@ -138,8 +139,11 @@ def collect_render_stats(
         )
 
         # -------- Total Variance (accumulated across images) ------------------
-        total_var_moments[update_mask, 0] += N[update_mask]
-        # total_var_moments[update_mask, 0] += image_T[update_mask]
+        # total_var_moments[update_mask, 0] += image_T[update_mask]*N[update_mask]
+        # total_var_moments[update_mask, 1] += image_T[update_mask]*image_err[update_mask]
+        # total_var_moments[update_mask, 2] += image_T[update_mask]*image_err2[update_mask]
+        # total_var_moments[update_mask, 0] += N[update_mask]
+        total_var_moments[update_mask, 0] += image_T[update_mask]
         total_var_moments[update_mask, 1] += image_err[update_mask]
         total_var_moments[update_mask, 2] += image_err2[update_mask]
         total_var_count[update_mask] += N[update_mask]
@@ -173,7 +177,6 @@ def collect_render_stats(
         tet_view_count = tet_view_count,
         total_var_count = total_var_count,
         tet_size = tet_size,
-        peak_contrib = peak_contrib,
         total_T = total_T,
         total_err = total_err,
         total_count = total_count,
@@ -181,6 +184,7 @@ def collect_render_stats(
         max_ssim = max_ssim,
         top_ssim = top_ssim[:, :2],
         top_size = top_size[:, :2],
+        peak_contrib = peak_contrib
     )
 
 @torch.no_grad()
@@ -267,7 +271,8 @@ def apply_densification(
     # --- Masking and target calculation --------------------------------------
     tet_density = model.calc_tet_density()
     alphas = model.calc_tet_alpha(mode="max", density=tet_density)
-    mask_alive = (alphas >= args.clone_min_alpha) & (tet_density.reshape(-1) >= args.clone_min_density)
+    # mask_alive = (alphas >= args.clone_min_alpha) & (tet_density.reshape(-1) >= args.clone_min_density)
+    mask_alive = stats.peak_contrib > args.clone_min_contrib
     # area = topo_utils.tet_volumes(model.vertices[model.indices])
     # ratio = safe_math.safe_div(alphas, area)
     # mask_alive = ratio > args.clone_min_ratio

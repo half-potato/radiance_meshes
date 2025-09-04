@@ -543,8 +543,8 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     int32_t old_ival;
 
                     tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 1), 1 * mismatch, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 2), 1 * mismatch * mismatch, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
                     T_p = 1;
                     tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(mismatch), old_val);
