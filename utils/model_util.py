@@ -283,7 +283,14 @@ class iNGPDW(nn.Module):
         }
         self.density_color_net = tcnn.Network(n_input_dims, 4, network_config)
         self.gradient_net = tcnn.Network(n_input_dims, 3, network_config)
-        self.sh_net = tcnn.Network(n_input_dims, self.sh_dim, network_config)
+        sh_network_config = {
+            "otype": "FullyFusedMLP",
+            "activation": "ReLU",
+            "output_activation": "None",
+            "n_neurons": hidden_dim,
+            "n_hidden_layers": 2,
+        }
+        self.sh_net = tcnn.Network(n_input_dims, self.sh_dim, sh_network_config)
 
 
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):

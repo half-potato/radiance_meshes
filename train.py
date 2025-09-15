@@ -317,7 +317,6 @@ for iteration in progress_bar:
             alpha_threshold=args.alpha_threshold if iteration > 4500 else 0, high_precision=do_freeze)
         sd = model.state_dict()
         sd['indices'] = model.indices
-        torch.save(sd, args.output_path / "ckpt_prefreeze.pth")
         if do_freeze:
             del tet_optim
             # model.eval()
