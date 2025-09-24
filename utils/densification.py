@@ -203,6 +203,15 @@ def apply_densification(
     total_var[~mask_alive] = 0
     within_var[~mask_alive] = 0
 
+    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=stats.total_err.device)
+    indices = model.indices.long()
+    reduce_type = "sum"
+    mask_alive_i = mask_alive.int()
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive_i, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive_i, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
+    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
+
     target_addition = min(target_addition, stats.tet_view_count.shape[0])
     if target_addition < 0:
         return
@@ -273,6 +282,10 @@ def apply_densification(
     tet_optim.split(clone_indices,
                     split_point,
                     **args.as_dict())
+    keep_verts = keep_verts > 0
+    keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
+    print(f"Pruned: {(~keep_verts).sum()}")
+    # tet_optim.remove_points(keep_verts.reshape(-1))
 
     gc.collect()
     torch.cuda.empty_cache()

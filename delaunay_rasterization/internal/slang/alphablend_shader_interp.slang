@@ -253,16 +253,9 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
-                    ao = new_ao;
-                    // tet_alive[collected_idx[j]] = true;
-                    // if (pix_coord.x == 3 && pix_coord.y == 0) {
-                    //     printf("%f-%f (%f), (%f, %f, %f, %f, %f)\n", tetra_ctrl.dist.x, tetra_ctrl.dist.y, tetra_ctrl.density,
-                    //     new_ao.distortion_state.x, new_ao.distortion_state.y, new_ao.distortion_state.z, new_ao.distortion_state.w, new_ao.distortion_state.v);
-                    // }
 
-                    if (new_ao.rgba.a < 1 / 255.f) {
-                        // This Splat never registred so we subtract it before we break.
-                        // local_n_contrib--;
+                    ao = new_ao;
+                    if (new_ao.rgba.a < 0.0001f) {
                         thread_active = false;
                         break;
                     }
@@ -274,7 +267,6 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     if (is_inside)
         n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)] = local_n_contrib;
-    // printf("%i/%i,", low, local_n_contrib);
 
     return ao;
 }
@@ -300,8 +292,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     uint32_t block_size = cam.tile_height * cam.tile_width;
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
-
-    bool print = false;//pix_coord.x == 0 && pix_coord.y == 0;
 
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
@@ -351,13 +341,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
-                    // CtrlPt tetra_ctrl = evaluate_tetra_2D(g, cam, min_t, center_pix_coord);
-                    // if (tetra_ctrl.rgba.a < 1 / 255.f) {
-                    //     printf("Continue\n");
-                    //     continue;
-                    // }
-
-                    // Undo pixel state
                     ao = undo_alpha_out(ao, tetra_ctrl);
 
                     // Back-prop automatically through blending and gaussian evaluation.
@@ -370,7 +353,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                     bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
                     float midpt = tetra_ctrl.dist.x;
-                    float grad_scale = min(1, midpt*midpt);// / scene_scaling / scene_scaling);
+                    float grad_scale = 1;//min(1, midpt*midpt);// / scene_scaling / scene_scaling);
                     //float grad_scale = midpt*midpt / scene_scaling / scene_scaling;
                     CtrlPt.Differential d_tetra_scale = {
                         grad_scale * dp_tetra_ctrl.d.rgba,
@@ -378,7 +361,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                         grad_scale * dp_tetra_ctrl.d.density,
                     };
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray_o, dp_ray_d, cam.min_t, d_tetra_scale);
-                    // bwd_diff(evaluate_tetra_2D)(dp_g, cam, min_t, dp_center_pix_coord, dp_tetra_ctrl.d);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, dp_g.d);
 
                 }
@@ -490,14 +472,9 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
-    //bool print = thread_rank == 0;
-    bool print = false;
 
 
     Ray ray = get_ray(cam, center_pix_coord);
-    // if (print) {
-    //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
-    // }
 
     float max_split_alpha = 0.f;
     float max_grow_alpha = 0.f;
@@ -526,12 +503,12 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra_interp g = collected_splats[j];
                 uint32_t g_idx = collected_idx[j];
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl)) {
+                if (evaluate_tetra_interp(g, ray.o, ray.d, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     //if (tetra_ctrl.rgba.a < 1/255.f) continue;
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
                     // calc grad scale to remove floaters
-                    float grad_scale = min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);
+                    float grad_scale = 1;//min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);
 
                     float T = grad_scale * ao.rgba.a * tetra_ctrl.rgba.a;
                     float T_p = grad_scale * ao.rgba.a;

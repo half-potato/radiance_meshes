@@ -5,40 +5,10 @@ import safe_math;
 struct SplatTetrahedra_interp : IDifferentiable
 {
     Tetrahedra tet;
-    // float4x3 vertex_color; // Per-vertex color to be barycentrically interpolated
     float3 base_color;
     float3 grd;
-    float density;          // Single scalar density for the entire tetrahedron
+    float density;
 };
-
-// Given three vertex-colors (c0, c1, c2) and the barycentric coords (u,v)
-//   w0 = u, w1 = v, w2 = 1 - u - v
-// returns the final interpolated color:
-[Differentiable]
-float3 interpolate_triangle_color(
-    float3 c0, float3 c1, float3 c2,
-    float u, float v)
-{
-    float w0 = u;
-    float w1 = v;
-    float w2 = 1.0f - w0 - w1;
-    return c0 * w0 + c1 * w1 + c2 * w2;
-}
-
-[Differentiable]
-float4 tet_barycentric(float3 p, float4x3 vs)
-{
-    // Construct matrix T from tetrahedron vertices
-    float3x3 T = float3x3(vs[0] - vs[3], vs[1] - vs[3], vs[2] - vs[3]);
-
-    // Solve for (u, v, w)
-    float3 uvw = SolveLinearSystem(T, p - vs[3]);
-
-    // Compute t
-    float t = 1.0 - uvw.x - uvw.y - uvw.z;
-
-    return float4(uvw, t);
-}
 
 void print_verts(float4x3 verts) {
     printf("%f, %f, %f, %f\n", verts[0].x, verts[1].x, verts[2].x, verts[3].x);
@@ -60,21 +30,9 @@ inline float3 mix_color(float4x3 vertex_color, float4 bary) {
     return max(vertex_color[0] * bary.x + vertex_color[1] * bary.y + vertex_color[2] * bary.z + vertex_color[3] * bary.w, 0.f);
 }
 
-// [Differentiable]
-// inline float3 linear_color(float4x3 grad, float3 v)
-// {
-//     // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
-//     return {
-//         max(grad[0].r + dot(grad[1], v), 0.f),
-//         max(grad[0].g + dot(grad[2], v), 0.f),
-//         max(grad[0].b + dot(grad[3], v), 0.f),
-//     };
-// }
-
 [Differentiable]
 inline float3 linear_color(float3 grad, float3 v)
 {
-    // return grad[0] + grad[1] * v.x + grad[2] * v.y + grad[3] * v.z;
     float f = dot(grad, v);
     return {f, f, f};
 }
@@ -98,35 +56,15 @@ bool evaluate_tetra_interp(
     float enter = dist.x;
     float exit = max(dist.y, enter);
     float dt = max(dist.y - enter, 0.0f);
-    float intersection_t = 0.5*(exit+enter);
 
     if (!hit || dt < 1e-5f) {
         ctrl_pt = { (float4)(0.f, 0.f, 0.f, 0.f), {0.f, 0.f}, g.density };
         return false;
     } else {
-        /*
-        float3x3 T = transpose(float3x3(verts[0] - verts[3], verts[1] - verts[3], verts[2] - verts[3]));
-        float3 uvw_enter = SolveLinearSystem(T, enter * ray_d + ray_o - verts[3]);
-        float3 uvw_exit = SolveLinearSystem(T, exit * ray_d + ray_o - verts[3]);
-
-        float w_enter = safe_clip(1.0 - uvw_enter.x - uvw_enter.y - uvw_enter.z, 0, 1);
-        float w_exit = safe_clip(1.0 - uvw_exit.x - uvw_exit.y - uvw_exit.z, 0, 1);
-
-        float4 b_enter = float4(uvw_enter, w_enter);
-        float4 b_exit = float4(uvw_exit, w_exit);
-
-        float3 c_enter = mix_color(g.vertex_color, b_enter);
-        float3 c_exit = mix_color(g.vertex_color, b_exit);
-        */
-
-        //*
         float3 v_enter = enter * ray_d + ray_o - verts[0];
         float3 v_exit = exit * ray_d + ray_o - verts[0];
-        // float3 c_enter = max(linear_color(g.vertex_color, v_enter), 0.f);
-        // float3 c_exit = max(linear_color(g.vertex_color, v_exit), 0.f);
         float3 c_enter = max(linear_color(g.grd, v_enter) + g.base_color, 0.f);
         float3 c_exit = max(linear_color(g.grd, v_exit) + g.base_color, 0.f);
-        //*/
 
         float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
         float3 final_color = compute_integral(c_exit, c_enter, dt, g.density);
@@ -140,11 +78,6 @@ bool evaluate_tetra_interp(
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// 5) Loading functions for separate density & vertex colors
-//    We add "_interp" suffix to keep the old ones intact.
-////////////////////////////////////////////////////////////////////////////////
-
 [Differentiable]
 SplatTetrahedra_interp load_tet_alphablend_interp(
     int32_t        g_idx,
@@ -155,8 +88,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    // Here we assume each tetrahedron has a single scalar density in tet_density:
-    float density = float(tet_density[g_idx, 0]);
+    float density = max(float(tet_density[g_idx, 0]), 0.f);
     float3 base_color = {
         float(tet_density[g_idx, 1]),
         float(tet_density[g_idx, 2]),
@@ -174,7 +106,6 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     return result;
 }
 
-// Non-diff version (if needed)
 SplatTetrahedra_interp load_tet_alphablend_interp(
     int32_t        g_idx,
     TensorView<float> vertices,
@@ -184,7 +115,7 @@ SplatTetrahedra_interp load_tet_alphablend_interp(
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    float density = float(tet_density[g_idx, 0]);
+    float density = max(float(tet_density[g_idx, 0]), 0.f);
     SplatTetrahedra_interp result;
     result.tet       = tet;
     result.density   = density;
