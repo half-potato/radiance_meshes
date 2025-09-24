@@ -62,10 +62,10 @@ class FrozenTetModel(BaseModel):
         # learnable per‑tet parameters -------------------------------------------
         # self.density   = nn.Parameter(safe_log(density))    # (T, 1)
         # self.gradient  = nn.Parameter(torch.atanh(gradient.clip(min=-0.99, max=0.99)))   # (T, 3, 3)
-        self.density   = nn.Parameter(density)    # (T, 1)
-        self.gradient  = nn.Parameter(gradient)   # (T, 3, 3)
-        self.rgb       = nn.Parameter(rgb)        # (T, 3)
-        self.sh        = nn.Parameter(sh.half())         # (T, SH, 3)
+        self.density   = nn.Parameter(density, requires_grad=True)    # (T, 1)
+        self.gradient  = nn.Parameter(gradient, requires_grad=True)   # (T, 3, 3)
+        self.rgb       = nn.Parameter(rgb, requires_grad=True)        # (T, 3)
+        self.sh        = nn.Parameter(sh.half(), requires_grad=True)         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
         self.density_offset  = density_offset
@@ -310,6 +310,10 @@ class FrozenTetOptimizer:
         ''' Learning rate scheduling per step '''
         self.iteration = iteration
         for param_group in self.optim.param_groups:
+            lr = self.scheduler(iteration - self.freeze_start)
+            param_group['lr'] = lr
+
+        for param_group in self.sh_optim.param_groups:
             lr = self.scheduler(iteration - self.freeze_start)
             param_group['lr'] = lr
 

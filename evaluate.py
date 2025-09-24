@@ -14,7 +14,7 @@ import mediapy
 from icecream import ic
 
 args = Args()
-args.tile_size = 16
+args.tile_size = 4
 args.image_folder = "images_4"
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.output_path = Path("output/test/")
@@ -37,7 +37,7 @@ else:
 
 # model.light_offset = -1
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    args.dataset_path, args.image_folder, data_device="cuda", eval=args.eval)
+    args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
 
 ic(model.min_t)
 if args.render_train:
