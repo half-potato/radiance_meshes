@@ -405,3 +405,29 @@ def max_density_contrast(vertices, indices, density,
     contrast.scatter_reduce_(0, src_idx, edge_val, reduce="amax")
 
     return contrast
+
+
+def build_adj_matrix(num_tets, owners):
+    """
+    Helper function to build a sparse adjacency matrix from owner pairs.
+    adj[i, j] is True if tet i and tet j are neighbors.
+    """
+    device = owners.device
+    # Build a symmetric adjacency list from owner pairs
+    adj_indices = torch.cat([owners.T, owners.T[[1, 0]]], dim=1)
+
+    # Coalesce to handle any potential duplicate edges and create a valid sparse tensor
+    adj_sparse = torch.sparse_coo_tensor(
+        adj_indices,
+        torch.ones(adj_indices.shape[1], device=device),
+        (num_tets, num_tets)
+    ).coalesce()
+
+    # The values don't matter, only the connectivity.
+    # Return a boolean sparse tensor for efficient logical operations.
+    return torch.sparse_coo_tensor(
+        adj_sparse.indices(),
+        torch.ones_like(adj_sparse.values(), dtype=torch.bool),
+        adj_sparse.size(),
+        dtype=torch.bool
+    )

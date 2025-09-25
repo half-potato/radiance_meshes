@@ -78,8 +78,14 @@ class Model(BaseModel):
             [math.pi, 0],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
-        # self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
-        self.backbone = iNGPDW(sh_dim, **kwargs).to(self.device)
+
+        self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
+
+        # backbone = iNGPDW(sh_dim, **kwargs).to(self.device)
+        # sample_cv = torch.rand((512, 3)).to(self.device)
+        # sample_cr = torch.rand((512, 1)).to(self.device)
+        # traced_backbone = torch.jit.trace(backbone, example_inputs=(sample_cv, sample_cr))
+        # self.backbone = traced_backbone
 
         config = self.backbone.config
         offsets, pred_total = compute_grid_offsets(config, 3)
@@ -97,12 +103,7 @@ class Model(BaseModel):
                 self.different_size += 1
         self.offsets = offsets
 
-        backbone = iNGPDW(sh_dim, **kwargs).to(self.device)
-        sample_cv = torch.rand((512, 3)).to(self.device)
-        sample_cr = torch.rand((512, 1)).to(self.device)
-        traced_backbone = torch.jit.trace(backbone, example_inputs=(sample_cv, sample_cr))
-        self.backbone = traced_backbone
-        self.chunk_size = 3085760
+        self.chunk_size = 308576
         self.mask_values = True
         self.frozen = False
         self.linear = False
@@ -143,19 +144,21 @@ class Model(BaseModel):
         radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
-        # output = checkpoint(self.backbone, x, cr, use_reentrant=True)
-        cr = cr.reshape(-1, 1)
-        x, n = pad_for_tinycudann(x, 256)
-        cr, n = pad_for_tinycudann(cr, 256)
-        N = circumcenter.shape[0]
-        output = self.backbone(x, cr.reshape(-1, 1))
-        output = [v[:N] for v in output]
+
+        output = checkpoint(self.backbone, x, cr, use_reentrant=True)
+
+        # cr = cr.reshape(-1, 1)
+        # x, n = pad_for_tinycudann(x, 256)
+        # cr, n = pad_for_tinycudann(cr, 256)
+        # N = circumcenter.shape[0]
+        # output = self.backbone(x, cr.reshape(-1, 1))
+        # output = [v[:N] for v in output]
         return circumcenter, normalized, *output
 
     def get_cell_values(self, camera: Camera, mask=None,
                         all_circumcenters=None, radii=None):
         indices = self.indices[mask] if mask is not None else self.indices
-        vertices = self.vertices
+        vertices = self.vertices.detach()
 
         features = torch.empty((indices.shape[0], self.feature_dim), device=self.device)
         start = 0
@@ -331,12 +334,16 @@ class Model(BaseModel):
             indices[reverse_mask] = indices[reverse_mask][:, [1, 0, 2, 3]]
 
         # Cull tets with low density
+        self.full_indices = indices.clone()
         self.indices = indices
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.calc_tet_density()
             tet_alpha = self.calc_tet_alpha(mode="min", density=tet_density)
             mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
             self.indices = self.indices[mask]
+            self.mask = mask
+        else:
+            self.mask = torch.ones((self.full_indices.shape[0]), dtype=bool, device='cuda')
             
         torch.cuda.empty_cache()
 
@@ -345,6 +352,7 @@ class Model(BaseModel):
         
 
     def compute_weight_decay(self):
+        return sum([(embed.weight**2).mean() for embed in self.backbone.encoding.embeddings])
         param = list(self.backbone.encoding.parameters())[0]
         weight_decay = 0
         ind = 0
@@ -402,9 +410,9 @@ class TetOptimizer:
 
         self.net_optim = optim.CustomAdam([
             # {"params": model.backbone.network.parameters(),   "lr": network_lr,  "name": "density"},
-            # {"params": model.backbone.density_net.parameters(),   "lr": network_lr,  "name": "density"},
-            # {"params": model.backbone.color_net.parameters(),     "lr": network_lr,    "name": "color"},
-            {"params": model.backbone.density_color_net.parameters(),     "lr": network_lr,    "name": "color"},
+            {"params": model.backbone.density_net.parameters(),   "lr": network_lr,  "name": "density"},
+            {"params": model.backbone.color_net.parameters(),     "lr": network_lr,    "name": "color"},
+            # {"params": model.backbone.density_color_net.parameters(),     "lr": network_lr,    "name": "color"},
             {"params": model.backbone.gradient_net.parameters(),  "lr": network_lr, "name": "gradient"},
             {"params": model.backbone.sh_net.parameters(),        "lr": network_lr,       "name": "sh"},
         ], ignore_param_list=[], betas=[0.9, 0.999], eps=1e-15)

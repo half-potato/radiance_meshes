@@ -98,7 +98,8 @@ def load_cameras(cam_infos, resolution_scale, resolution, data_device):
     camera_list = []
     for id, c in tqdm(enumerate(cam_infos), total=len(cam_infos), desc="Loading cameras"):
         camera_list.append(load_cam(data_device, resolution, id, c, resolution_scale))
-    print(cam_infos[0])
+    if len(cam_infos) > 0:
+        print(cam_infos[0])
     return camera_list
 
 def transform_cameras_pca(cameras):

@@ -81,14 +81,15 @@ args.sh_step = 1
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
 args.network_lr = 1e-3
+args.sh_lr = 1e-3
 args.final_network_lr = 1e-4
 args.hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
-args.log2_hashmap_size = 22
+args.log2_hashmap_size = 23
 args.per_level_scale = 2
-args.L = 10
-args.hashmap_dim = 16
-args.base_resolution = 16
+args.L = 8
+args.hashmap_dim = 8
+args.base_resolution = 64
 args.density_offset = -4
 args.weight_decay = 0.01
 args.percent_alpha = 0.02 # preconditioning
@@ -133,15 +134,9 @@ args.densify_start = 2000
 args.densify_end = 16000
 args.densify_interval = 500
 args.budget = 2_000_000
-args.clone_velocity = 0.0
-args.speed_mul = 10
 args.percent_within = 0.70
 args.percent_total = 0.30
-args.diff_threshold = 0.0
-args.clone_min_alpha = 0.025
 args.clone_min_contrib = 0.003
-args.clone_min_density = 0.025
-args.clone_min_ratio = 1.0
 
 args.lambda_ssim = 0.2
 args.base_min_t = 0.2
@@ -314,10 +309,8 @@ for iteration in progress_bar:
     if do_delaunay or do_freeze:
         st = time.time()
         tet_optim.update_triangulation(
-            density_threshold=args.density_threshold if iteration > 4500 else 0,
-            alpha_threshold=args.alpha_threshold if iteration > 4500 else 0, high_precision=do_freeze)
-        sd = model.state_dict()
-        sd['indices'] = model.indices
+            density_threshold=args.density_threshold if iteration > 1500 else 0,
+            alpha_threshold=args.alpha_threshold if iteration > 1500 else 0, high_precision=do_freeze)
         if do_freeze:
             del tet_optim
             # model.eval()
