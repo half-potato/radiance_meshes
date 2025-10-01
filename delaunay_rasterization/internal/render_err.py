@@ -123,6 +123,14 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
     pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
 
+    mask = camera.gt_alpha_mask.cuda()
+    gt_img = (mask*gt_image).permute(1, 2, 0).contiguous()
+
+    pixel_err *= mask[0]
+    ssim_err *= mask[0]
+    l1_err *= mask[0]
+    render_img *= mask
+
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
 
@@ -138,7 +146,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         pixel_err=pixel_err,
         ssim_err=ssim_err,
         debug_img=debug_img,
-        gt=gt_image.permute(1, 2, 0).contiguous(),
+        gt=gt_img,
         tet_err=tet_err,
         tet_count=tet_count,
     ).launchRaw(

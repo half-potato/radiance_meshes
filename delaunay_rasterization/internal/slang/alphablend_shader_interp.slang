@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import random;
 import utils;
 import camera;
 import safe_math;
@@ -478,12 +477,6 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   float ssim_err,
                   float3 gt_pixel)
 {
-    uint seed = hash_wang(pix_coord.x);
-    seed = hash_wang(seed ^ pix_coord.y);
-    seed = hash_wang(seed ^ tile_idx_end);
-    seed = hash_wang(seed ^ tile_idx_start);
-    RNG rng = {seed};
-
     float2 center_pix_coord = {pix_coord.x+0.5, pix_coord.y+0.5};
     float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 1.f);
     DistortionState5 curr_distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};

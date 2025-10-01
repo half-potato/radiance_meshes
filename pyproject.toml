@@ -38,3 +38,7 @@ tinycudann = { git = "https://github.com/NVlabs/tiny-cuda-nn/", subdirectory = "
 
 [tool.uv]
 no-build-isolation-package = ["fused-ssim", "tinycudann"]
+
+[tool.uv.extra-build-dependencies]
+fused-ssim = ["setuptools"]
+

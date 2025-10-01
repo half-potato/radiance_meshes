@@ -1,0 +1,4 @@
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/stump,3,images_4,output/stump_ifimages_4_r43,27.759758725396726,0.2800585925579071,26.099382400512695,0.7573710083961487
+/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_r43,23.804850917194624,0.3143755793571472,24.650480270385742,0.7302992343902588
+/optane/nerf_datasets/360/garden,2,images_4,output/garden_ifimages_4_r43,27.062863614667982,0.1609170287847519,26.822843551635742,0.843923807144165

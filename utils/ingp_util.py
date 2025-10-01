@@ -5,7 +5,7 @@ def next_multiple(value, multiple):
     return ((value + multiple - 1) // multiple) * multiple
 
 def grid_scale(level, per_level_scale, base_resolution):
-    return math.ceil(math.exp2(level * math.log2(per_level_scale)) * base_resolution - 1) + 1
+    return math.ceil(2**(level * math.log2(per_level_scale)) * base_resolution - 1) + 1
 
 def compute_grid_offsets(cfg, N_POS_DIMS=3):
     """

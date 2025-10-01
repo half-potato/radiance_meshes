@@ -97,15 +97,27 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
             focal_length_y = intr.params[1]
             fovy = focal2fov(focal_length_y, height)
             fovx = focal2fov(focal_length_x, width)
+        elif intr.model=="SIMPLE_RADIAL_FISHEYE":
+            distortion_params = {}
+            fx, cx, cy, k1 = intr.params[:4]
+            distortion_params = {}
+            distortion_params['k1'] = k1
+            distortion_params['k2'] = 0
+            distortion_params['k3'] = 0
+            distortion_params['k4'] = 0
+            model = ProjectionType.FISHEYE
+            fovy = focal2fov(fx, height)
+            fovx = focal2fov(fx, width)
+            print(fovx, fx)
         elif intr.model=="OPENCV_FISHEYE":
             distortion_params = {}
             fx, fy, cx, cy = intr.params[:4]
             k1, k2, k3, k4 = intr.params[4:]
             distortion_params = {}
             distortion_params['k1'] = k1
-            distortion_params['k2'] = k2
-            distortion_params['k3'] = k3
-            distortion_params['k4'] = k4
+            distortion_params['k2'] = 0#k2
+            distortion_params['k3'] = 0#k3
+            distortion_params['k4'] = 0#k4
             model = ProjectionType.FISHEYE
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
@@ -127,7 +139,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
             print(intr.params)
             assert False, f"Colmap camera model not handled: {intr.model}"
 
-        image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        # image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        image_path = os.path.join(images_folder, extr.name)
         image_name = os.path.basename(image_path).split(".")[0]
         image_path = image_path.replace(" ", "_")
         image = None

@@ -69,6 +69,7 @@ args.dataset_path = Path("/optane/nerf_datasets/360/bonsai")
 args.output_path = Path("output/test/")
 args.iterations = 26000
 args.ckpt = ""
+args.resolution = 1
 args.render_train = False
 
 # Light Settings
@@ -90,11 +91,10 @@ args.L = 8
 args.hashmap_dim = 8
 args.base_resolution = 64
 args.density_offset = -4
-args.weight_decay = 0.01
+args.lambda_weight_decay = 0.01
 args.percent_alpha = 0.02 # preconditioning
 args.spike_duration = 500
 
-args.dg_init=1e-4
 args.g_init=1.0
 args.s_init=1e-4
 args.d_init=0.1
@@ -106,18 +106,11 @@ args.vert_lr_delay = 0
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
-args.vertices_beta = [0.9, 0.99]
-args.contract_vertices = False
-args.clip_multi = 0
-args.delaunay_start = 30000
+args.delaunay_interval = 10
 
 args.freeze_start = 18000
 args.freeze_lr = 1e-3
 args.final_freeze_lr = 1e-4
-args.color_lr = 1e-1
-args.final_color_lr = 1e-2
-args.shs_lr = 1e-3
-args.final_shs_lr = 1e-5
 
 # Distortion Settings
 args.lambda_dist = 1e-4
@@ -141,10 +134,10 @@ args.lambda_ssim = 0.2
 args.base_min_t = 0.2
 args.sample_cam = 8
 args.data_device = 'cpu'
-args.lambda_tv = 0.0
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
+args.threshold_start = 4500
 
 args.ablate_gradient = False
 args.ablate_circumsphere = False
@@ -163,7 +156,7 @@ args.output_path.mkdir(exist_ok=True, parents=True)
 # args.checkpoint_iterations.append(args.freeze_start-1)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval)
+    args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval, resolution=args.resolution)
 
 np.savetxt(str(args.output_path / "transform.txt"), scene_info.transform)
 
@@ -298,8 +291,7 @@ video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.Video
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for iteration in progress_bar:
-    delaunay_interval = 10 if iteration < args.delaunay_start else 100
-    do_delaunay = iteration % delaunay_interval == 0 and iteration < args.freeze_start
+    do_delaunay = iteration % args.delaunay_interval == 0 and iteration < args.freeze_start
     do_freeze = iteration == args.freeze_start
     do_cloning = iteration in dschedule
     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
@@ -308,8 +300,8 @@ for iteration in progress_bar:
     if do_delaunay or do_freeze:
         st = time.time()
         tet_optim.update_triangulation(
-            density_threshold=args.density_threshold if iteration > 4500 else 0,
-            alpha_threshold=args.alpha_threshold if iteration > 4500 else 0, high_precision=do_freeze)
+            density_threshold=args.density_threshold if iteration > args.threshold_start else 0,
+            alpha_threshold=args.alpha_threshold if iteration > args.threshold_start else 0, high_precision=do_freeze)
         if do_freeze:
             del tet_optim
             # model.eval()
@@ -330,6 +322,7 @@ for iteration in progress_bar:
     ind = inds.pop()
     camera = train_cameras[ind]
     target = camera.original_image.cuda()
+    gt_mask = camera.gt_alpha_mask.cuda()
 
     st = time.time()
     ray_jitter = torch.rand((camera.image_height, camera.image_width, 2), device=device)
@@ -351,9 +344,9 @@ for iteration in progress_bar:
         transformed = slice(bil_grids, coords, img_for_bil, img_ids)
         image = transformed["rgb"].reshape(h, w, 3).permute(2, 0, 1)
 
-    l1_loss = (target - image).abs().mean()
-    l2_loss = ((target - image)**2).mean()
-    reg = tet_optim.regularizer(render_pkg)
+    l1_loss = ((target - image).abs() * gt_mask).mean()
+    l2_loss = ((target - image)**2 * gt_mask).mean()
+    reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg['distortion_loss']
     loss = (1-args.lambda_ssim)*l1_loss + \
@@ -391,14 +384,14 @@ for iteration in progress_bar:
     if do_sh_up:
         model.sh_up()
 
-    if iteration % 10 == 0:
-        with torch.no_grad():
-            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-            sample_image = render_pkg['render']
-            sample_image = sample_image.permute(1, 2, 0)
-            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-            video_writer.write(pad_image2even(sample_image))
+    # if iteration % 10 == 0:
+    #     with torch.no_grad():
+    #         render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+    #         sample_image = render_pkg['render']
+    #         sample_image = sample_image.permute(1, 2, 0)
+    #         sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+    #         sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+    #         video_writer.write(pad_image2even(sample_image))
 
     if do_cloning and not model.frozen:
         with torch.no_grad():

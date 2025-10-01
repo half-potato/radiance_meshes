@@ -1,17 +1,130 @@
-import imageio
+import gc
 import cv2
+import torch
+import imageio
 from utils import safe_math
 from typing import NamedTuple, List
-import gc
 from delaunay_rasterization.internal.render_err import render_err
-import torch
-from utils.train_util import *
-from utils import topo_utils
 
 
-# -----------------------------------------------------------------------------
-# 1.  Aggregation helper
-# -----------------------------------------------------------------------------
+
+@torch.no_grad()
+def determine_cull_mask(
+    sampled_cameras: List["Camera"],
+    model,
+    # glo_list,
+    args,
+    device: torch.device,
+):
+    """Accumulate densification statistics for one iteration."""
+    n_tets = model.indices.shape[0]
+    peak_contrib = torch.zeros((n_tets), device=device)
+
+    for cam in sampled_cameras:
+        target = cam.original_image.cuda()
+
+        image_votes, extras = render_err(
+            target, cam, model,
+            scene_scaling=model.scene_scaling,
+            tile_size=args.tile_size,
+            lambda_ssim=0,
+            # glo=glo_list(torch.LongTensor([cam.uid]).to(device))
+        )
+
+        tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
+        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
+        peak_contrib = torch.maximum(max_T, peak_contrib)
+
+    tet_density = model.calc_tet_density()
+    mask = ((peak_contrib > args.contrib_threshold))
+    return mask
+
+def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
+    """
+    Calculates the approximate intersection point for pairs of line segments.
+
+    The intersection is defined as the midpoint of the shortest segment
+    connecting the two input line segments.
+
+    Args:
+        split_rays_data (torch.Tensor): Tensor of shape (N, 2, 6).
+            - N: Number of segment pairs.
+            - 2: Represents the two segments in a pair.
+            - 6: Contains [Ax, Ay, Az, Bx, By, Bz] for each segment,
+                 where A and B are the segment endpoints.
+                 Based on current Python code:
+                 A = average_P_exit, B = average_P_entry
+        epsilon (float): Small value to handle parallel lines and avoid
+                         division by zero if a segment has zero length.
+
+    Returns:
+        torch.Tensor: Tensor of shape (N, 3) representing the approximate
+                      "intersection" points (midpoints of closest approach).
+    """
+    # Segment 1 endpoints
+    p1_a = split_rays_data[:, 0, 0:3]  # Endpoint A of first segments (N, 3)
+    p1_b = split_rays_data[:, 0, 3:6]  # Endpoint B of first segments (N, 3)
+    # Segment 2 endpoints
+    p2_a = split_rays_data[:, 1, 0:3]  # Endpoint A of second segments (N, 3)
+    p2_b = split_rays_data[:, 1, 3:6]  # Endpoint B of second segments (N, 3)
+
+    # Define segment origins and direction vectors
+    # Segment S1: o1 + s * d1, for s in [0, 1]
+    # Segment S2: o2 + t * d2, for t in [0, 1]
+    o1 = p1_a
+    d1 = p1_b - p1_a  # Direction vector for segment 1 (from A to B)
+    o2 = p2_a
+    d2 = p2_b - p2_a  # Direction vector for segment 2 (from A to B)
+
+    # Calculate terms for finding closest points on the infinite lines
+    # containing the segments (based on standard formulas, e.g., Christer Ericson's "Real-Time Collision Detection")
+    v_o = o1 - o2 # Vector from origin of line 2 to origin of line 1
+
+    a = torch.sum(d1 * d1, dim=1)  # Squared length of d1
+    b = torch.sum(d1 * d2, dim=1)  # Dot product of d1 and d2
+    c = torch.sum(d2 * d2, dim=1)  # Squared length of d2
+    d = torch.sum(d1 * v_o, dim=1) # d1 dot (o1 - o2)
+    e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
+
+    denom = a * c - b * b
+    
+    # Parameters for closest points on the *infinite lines*
+    # s_line = (b*e - c*d) / denom
+    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
+    # The t_line should be for the parameterization o2 + t*d2.
+    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
+    # by setting derivatives w.r.t s and t to 0, we get:
+    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
+    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
+    # Solving this system:
+    # s_line = (d*c - e*b) / denom
+    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
+    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
+    
+    s_line_num = (b * e) - (c * d)
+    t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
+
+    # Handle near-zero denominator (lines are parallel or one segment is a point)
+    # We compute with a safe denominator, then clamp. Clamping is key for segments.
+    denom_safe = torch.where(denom.abs() < epsilon, torch.ones_like(denom), denom)
+    
+    s_line = s_line_num / denom_safe
+    t_line = t_line_num / denom_safe # Note: This t_line is for the parameter of d2 (from o2)
+
+    # Clamp parameters to [0, 1] to stay within the segments
+    bad_intersect = (s_line < 0) | (t_line < 0) | (s_line > 1) | (t_line > 1)
+    s_seg = torch.clamp(s_line, 0.0, 1.0)
+    t_seg = torch.clamp(t_line, 0.0, 1.0)
+
+    # Points of closest approach on the segments
+    pc1 = o1 + s_seg.unsqueeze(1) * d1
+    pc2 = o2 + t_seg.unsqueeze(1) * d2
+    
+    p_int = (pc1 + pc2) / 2.0
+                        
+    return p_int, bad_intersect
+
 class RenderStats(NamedTuple):
     within_var_rays: torch.Tensor         # (T, 2, 6)
     total_var_moments: torch.Tensor     # (T, 3)
@@ -142,38 +255,6 @@ def collect_render_stats(
     )
 
 @torch.no_grad()
-def determine_cull_mask(
-    sampled_cameras: List["Camera"],
-    model,
-    # glo_list,
-    args,
-    device: torch.device,
-):
-    """Accumulate densification statistics for one iteration."""
-    n_tets = model.indices.shape[0]
-    peak_contrib = torch.zeros((n_tets), device=device)
-
-    for cam in sampled_cameras:
-        target = cam.original_image.cuda()
-
-        image_votes, extras = render_err(
-            target, cam, model,
-            scene_scaling=model.scene_scaling,
-            tile_size=args.tile_size,
-            lambda_ssim=0,
-            # glo=glo_list(torch.LongTensor([cam.uid]).to(device))
-        )
-
-        tc = extras["tet_count"][..., 0]
-        max_T = extras["tet_count"][..., 1].float() / 65535
-        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
-        peak_contrib = torch.maximum(max_T, peak_contrib)
-
-    tet_density = model.calc_tet_density()
-    mask = ((peak_contrib > args.contrib_threshold))
-    return mask
-
-@torch.no_grad()
 def apply_densification(
     stats: RenderStats,
     model,
@@ -216,15 +297,12 @@ def apply_densification(
     if target_addition < 0:
         return
 
-    # Assume args.percent_total_var and args.percent_within_var exist
     target_total = int(args.percent_total * target_addition)
     target_within = int(args.percent_within * target_addition)
 
     grow_mask = torch.zeros_like(total_var, dtype=torch.bool)
     within_mask = torch.zeros_like(grow_mask)
 
-    # To prevent overlap, we select candidates sequentially
-    # and zero out the scores of selected tets in other categories.
     temp_total_score = total_var.clone()
     temp_within_score = within_var.clone()
 
@@ -239,7 +317,6 @@ def apply_densification(
     
     clone_mask = within_mask | grow_mask
 
-    # ---------- debug renders -------------------------------------------------
     if args.output_path is not None:
 
         f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
@@ -247,24 +324,23 @@ def apply_densification(
         # color = rgb + 0.5#torch.rand_like(f[:, :3])
         f[:, :3] = color
         f[:, 3] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
-                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
-        f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
-        f[:, :3] = color
-        f[:, 3] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"densify{iteration}.png",
-                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
-        imageio.imwrite(args.output_path / f"total_var{iteration}.png",
-                        render_debug(total_var[:, None],
-                                     model, sample_cam, tile_size=args.tile_size))
-        imageio.imwrite(args.output_path / f"within_var{iteration}.png",
-                        render_debug(within_var[:, None],
-                                     model, sample_cam, tile_size=args.tile_size))
+        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
+        # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
+        # f[:, :3] = color
+        # f[:, 3] *= 2.0    # alpha
+        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
+        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+        #                 render_debug(total_var[:, None],
+        #                              model, sample_cam, tile_size=args.tile_size))
+        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+        #                 render_debug(within_var[:, None],
+        #                              model, sample_cam, tile_size=args.tile_size))
         imageio.imwrite(args.output_path / f"im{iteration}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 
 
-    # ---------- pick clone positions -----------------------------------------
     clone_indices = model.indices[clone_mask]
     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
     grow_point = safe_math.safe_div(
@@ -294,5 +370,4 @@ def apply_densification(
         f"#Grow: {grow_mask.sum():4d} #Split: {within_mask.sum():4d} | "
         f"T_Total: {target_total:4d} T_Within: {target_within:4d} "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} "
-        # f"By Vel: {num_cloned}"
     )
