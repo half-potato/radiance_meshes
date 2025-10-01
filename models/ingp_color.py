@@ -2,16 +2,13 @@ import torch
 import math
 from data.camera import Camera
 from utils import optim
-from sh_slang.eval_sh import eval_sh
 from gdel3d import Del
 from torch import nn
 from icecream import ic
 
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere, project_points_to_tetrahedra, contraction_jacobian_d_in_chunks
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere
 from utils import topo_utils
-from utils.safe_math import safe_exp, safe_div, safe_sqrt
 from utils.contraction import contract_mean_std
-from utils.contraction import contract_points, inv_contract_points
 
 from utils.train_util import get_expon_lr_func, SpikingLR
 from utils.graphics_utils import l2_normalize_th
@@ -19,11 +16,8 @@ from torch.utils.checkpoint import checkpoint
 from pathlib import Path
 import numpy as np
 from utils.args import Args
-import tinyplypy
 from scipy.spatial import  Delaunay, ConvexHull
 import open3d as o3d
-from data.types import BasicPointCloud
-from utils import mesh_util
 from utils.model_util import *
 from models.base_model import BaseModel
 from utils.ingp_util import grid_scale, compute_grid_offsets
@@ -62,7 +56,6 @@ class Model(BaseModel):
                  ext_vertices: torch.Tensor,
                  center: torch.Tensor,
                  scene_scaling: float,
-                 contract_vertices=True,
                  density_offset=-1,
                  current_sh_deg=2,
                  max_sh_deg=2,
@@ -114,11 +107,7 @@ class Model(BaseModel):
         self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
-        self.contract_vertices = contract_vertices
-        if self.contract_vertices:
-            self.contracted_vertices = nn.Parameter(self.contract(vertices.detach()))
-        else:
-            self.contracted_vertices = nn.Parameter(vertices.detach())
+        self.contracted_vertices = nn.Parameter(vertices.detach())
         self.update_triangulation()
 
     @property
@@ -136,12 +125,12 @@ class Model(BaseModel):
             circumcenter, radius = calculate_circumcenters_torch(tets.double())
         else:
             circumcenter = circumcenters[start:end]
+            radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         if self.ablate_circumsphere:
             circumcenter = tets.mean(dim=1)
         if self.training:
-            circumcenter += self.alpha*torch.rand_like(circumcenter)
+            circumcenter += self.alpha*torch.randn_like(circumcenter) * radius.reshape(-1, 1)
         normalized = (circumcenter - self.center) / self.scene_scaling
-        radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
 
@@ -230,6 +219,8 @@ class Model(BaseModel):
         #     ext_vertices = ext_vertices[inds]
         # else:
         #     num_ext = ext_vertices.shape[0]
+        vertices = torch.cat([vertices, ext_vertices], dim=0)
+        ext_vertices = torch.empty((0, 3))
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,
                       max_sh_deg=max_sh_deg, **kwargs)
@@ -246,12 +237,9 @@ class Model(BaseModel):
         indices = ckpt["indices"]  # shape (N,4)
         del ckpt["indices"]
         print(f"Loaded {vertices.shape[0]} vertices")
-        temp = config.contract_vertices
-        config.contract_vertices = False
         ext_vertices = ckpt['ext_vertices']
         model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
-        model.contract_vertices = temp
         model.min_t = model.scene_scaling * config.base_min_t
         model.indices = torch.as_tensor(indices).cuda()
         return model
@@ -294,18 +282,9 @@ class Model(BaseModel):
         ss = torch.cat(ss, dim=0)
         return cs, ds, rs, gs, ss
 
-    def inv_contract(self, points):
-        return inv_contract_points(points) * self.scene_scaling + self.center
-
-    def contract(self, points):
-        return contract_points((points - self.center) / self.scene_scaling)
-
     @property
     def vertices(self):
-        if self.contract_vertices:
-            verts = self.inv_contract(self.contracted_vertices)
-        else:
-            verts = self.contracted_vertices
+        verts = self.contracted_vertices
         return torch.cat([verts, self.ext_vertices])
 
     def sh_up(self):
@@ -353,15 +332,6 @@ class Model(BaseModel):
 
     def compute_weight_decay(self):
         return sum([(embed.weight**2).mean() for embed in self.backbone.encoding.embeddings])
-        param = list(self.backbone.encoding.parameters())[0]
-        weight_decay = 0
-        ind = 0
-        for i in range(self.different_size):
-            o = self.offsets[i+1] - self.offsets[i]
-            weight_decay = weight_decay + (param[ind:self.offsets[i+1]]**2).mean()
-            ind += o
-        weight_decay = weight_decay + (param[ind:].reshape(-1, self.nominal_offset_size)**2).mean(dim=1).sum()
-        return weight_decay
 
 class TetOptimizer:
     def __init__(self,
@@ -373,36 +343,19 @@ class TetOptimizer:
                  vertices_lr: float=4e-4,
                  final_vertices_lr: float=4e-7,
                  vertices_lr_delay_multi: float=0.01,
-                 weight_decay=1e-10,
-                 lambda_color=1e-10,
                  split_std: float = 0.5,
                  lr_delay: int = 500,
                  freeze_start: int = 10000,
                  vert_lr_delay: int = 500,
-                 sh_interval: int = 1000,
-                 lambda_tv: float = 0.0,
-                 lambda_density: float = 0.0,
 
                  spike_duration: int = 20,
-                 densify_start: int = 2500,
                  densify_interval: int = 500,
                  densify_end: int = 15000,
                  midpoint: int = 2000,
 
-                 density_lr:  float = 1e-3,
-                 color_lr:    float = 1e-3,
-                 gradient_lr: float = 1e-3,
-                 sh_lr:       float = 1e-3,
-
-                 lambda_dist: float = 1e-5,
                  percent_alpha: float = 0.02,
-                 dist_delay: int = 2000,
 
                  **kwargs):
-        self.weight_decay = weight_decay
-        self.lambda_color = lambda_color
-        self.lambda_tv = lambda_tv
-        self.lambda_density = lambda_density
 
         self.optim = optim.CustomAdam([
             {"params": model.backbone.encoding.parameters(), "lr": encoding_lr, "name": "encoding"},
@@ -416,7 +369,7 @@ class TetOptimizer:
             {"params": model.backbone.gradient_net.parameters(),  "lr": network_lr, "name": "gradient"},
             {"params": model.backbone.sh_net.parameters(),        "lr": network_lr,       "name": "sh"},
         ], ignore_param_list=[], betas=[0.9, 0.999], eps=1e-15)
-        self.vert_lr_multi = 1 if model.contract_vertices else float(model.scene_scaling.cpu())
+        self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
         ])
@@ -488,8 +441,6 @@ class TetOptimizer:
                 param_group['lr'] = lr
 
     def add_points(self, new_verts: torch.Tensor, raw_verts=False):
-        if self.model.contract_vertices and not raw_verts:
-            new_verts = self.model.contract(new_verts)
         self.model.contracted_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
             contracted_vertices = new_verts
         ))['contracted_vertices']
@@ -547,39 +498,32 @@ class TetOptimizer:
     def sh_optim(self):
         return None
 
-    def regularizer(self, render_pkg):
+    def regularizer(self, render_pkg, lambda_weight_decay, **kwargs):
         # weight_decay = self.weight_decay * sum([(embed.weight**2).mean() for embed in self.model.backbone.encoding.embeddings])
-        weight_decay = self.weight_decay * self.model.compute_weight_decay()
+        weight_decay = lambda_weight_decay * self.model.compute_weight_decay()
 
-        if self.lambda_density > 0 or self.lambda_tv > 0:
-            density = self.model.calc_tet_density()
-            density_loss = (self.model.calc_tet_area().detach() * density).sum()
-            if self.lambda_tv > 0:
-                diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
-                tv_loss  = (self.face_area * diff.abs())
-                tv_loss  = tv_loss.sum() / self.face_area.sum()
-            else:
-                tv_loss = 0
-        else:
-            density_loss = 0
-            tv_loss = 0
+        # if self.lambda_density > 0 or self.lambda_tv > 0:
+        #     density = self.model.calc_tet_density()
+        #     density_loss = (self.model.calc_tet_area().detach() * density).sum()
+        #     if self.lambda_tv > 0:
+        #         diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
+        #         tv_loss  = (self.face_area * diff.abs())
+        #         tv_loss  = tv_loss.sum() / self.face_area.sum()
+        #     else:
+        #         tv_loss = 0
+        # else:
+        #     density_loss = 0
+        #     tv_loss = 0
 
-        return weight_decay + self.lambda_tv * tv_loss + self.lambda_density * density_loss
+        return weight_decay# + self.lambda_tv * tv_loss + self.lambda_density * density_loss
 
     def update_triangulation(self, **kwargs):
         self.model.update_triangulation(**kwargs)
-        if self.lambda_tv > 0:
-            self.build_tv()
-
-    def build_tv(self):
-        self.pairs, self.face_area = topo_utils.build_tv_struct(
-            self.model.vertices.detach(), self.model.indices, device='cuda')
 
     def prune(self, diff_threshold, **kwargs):
         if diff_threshold <= 0:
             return
         density = self.model.calc_tet_density()
-        self.build_tv()
         diff  = density[self.pairs[:,0]] - density[self.pairs[:,1]]
         tet_diff  = (self.face_area * diff.abs()).reshape(-1)
 

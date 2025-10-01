@@ -63,21 +63,6 @@ double power_of_circumsphere(
         else
         {
             return -1e20;
-            // Degenerate case: the points are nearly coplanar but not tiny
-            // Fit a plane to the first three vertices A, B, C
-            double3 plane_normal = cross(B - A, C - A);
-            plane_normal = normalize(plane_normal);
-
-            // Flip the normal so that the half-space contains the origin (0,0,0)
-            if (dot(-A, plane_normal) < 0)
-                plane_normal = -plane_normal;
-
-            // Determine which side of the plane the point P lies on
-            double side = dot(P - A, plane_normal);
-            if (side > 0)
-                return 1e20;
-            else
-                return -1e20;
         }
     }
     else

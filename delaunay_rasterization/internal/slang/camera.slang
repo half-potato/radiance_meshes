@@ -195,89 +195,6 @@ Tetrahedra tet_ndc2pix(Tetrahedra tet, int image_height, int image_width) {
     }};
 }
 
-// [Differentiable]
-void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) {
-    minv = float3(FLT_MAX, FLT_MAX, FLT_MAX);
-    maxv = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-
-    float3 minv2 = float3(FLT_MAX, FLT_MAX, FLT_MAX);
-    float3 maxv2 = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-
-    float eps = 1e-3;
-    bool has_front = false;
-    bool has_back = false;
-
-    // First pass: Include vertices clearly in front (z > EPSILON)
-    for (int i = 0; i < 4; i++) {
-        float3 v = tet.verts[i];
-        if (v.z > eps) {
-            has_front = true;
-            float3 pixel_vert = camspace2image_w_depth(v, cam);
-            minv = min(minv, pixel_vert);
-            maxv = max(maxv, pixel_vert);
-        } else if (v.z < -eps) {
-            has_back = true;
-        } else {
-            // Vertex exactly (or nearly) on plane; explicitly include it
-            float3 cv = { v.x, v.y, eps };
-            float3 pixel_vert = camspace2image_w_depth(cv, cam);
-            minv = min(minv, pixel_vert);
-            maxv = max(maxv, pixel_vert);
-            has_front = true; // Treat as front for extent
-            has_back = true;  // Also treat as back for intersection checks
-        }
-    }
-
-    bool straddling = has_front && has_back;
-
-    // printf("straddling: %i\n", straddling);
-
-    if (straddling) {
-        // Adjust bounds if tetrahedron straddles z=0
-        for (int i = 0; i < 4; i++) {
-            float3 vb = tet.verts[i];
-            [MaxIters(4)]
-            for (int j = i + 1; j < 4; j++) {
-                float3 vf = tet.verts[j];
-                float3 temp;
-                if (vb.z > vf.z) {
-                    // swap(vb, vf);
-                    temp = vf;
-                    vf = vb;
-                    vb = temp;
-                }
-                // vb = v back, vf = v front
-                // we are drawing lines along the tetrahedra and intersecting them with z=1e-3
-                if (vf.z > eps && vb.z < eps) {
-
-                    float t = max((eps - vb.z) / (vf.z - vb.z), 0);
-                    float3 v_clip = vb + t * (vf - vb);
-                    v_clip.z = eps;
-                    float3 pixel_v_clip = camspace2image_w_depth(v_clip, cam);
-                    pixel_v_clip.z = vb.z;
-                    // printf("pixel_v_clip: %f, %f, %f\n", v_clip.x, v_clip.y, v_clip.z);
-
-                    // Adjust bounds to include the intersection point
-                    minv = min(minv, pixel_v_clip);
-                    maxv = max(maxv, pixel_v_clip);
-                }
-            }
-        }
-        // float tile_width = 8;
-        // float tile_height = 8;
-        // int32_t grid_width = 80;
-        // int32_t grid_height = 60;
-        // int32_t gw = int32_t(ceil(clip((maxv.x) / tile_width, 0, grid_width))) - int32_t(clip(floor(minv.x / tile_width), 0, grid_width));
-        // int32_t gh = int32_t(floor(clip((maxv.y) / tile_height, 0, grid_height))) - int32_t(ceil(clip((minv.y) / tile_height, 0, grid_height)));
-        // if (gw == 80 && gh == 60) {
-        //     // printf("new: (%f, %f, %f), (%f, %f, %f), full extent: (%f, %f, %f), (%f, %f, %f), (%i, %i)\n",
-        //     //        minv.x, minv.y, minv.z, maxv.x, maxv.y, maxv.z,
-        //     //        minv2.x, minv2.y, minv2.z, maxv2.x, maxv2.y, maxv2.z,
-        //     //        gw, gh);
-        //     printTetrahedra(tet);
-        // }
-    }
-}
 
 [Differentiable]
 float3x3 construct_view_matrix(float4x4 viewmatrix)
@@ -494,7 +411,6 @@ float3 camspace_to_image(float3 p_cam, Camera cam)
     return float3(px, py, p_cam.z);
 }
 
-// --- NEW HELPER AND MODIFIED find_extent FUNCTION ---
 
 // Helper function to sample an edge and update the bounding box.
 void update_bounds_from_edge(float3 v_start, float3 v_end, inout float3 minv, inout float3 maxv, Camera cam)
@@ -524,7 +440,7 @@ void update_bounds_from_edge(float3 v_start, float3 v_end, inout float3 minv, in
 
 
 // [Differentiable]
-void find_extent2(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) 
+void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) 
 {
     minv = float3(FLT_MAX, FLT_MAX, FLT_MAX);
     maxv = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);

@@ -1,113 +1,14 @@
+import math
 import torch
-import time
-import math
-from data.camera import Camera
-from utils import optim
-from sh_slang.eval_sh import eval_sh
-from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render
-from delaunay_rasterization.internal.alphablend_tiled_slang_linear import AlphaBlendTiledRender as LinearRender
-from delaunay_rasterization.internal.render_grid import RenderGrid
-from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader, point2image
 import numpy as np
-from utils import topo_utils
-from icecream import ic
-import math
-from utils.contraction import contraction_jacobian
-from utils.graphics_utils import l2_normalize_th
 import matplotlib.pyplot as plt
+from data.camera import Camera
+from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render
+from delaunay_rasterization.internal.render_grid import RenderGrid
+from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
-from data.camera import focal2fov
 
 cmap = plt.get_cmap("jet")
-
-class ClippedGradients(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, lr_matrix):
-        ctx.save_for_backward(lr_matrix)
-        return input  # Identity operation
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        lr_matrix, = ctx.saved_tensors
-        grad_norm = torch.linalg.norm(grad_output, dim=-1, keepdim=True)
-        # grad_output = torch.maximum(-lr_matrix.abs(), torch.minimum(lr_matrix.abs(), grad_output))
-        shape = grad_norm.shape
-        clipped_grad_norm = grad_norm.clip(-lr_matrix.abs().reshape(*shape), lr_matrix.abs().reshape(*shape))
-        return l2_normalize_th(grad_output) * clipped_grad_norm, None
-        # return grad_output, None
-
-class ScaledGradients(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, lr_matrix):
-        ctx.save_for_backward(lr_matrix)
-        return input  # Identity operation
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        lr_matrix, = ctx.saved_tensors
-        return grad_output * lr_matrix, None
-
-def get_slang_projection_matrix(znear, zfar, fy, fx, height, width, device):
-    tanHalfFovX = width/(2*fx)
-    tanHalfFovY = height/(2*fy)
-
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
-
-    z_sign = 1.0
-
-    P = torch.tensor([
-       [2.0 * znear / (right - left),     0.0,                          (right + left) / (right - left), 0.0 ],
-       [0.0,                              2.0 * znear / (top - bottom), (top + bottom) / (top - bottom), 0.0 ],
-       [0.0,                              0.0,                          z_sign * zfar / (zfar - znear),  -(zfar * znear) / (zfar - znear) ],
-       [0.0,                              0.0,                          z_sign,                          0.0 ]
-    ], device=device)
-
-    return P
-
-def common_camera_properties_from_gsplat(viewmats, Ks, height, width):
-    """ Fetches all the Camera properties from the inria defined object"""
-    zfar = 100.0
-    znear = 0.01
-  
-    world_view_transform = viewmats
-    fx = Ks[0,0]
-    fy = Ks[1,1]
-    projection_matrix = get_slang_projection_matrix(znear, zfar, fy, fx, height, width, Ks.device)
-    fovx = focal2fov(fx, width)
-    fovy = focal2fov(fy, height)
-
-    cam_pos = viewmats.inverse()[:, 3]
-
-    return world_view_transform, projection_matrix, cam_pos, fovy, fovx
-
-def inverse_sigmoid(y):
-    return torch.log(y / (1 - y))
-
-def rgbs_activation(rgbs_raw):
-    # rgbs = torch.cat([torch.nn.functional.softplus(1e-1*rgbs_raw[:, :3]), safe_exp(rgbs_raw[:, 3:])], dim=1)
-    rgbs = torch.cat([torch.sigmoid(rgbs_raw[:, :3]), safe_exp(rgbs_raw[:, 3:])], dim=1)
-    return rgbs
-
-def safe_exp(x):
-    return x.clip(max=5).exp()
-
-def safe_trig_helper(x, fn, t=100 * torch.pi):
-    """Helper function used by safe_cos/safe_sin: mods x before sin()/cos()."""
-    return fn(torch.nan_to_num(torch.where(torch.abs(x) < t, x, x % t)))
-
-
-def safe_cos(x):
-    """jnp.cos() on a TPU may NaN out for large values."""
-    return safe_trig_helper(x, torch.cos)
-
-
-def safe_sin(x):
-    """jnp.sin() on a TPU may NaN out for large values."""
-    return safe_trig_helper(x, torch.sin)
-
 
 def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
            scene_scaling=1, clip_multi=0, ray_jitter=None,
@@ -147,28 +48,15 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         else:
             vertex_color, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
 
-    mod = LinearRender if model.linear else Render
-    if model.linear:
-        image_rgb, distortion_img, tet_alive = LinearRender.apply(
-            sorted_tetra_idx,
-            tile_ranges,
-            model.indices,
-            vertices,
-            vertex_color,
-            cell_values,
-            render_grid,
-            tcam,
-            ray_jitter)
-    else:
-        image_rgb, distortion_img, tet_alive = Render.apply(
-            sorted_tetra_idx,
-            tile_ranges,
-            model.indices,
-            vertices,
-            cell_values,
-            render_grid,
-            tcam,
-            ray_jitter)
+    image_rgb, distortion_img, tet_alive = Render.apply(
+        sorted_tetra_idx,
+        tile_ranges,
+        model.indices,
+        vertices,
+        cell_values,
+        render_grid,
+        tcam,
+        ray_jitter)
     alpha = image_rgb.permute(2,0,1)[3, ...]
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
@@ -176,11 +64,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
         'alpha': alpha,
-        # 'distortion_img': distortion_img,
         'distortion_loss': distortion_loss.mean(),
-        # 'visibility_filter': mask,
-        # 'circumcenters': circumcenter,
-        # 'density': cell_values[:, 0],
         'mask': mask,
         **extras
     }
@@ -296,93 +180,3 @@ def render_debug(render_tensor, model, camera, density_multi=1, tile_size=16):
 
     del render_pkg, render_tensor
     return image
-
-def select_n(tet_err_weight, N):
-    rgbs_threshold = torch.sort(tet_err_weight).values[-min(int(N), tet_err_weight.shape[0])]
-    clone_mask = (tet_err_weight > rgbs_threshold)
-    return clone_mask
-
-def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
-    """
-    Calculates the approximate intersection point for pairs of line segments.
-
-    The intersection is defined as the midpoint of the shortest segment
-    connecting the two input line segments.
-
-    Args:
-        split_rays_data (torch.Tensor): Tensor of shape (N, 2, 6).
-            - N: Number of segment pairs.
-            - 2: Represents the two segments in a pair.
-            - 6: Contains [Ax, Ay, Az, Bx, By, Bz] for each segment,
-                 where A and B are the segment endpoints.
-                 Based on current Python code:
-                 A = average_P_exit, B = average_P_entry
-        epsilon (float): Small value to handle parallel lines and avoid
-                         division by zero if a segment has zero length.
-
-    Returns:
-        torch.Tensor: Tensor of shape (N, 3) representing the approximate
-                      "intersection" points (midpoints of closest approach).
-    """
-    # Segment 1 endpoints
-    p1_a = split_rays_data[:, 0, 0:3]  # Endpoint A of first segments (N, 3)
-    p1_b = split_rays_data[:, 0, 3:6]  # Endpoint B of first segments (N, 3)
-    # Segment 2 endpoints
-    p2_a = split_rays_data[:, 1, 0:3]  # Endpoint A of second segments (N, 3)
-    p2_b = split_rays_data[:, 1, 3:6]  # Endpoint B of second segments (N, 3)
-
-    # Define segment origins and direction vectors
-    # Segment S1: o1 + s * d1, for s in [0, 1]
-    # Segment S2: o2 + t * d2, for t in [0, 1]
-    o1 = p1_a
-    d1 = p1_b - p1_a  # Direction vector for segment 1 (from A to B)
-    o2 = p2_a
-    d2 = p2_b - p2_a  # Direction vector for segment 2 (from A to B)
-
-    # Calculate terms for finding closest points on the infinite lines
-    # containing the segments (based on standard formulas, e.g., Christer Ericson's "Real-Time Collision Detection")
-    v_o = o1 - o2 # Vector from origin of line 2 to origin of line 1
-
-    a = torch.sum(d1 * d1, dim=1)  # Squared length of d1
-    b = torch.sum(d1 * d2, dim=1)  # Dot product of d1 and d2
-    c = torch.sum(d2 * d2, dim=1)  # Squared length of d2
-    d = torch.sum(d1 * v_o, dim=1) # d1 dot (o1 - o2)
-    e = torch.sum(d2 * v_o, dim=1) # d2 dot (o1 - o2)
-
-    denom = a * c - b * b
-    
-    # Parameters for closest points on the *infinite lines*
-    # s_line = (b*e - c*d) / denom
-    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
-    # The t_line should be for the parameterization o2 + t*d2.
-    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
-    # by setting derivatives w.r.t s and t to 0, we get:
-    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
-    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
-    # Solving this system:
-    # s_line = (d*c - e*b) / denom
-    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
-    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
-    
-    s_line_num = (b * e) - (c * d)
-    t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
-
-    # Handle near-zero denominator (lines are parallel or one segment is a point)
-    # We compute with a safe denominator, then clamp. Clamping is key for segments.
-    denom_safe = torch.where(denom.abs() < epsilon, torch.ones_like(denom), denom)
-    
-    s_line = s_line_num / denom_safe
-    t_line = t_line_num / denom_safe # Note: This t_line is for the parameter of d2 (from o2)
-
-    # Clamp parameters to [0, 1] to stay within the segments
-    bad_intersect = (s_line < 0) | (t_line < 0) | (s_line > 1) | (t_line > 1)
-    s_seg = torch.clamp(s_line, 0.0, 1.0)
-    t_seg = torch.clamp(t_line, 0.0, 1.0)
-
-    # Points of closest approach on the segments
-    pc1 = o1 + s_seg.unsqueeze(1) * d1
-    pc2 = o2 + t_seg.unsqueeze(1) * d2
-    
-    p_int = (pc1 + pc2) / 2.0
-                        
-    return p_int, bad_intersect

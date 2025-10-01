@@ -30,8 +30,3 @@ alpha_blend_shaders_interp = {}
 for tile_height, tile_width in TILE_SIZES_HW:
   alpha_blend_shaders_interp[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader_interp.slang"), 
                                                                          defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
-
-alpha_blend_shaders_linear = {}
-for tile_height, tile_width in TILE_SIZES_HW:
-  alpha_blend_shaders_linear[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader_linear.slang"), 
-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})

@@ -328,25 +328,25 @@ class FrozenTetOptimizer:
     # ------------------------------------------------------------------
     # regularisers ------------------------------------------------------
     # ------------------------------------------------------------------
-    def regularizer(self, *_):
+    def regularizer(self, render_pkg, lambda_weight_decay, **kwargs):
         # wd_loss = self.weight_decay * sum((p ** 2).mean() for p in [
         #     self.model.density, self.model.rgb, self.model.gradient, self.model.sh
         # ])
 
-        if self.lambda_density > 0:
-            density = self.model.density.squeeze(-1)
-            density_loss = density.mean()
-        else:
-            density_loss = 0.0
+        # if self.lambda_density > 0:
+        #     density = self.model.density.squeeze(-1)
+        #     density_loss = density.mean()
+        # else:
+        #     density_loss = 0.0
+        #
+        # if self.lambda_tv > 0:
+        #     # simple TV on densities as example
+        #     diff = (self.model.density[self.pairs[:, 0]] - self.model.density[self.pairs[:, 1]]).abs()
+        #     tv_loss = (self.face_area * diff).sum() / self.face_area.sum()
+        # else:
+        #     tv_loss = 0.0
 
-        if self.lambda_tv > 0:
-            # simple TV on densities as example
-            diff = (self.model.density[self.pairs[:, 0]] - self.model.density[self.pairs[:, 1]]).abs()
-            tv_loss = (self.face_area * diff).sum() / self.face_area.sum()
-        else:
-            tv_loss = 0.0
-
-        return self.lambda_density * density_loss + self.lambda_tv * tv_loss
+        return 0.0
 
 def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only
@@ -358,7 +358,7 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
     int_vertices  = vertices_full[: base_model.num_int_verts]
     ext_vertices  = base_model.ext_vertices.detach()
     full_mask     = base_model.mask.cpu()
-    full_mask[full_mask] = mask.cpu()
+    # full_mask[full_mask] = mask.cpu()
     indices       = base_model.indices[mask].detach()
     full_indices = base_model.full_indices.cpu()
     max_sh_deg = base_model.max_sh_deg
