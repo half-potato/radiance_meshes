@@ -97,7 +97,7 @@ bool evaluate_tetra_interp(
         float4 rgba = {final_color.x,
                        final_color.y,
                        final_color.z,
-                       alpha};
+                       g.density * dt};
         ctrl_pt = { rgba, {enter, exit}, g.density };
         return true;
     }

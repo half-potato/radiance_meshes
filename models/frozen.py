@@ -109,7 +109,14 @@ class FrozenTetModel(BaseModel):
         # Extract required parameters from checkpoint
         int_vertices = ckpt['interior_vertices']
         ext_vertices = ckpt['ext_vertices']
-        indices = ckpt['indices']
+        if 'full_indices' in ckpt:
+            full_indices = ckpt['full_indices']
+            mask = ckpt['mask']
+            indices = full_indices[mask]
+        else:
+            full_indices = ckpt['indices']
+            indices = full_indices
+            mask = torch.ones((full_indices.shape[0]), dtype=bool)
         density = ckpt['density']
         rgb = ckpt['rgb']
         gradient = ckpt['gradient']
@@ -124,6 +131,8 @@ class FrozenTetModel(BaseModel):
             int_vertices=int_vertices.to(device),
             ext_vertices=ext_vertices.to(device),
             indices=indices.to(device),
+            full_indices=full_indices,
+            mask=mask,
             density=density.to(device),
             rgb=rgb.to(device),
             gradient=gradient.to(device),
@@ -358,7 +367,7 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
     int_vertices  = vertices_full[: base_model.num_int_verts]
     ext_vertices  = base_model.ext_vertices.detach()
     full_mask     = base_model.mask.cpu()
-    full_mask[full_mask] = mask.cpu()
+    full_mask[full_mask.clone()] = mask.cpu()
     indices       = base_model.indices[mask].detach()
     full_indices = base_model.full_indices.cpu()
     max_sh_deg = base_model.max_sh_deg

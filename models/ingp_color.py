@@ -136,12 +136,12 @@ class Model(BaseModel):
             circumcenter, radius = calculate_circumcenters_torch(tets.double())
         else:
             circumcenter = circumcenters[start:end]
+            radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         if self.ablate_circumsphere:
             circumcenter = tets.mean(dim=1)
         if self.training:
-            circumcenter += self.alpha*torch.rand_like(circumcenter)
+            circumcenter += self.alpha*torch.randn_like(circumcenter) * radius.reshape(-1, 1)
         normalized = (circumcenter - self.center) / self.scene_scaling
-        radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
         x = (cv/2 + 1)/2
 

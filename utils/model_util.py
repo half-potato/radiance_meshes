@@ -111,6 +111,7 @@ def compute_vertex_colors_from_field(
     
     return vertex_colors
 
+@torch.jit.script
 def offset_normalize(rgb, grd, circumcenters, tets):
     grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
     radius = torch.linalg.norm(tets[:, 0] - circumcenters, dim=-1, keepdim=True).reshape(-1, 1, 1)
@@ -121,6 +122,7 @@ def offset_normalize(rgb, grd, circumcenters, tets):
     base_color_v0_raw = vcolors[:, 0]
     return base_color_v0_raw, normed_grd
 
+@torch.jit.script
 def activate_output(camera_center, density, rgb, grd, sh, indices, circumcenters, vertices, current_sh_deg, max_sh_deg):
     tets = vertices[indices]
     base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)

@@ -174,18 +174,18 @@ float4 undo_pixel_state(float4 pixel_state_t_n, float4 gauss_rgba_t_n)
 [Differentiable]
 float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
 {
-    float transmittance_t_nm1 = exp(pixel_state_t_nm1.a);
+    float transmittance_t_nm1 = safe_exp(pixel_state_t_nm1.a);
     float3 color_t_n = pixel_state_t_nm1.rgb + gauss_rgba_t_n.rgb * transmittance_t_nm1;
-    float log_transmittance_t_n = pixel_state_t_nm1.a + log(max(LOG_EPS, 1.f - gauss_rgba_t_n.a));
+    float log_transmittance_t_n = pixel_state_t_nm1.a - gauss_rgba_t_n.a;
     
     return float4(color_t_n, log_transmittance_t_n);
 }
 
 float4 undo_pixel_state(float4 pixel_state_t_n, float4 gauss_rgba_t_n)
 {
-    float log_transmittance_t_nm1 = pixel_state_t_n.a - log(max(LOG_EPS, 1.f - gauss_rgba_t_n.a));
+    float log_transmittance_t_nm1 = pixel_state_t_n.a + gauss_rgba_t_n.a;
 
-    float transmittance_t_nm1 = exp(log_transmittance_t_nm1);
+    float transmittance_t_nm1 = safe_exp(log_transmittance_t_nm1);
     
     float3 color_t_nm1 = pixel_state_t_n.rgb - gauss_rgba_t_n.rgb * transmittance_t_nm1;
     
@@ -199,7 +199,7 @@ struct AlphaOut: IDifferentiable {
 
 [Differentiable]
 AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
-    float T = exp(prev.rgba.a);
+    float T = safe_exp(prev.rgba.a);
     return {
         update_pixel_state(prev.rgba, ctrl.rgba),
         update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist)
@@ -208,7 +208,7 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
 
 AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
     float4 pix_state = undo_pixel_state(curr.rgba, ctrl.rgba);
-    float T = exp(pix_state.a);
+    float T = safe_exp(pix_state.a);
     return {
         pix_state,
         undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist)

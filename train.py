@@ -63,11 +63,11 @@ class SimpleSampler:
 eps = torch.finfo(torch.float).eps
 args = Args()
 args.tile_size = 4
-args.image_folder = "images_4"
+args.image_folder = "images_2"
 args.eval = False
-args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
+args.dataset_path = Path("/optane/nerf_datasets/360/bonsai")
 args.output_path = Path("output/test/")
-args.iterations = 30000
+args.iterations = 26000
 args.ckpt = ""
 args.render_train = False
 
@@ -179,7 +179,7 @@ else:
     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
                                 current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
                                 **args.as_dict())
-min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+min_t = args.min_t = args.base_min_t# * model.scene_scaling.item()
 
 tet_optim = TetOptimizer(model, **args.as_dict())
 if args.eval:
@@ -308,8 +308,8 @@ for iteration in progress_bar:
     if do_delaunay or do_freeze:
         st = time.time()
         tet_optim.update_triangulation(
-            density_threshold=args.density_threshold if iteration > 1500 else 0,
-            alpha_threshold=args.alpha_threshold if iteration > 1500 else 0, high_precision=do_freeze)
+            density_threshold=args.density_threshold if iteration > 4500 else 0,
+            alpha_threshold=args.alpha_threshold if iteration > 4500 else 0, high_precision=do_freeze)
         if do_freeze:
             del tet_optim
             # model.eval()

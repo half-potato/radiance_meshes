@@ -21,6 +21,7 @@ args.output_path = Path("output/test/")
 args.eval = True
 args.use_ply = False
 args.render_train = False
+args.min_t = 0.2
 args = Args.from_namespace(args.get_parser().parse_args())
 
 device = torch.device('cuda')
@@ -39,6 +40,7 @@ else:
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
 
+model.min_t = args.min_t
 ic(model.min_t)
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
@@ -51,7 +53,7 @@ with torch.no_grad():
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render(camera, model, tile_size=args.tile_size, tmin=model.min_t)
+        render_pkg = render(camera, model, tile_size=args.tile_size, min_t=model.min_t)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()
