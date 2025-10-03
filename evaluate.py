@@ -40,7 +40,8 @@ else:
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
 
-model.min_t = args.min_t
+# ic(model.min_t)
+# model.min_t = args.min_t
 ic(model.min_t)
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])

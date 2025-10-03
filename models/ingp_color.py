@@ -221,8 +221,8 @@ class Model(BaseModel):
         #     ext_vertices = ext_vertices[inds]
         # else:
         #     num_ext = ext_vertices.shape[0]
-        vertices = torch.cat([vertices, ext_vertices], dim=0)
-        ext_vertices = torch.empty((0, 3))
+        # vertices = torch.cat([vertices, ext_vertices], dim=0)
+        # ext_vertices = torch.empty((0, 3))
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,
                       max_sh_deg=max_sh_deg, **kwargs)
@@ -395,8 +395,8 @@ class TetOptimizer:
         self.net_scheduler_args = SpikingLR(
             spike_duration, freeze_start, base_net_scheduler,
             midpoint, densify_interval, densify_end,
-            # network_lr, network_lr)
-            network_lr, network_lr/3)
+            network_lr, network_lr)
+            # network_lr, final_network_lr)
 
         base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
@@ -408,11 +408,12 @@ class TetOptimizer:
             spike_duration, freeze_start, base_encoder_scheduler,
             midpoint, densify_interval, densify_end,
             # encoding_lr, encoding_lr)
-            encoding_lr, encoding_lr/3)
+            encoding_lr, encoding_lr)
 
-        self.vertex_lr = self.vert_lr_multi*vertices_lr
-        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
-                                                lr_final=self.vert_lr_multi*final_vertices_lr,
+        self.vertices_lr = self.vert_lr_multi*vertices_lr
+        self.final_vertices_lr = self.vert_lr_multi*final_vertices_lr
+        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertices_lr,
+                                                lr_final=self.final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
                                                 max_steps=freeze_start,
                                                 lr_delay_steps=vert_lr_delay)
@@ -421,8 +422,8 @@ class TetOptimizer:
         self.vertex_scheduler_args = SpikingLR(
             spike_duration, freeze_start, base_vertex_scheduler,
             midpoint, densify_interval, densify_end,
-            self.vertex_lr, self.vertex_lr/3)
-            # self.vertex_lr, self.vertex_lr)
+            # self.vertices_lr, self.final_vertices_lr)
+            self.vertices_lr, self.vertices_lr)
         self.iteration = 0
 
     def update_learning_rate(self, iteration):
@@ -439,7 +440,7 @@ class TetOptimizer:
         for param_group in self.vertex_optim.param_groups:
             if param_group["name"] == "contracted_vertices":
                 lr = self.vertex_scheduler_args(iteration)
-                self.vertex_lr = lr
+                self.vertices_lr = lr
                 param_group['lr'] = lr
 
     def add_points(self, new_verts: torch.Tensor, raw_verts=False):

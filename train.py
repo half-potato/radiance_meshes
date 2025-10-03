@@ -34,6 +34,7 @@ from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
 from utils.densification import collect_render_stats, apply_densification, determine_cull_mask
 import mediapy
+from icecream import ic
 
 torch.set_num_threads(1)
 
@@ -92,7 +93,7 @@ args.hashmap_dim = 8
 args.base_resolution = 64
 args.density_offset = -4
 args.lambda_weight_decay = 0.01
-args.percent_alpha = 0.02 # preconditioning
+args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 
 args.g_init=1.0
@@ -131,7 +132,7 @@ args.percent_total = 0.30
 args.clone_min_contrib = 0.003
 
 args.lambda_ssim = 0.2
-args.base_min_t = 0.2
+args.base_min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.1
@@ -172,7 +173,8 @@ else:
     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
                                 current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
                                 **args.as_dict())
-min_t = args.min_t = args.base_min_t# * model.scene_scaling.item()
+min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+ic(min_t)
 
 tet_optim = TetOptimizer(model, **args.as_dict())
 if args.eval:
