@@ -10,8 +10,8 @@ import jax.numpy as jnp
 from data.camera import Camera
 
 from utils.topo_utils import build_adj
-from delaunay_rasterization.internal.ray_trace import TetrahedralRayTrace
-from dtlookup import lookup_inds
+from tracers.splinetracers.tetra_splinetracer import trace_rays, get_tet_adjacency
+from dtlookup import lookup_inds, TetrahedraLookup, TetWalkLookup
 
 def get_projection_matrix(znear, zfar, fy, fx, height, width, device):
     """Calculate projection matrix for given camera parameters."""
@@ -132,19 +132,21 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
     rays = camera.to_rays().cuda()
     cpos = camera.camera_center
 
-    tet_adj = build_adj(model.vertices, model.indices, device='cuda')
-    tet_adj = tet_adj.int()
+    lookup = TetrahedraLookup(model.indices, model.vertices, 256)
     # start_tet_ids = find_point_tetrahedron_sl(cpos.reshape(1, 3).cuda(), model.vertices, model.indices).int()
-    start_tet_ids = lookup_inds(model.indices, model.vertices, cpos.reshape(1, 3).cuda())
-    output_img, distortion_img = TetrahedralRayTrace.apply(
-            rays,
-            model.indices,
+    face_indices, side_index = get_tet_adjacency(model.indices)
+    ic(model.indices, face_indices, model.vertices)
+    output_img = trace_rays(
             model.vertices,
-            cell_values,
-            tet_adj,
-            start_tet_ids[0].item() * torch.ones((rays.shape[0]), dtype=torch.int, device='cuda'),
+            face_indices,
+            side_index,
+            cell_values[:, :1].contiguous(),
+            cell_values[:, 1:].contiguous(),
+            rays[:, :3].contiguous(),
+            rays[:, 3:].contiguous(),
             tmin,
             200,
+            lookup
     )
     torch_image = output_img.reshape(camera.image_height, camera.image_width, -1)
     

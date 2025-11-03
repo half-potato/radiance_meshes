@@ -1,4 +1,6 @@
 #define RT_EPS 0
+#define BUFFER_SIZE 16
+#define LOG_CUTOFF 5.54
 //#define tri_per_g 8
 #define tri_per_g 4
 import spline_machine;
@@ -18,37 +20,36 @@ RWStructuredBuffer<float4>      last_dirac;
 RWStructuredBuffer<SplineState> last_state;
 RWStructuredBuffer<int> tri_collection;
 StructuredBuffer<float3>      ray_origins;
-StructuredBuffer<float3>      ray_directions;
+StructuredBuffer<float3> ray_directions;
+RWStructuredBuffer<int> start_tet_ids;
 
-RWStructuredBuffer<float3> means;
-RWStructuredBuffer<float3> scales;
-RWStructuredBuffer<float4> quats;
-RWStructuredBuffer<float> heights;
+RWStructuredBuffer<int2>  side_index;
+RWStructuredBuffer<float> densities;
 RWStructuredBuffer<float> features;
-
-size_t sh_degree;
 size_t max_iters;
-float clip_dist;
+float tmin;
 float tmax;
-float4 initial_drgb;
-float max_prim_size;
 RaytracingAccelerationStructure traversable;
 
-ControlPoint get_ctrl_pt(uint ind, float3 rayo, float3 rayd) {
-    uint prim_ind = (uint)floor(ind / tri_per_g);
-    uint face_id = mod(ind, tri_per_g);
+ControlPoint get_ctrl_pt(uint ind, float t) {
+    uint face_ind = (uint)floor(ind / 2);
+    uint hitkind = mod(ind, 2);
+    uint prim_ind = side_index[face_ind][hitkind];
 
-    let mean = means[prim_ind];
-    let scale = scales[prim_ind];
-    let quat = quats[prim_ind];
-    let height = heights[prim_ind];
+    let height = densities[prim_ind];
 
     Features feat;
-    SHFeatures sh_feats = {prim_ind, sh_degree, features};
+    SHFeatures sh_feats = {prim_ind, 0, features};
     feat.f0 = get_sh(sh_feats, 0);
     float3 rayd = {0, 0, 1};
     float3 color = eval_sh_col0(rayd, feat);
-    ControlPoint ctrl_pt = intersect(rayo, rayd, scale, mean, quat, color, height, face_id);
+    ControlPoint ctrl_pt;
+    ctrl_pt.t = t;
+    let dirac_height = height;
+    ctrl_pt.dirac.x = dirac_height;
+    ctrl_pt.dirac.y = dirac_height * color.x;
+    ctrl_pt.dirac.z = dirac_height * color.y;
+    ctrl_pt.dirac.w = dirac_height * color.z;
     return ctrl_pt;
 }
 
@@ -58,46 +59,41 @@ void ch(
     in float2 barycentric,
 )
 {
-    uint ind = PrimitiveIndex();
-    uint prim_ind = (uint)floor(ind / tri_per_g);
-    uint face_id = mod(ind, tri_per_g);
-    float3 rayd = l2_normalize(WorldRayDirection());
-    float3 rayo = WorldRayOrigin();
-    //*
-
-    let mean = means[prim_ind];
-    let scale = scales[prim_ind];
-    let quat = quats[prim_ind];
-    let height = heights[prim_ind];
-
-    Features feat;
-    SHFeatures sh_feats = {prim_ind, sh_degree, features};
-    feat.f0 = get_sh(sh_feats, 0);
-    float3 color = eval_sh_col0(rayd, feat);
-
-
-    ControlPoint ctrl_pt = intersect(rayo, rayd, scale, mean, quat, color, height, face_id);
-    //*/
-    float t = RayTCurrent();
-    //float t = ctrl_pt.t;
-    set_payload1(asuint(ctrl_pt.dirac.x));
-    set_payload2(asuint(ctrl_pt.dirac.y));
-    set_payload3(asuint(ctrl_pt.dirac.z));
-    set_payload4(asuint(ctrl_pt.dirac.w));
-
-
-    set_payload0(asuint(t));
-    set_payload5(ind);
-
+    printf("HI");
 }
+
+
 
 [shader("anyhit")]
 void ah()
 {
-    uint old_tri_ind = PrimitiveIndex();
-    uint tri_ind = get_payload5();
+    float t = RayTCurrent();
+    uint ind = PrimitiveIndex();
+    uint hitKind = (isFrontFaceHit()) ? 0 : 1;
 
-    if (old_tri_ind == tri_ind) {
+    float cur_t = RayTMin();
+
+    float test_t;
+    uint test_i;
+    float h_t = t;
+    uint h_i = 2*ind+hitKind;
+
+    // sort insert
+    if (t > cur_t) {
+        [ForceUnroll]
+        for (int i=0; i<BUFFER_SIZE; i++) {
+            test_t = asfloat(get_payload(i*2));
+            if (h_t < test_t) {
+                set_payload(i*2, asuint(h_t));
+                test_i = get_payload(i*2+1);
+                set_payload(i*2+1, h_i);
+                h_i = test_i;
+                h_t = test_t;
+            }
+        }
+    }
+
+    if (t < asfloat(get_payload(2*(BUFFER_SIZE-1)))) {
         IgnoreHit();
     }
 }
@@ -113,7 +109,6 @@ void ms()
     set_payload5(255u);
 }
 
-
 [shader("raygeneration")]
 void rg_float()
 {
@@ -121,77 +116,67 @@ void rg_float()
 
     const uint3 idx = DispatchRaysIndex();
     const uint3 dim = DispatchRaysDimensions();
-    const float offset = 0; // 
     float3 direction = l2_normalize(ray_directions[idx.x]);
-    float3 origin = ray_origins[idx.x] + (clip_dist-offset) * direction;
-    const float texit = tmax - offset;
-    float tmin = 0.0;
-    float tmax = texit;
+    float3 origin = ray_origins[idx.x] + tmin * ray_directions[idx.x];
     SplineState state = make_empty_state();
-    state.t = -offset;
-    state.drgb = initial_drgb;
+    state.t = 0;
+    uint start_idx = start_tet_ids[idx.x];
+    float density = densities[start_idx];
+    SHFeatures sh_feats = {start_idx, 0, features};
+    Features feat;
+    feat.f0 = get_sh(sh_feats, 0);
+    float3 rayd = {0, 0, 1};
+    float3 color = eval_sh_col0(rayd, feat);
+    state.drgb = {density, density * color.x, density * color.y, density * color.z };
 
     let start_id = idx.x * max_iters;
     
     ControlPoint ctrl_pt = {};
     uint last_tri = -1;
     float prev_t = state.t;
-    uint next_tri;
-    float next_t = 1e9;
+    uint next_tri = -1;
+    float next_t = 1e20;
+
+    uint tri;
 
     int iter = 0;
-    while (state.logT < 4.6 && iter < max_iters)
+    while (state.logT < LOG_CUTOFF && iter < max_iters)
     {
-        uint p0 = asuint(ctrl_pt.t);
-        uint p1 = asuint(ctrl_pt.dirac.x);
-        uint p2 = asuint(ctrl_pt.dirac.y);
-        uint p3 = asuint(ctrl_pt.dirac.z);
-        uint p4 = asuint(ctrl_pt.dirac.w);
+        let start_t = abs(state.t);
 
-        float _temp0 = asfloat((uint) last_tri);
-        float _temp1, _temp2;
-        uint tri = asuint(_temp0);
-        uint p6 = asuint(_temp1);
-        uint p7 = asuint(_temp2);
+        uint payload[2*BUFFER_SIZE];
+        for (int i=0; i<BUFFER_SIZE; i++) {
+            payload[2*i] = asuint(1e10f);
+        }
 
-        let start_t = (FAST_MODE) ? abs(state.t+offset) : abs(prev_t + offset);
-
-        optixTrace8(
+        optixTraceP32(
                 traversable,
                 origin,
                 direction,
                 start_t,
                 tmax,
-                p0, p1, p2, p3, p4, tri, p6, p7);
+                payload);
 
-        ctrl_pt.t = asfloat(p0);
-        if (ctrl_pt.t > 1e9) {
-            break;
-        }
-        if (last_tri == tri) {
-            prev_t = nextafter(prev_t, 1e20);
-            state.t = nextafter(state.t, 1e20);
-            continue;
-        }
-        last_tri = tri;
-        ctrl_pt.dirac.x = asfloat(p1);
-        ctrl_pt.dirac.y = asfloat(p2);
-        ctrl_pt.dirac.z = asfloat(p3);
-        ctrl_pt.dirac.w = asfloat(p4);
 
-        prev_t = state.t;
-        next_t = asfloat(p6);
-        next_tri = p7;
-
-        if (iter < max_iters) {
-            state = update(state, ctrl_pt, tmin, tmax, max_prim_size);
-            touch_count[tri / tri_per_g]++;
-            tri_collection[idx.x + iter * dim.x] = tri;
+        bool end = false;
+        for (int i=0; i<BUFFER_SIZE; i++) {
+            ctrl_pt.t = asfloat(payload[2*i]);
+            tri = payload[2 * i + 1];
+            printf("%i: %f, %i\n", iter, ctrl_pt.t, tri);
+            if (ctrl_pt.t > 1e9) {
+                end = true;
+                break;
+            }
+            ctrl_pt = get_ctrl_pt(tri, ctrl_pt.t);
+            state = update(state, ctrl_pt, tmin, tmax);
+            iter++;
+            if (!(state.logT < LOG_CUTOFF && iter < max_iters)) break;
         }
-        iter++;
+        if (end) break;
+
     }
     let output = extract_color(state);
-    fimage[idx.x] = {output.C.x, output.C.y, output.C.z, output.opacity};
+    fimage[idx.x] = {output.C.x, output.C.y, output.C.z, output.depth};
     let dual_state = to_dual(state, ctrl_pt);
     last_state[idx.x] = dual_state;
     last_dirac[idx.x] = ctrl_pt.dirac;

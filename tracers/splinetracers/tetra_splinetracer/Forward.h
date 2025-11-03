@@ -41,19 +41,14 @@ struct Params
     StructuredBuffer<int> tri_collection;
     StructuredBuffer<float3> ray_origins;
     StructuredBuffer<float3> ray_directions;
+    StructuredBuffer<int>  start_tet_ids;
 
-    StructuredBuffer<float3> means;
-    StructuredBuffer<float3> scales;
-    StructuredBuffer<float4> quats;
+    StructuredBuffer<int2> side_index;
     StructuredBuffer<float> densities;
     StructuredBuffer<float> features;
 
-    size_t sh_degree;
     size_t max_iters;
-    float tmin;
-    float tmax;
-    float4 initial_drgb;
-    float max_prim_size;
+    float tmin, tmax;
     OptixTraversableHandle handle;
 };
 
@@ -96,18 +91,16 @@ class Forward {
                     float3 *ray_origins,
                     float3 *ray_directions,
                     void *image_out,
-                    uint sh_degree,
                     float tmin,
                     float tmax,
                     const size_t max_iters=10000,
-                    const float max_prim_size=3,
                     uint *iters=NULL,
                     uint *last_face=NULL,
                     uint *touch_count=NULL,
                     float4 *last_dirac=NULL,
                     SplineState *last_state=NULL,
                     int *tri_collection=NULL,
-                    float4 *initial_drgb_ret=NULL);
+                    int *start_tet_ids=NULL);
    bool enable_backward = false;
    size_t num_prims = 0;
    private:

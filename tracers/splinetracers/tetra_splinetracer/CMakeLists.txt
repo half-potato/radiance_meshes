@@ -56,25 +56,16 @@ pybind11_add_module(tetra_splinetracer_cpp_extension
   GAS.h
   structs.h
   CUDABuffer.h
-  create_triangles.h
-  create_triangles.cu
-  initialize_density.h
-  initialize_density.cu
   TriangleMesh.cpp
   TriangleMesh.h
   # CollectIds.h
   # CollectIds.cpp
-  ply_file_loader.cc
-  ply_file_loader.h
   exception.h
   py_binding.cpp
   # ${cmake_options}
 )
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fno-lto")
-
-set_source_files_properties(create_triangles.cu PROPERTIES COMPILE_FLAGS "-Xcompiler -fno-lto")
-set_source_files_properties(initialize_density.cu PROPERTIES COMPILE_FLAGS "-Xcompiler -fno-lto")
 
 # set_target_properties( splinetracer
 #                        PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

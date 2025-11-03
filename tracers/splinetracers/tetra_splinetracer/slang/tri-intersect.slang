@@ -141,38 +141,18 @@ float ray_intersect_plane(float3 ray_origin,
 
 [Differentiable]
 ControlPoint intersect(
-    float3 rayo, float3 rayd, float3 scales, float3 mean, float4 quat, float3 color, float density, uint face_id
+    float3 rayo, float3 rayd, float3x3 verts, float3 color, float density
 ) {
-    uint3 inds = INDICES[face_id];
-    let R = quat2mat(safe_div(quat, length(quat)));
-    let Rt = transpose(R);
-    float3 clip_scale = max(scales, 1e-8);
-
-    float3 tri_a = no_diff BASE_VERTICES[inds.x];
-    float3 tri_b = no_diff BASE_VERTICES[inds.y];
-    float3 tri_c = no_diff BASE_VERTICES[inds.z];
+    float3 tri_a = verts[0];
+    float3 tri_b = verts[1];
+    float3 tri_c = verts[2];
     float3 edge1 = tri_b - tri_a;
     float3 edge2 = tri_c - tri_a;
-    float3 normal = l2_normalize( mul(cross(edge1, edge2) / clip_scale, Rt) );
+    float3 normal = l2_normalize(cross(edge1, edge2));
     
-    //printf("normal: %f, %f, %f\n", normal.x, normal.y, normal.z);
-
-    float3 point_on_tri = mul(BASE_VERTICES[inds.x] * scales, Rt) + mean;
-    float t = ray_intersect_plane(rayo, rayd, normal, point_on_tri);
-
-    let dotprod = dot(normal, rayd);
-    float dirac_multi = (dotprod < 0) ? density : -density;
-
-    /*
-    let Trayo = safe_div(mul(rayo - mean, R), clip_scale);
-    let in_bounds = max(Trayo.x, 0.f) + max(Trayo.y, 0.f) + max(Trayo.z, 0.f);
-    dirac_multi = ((in_bounds <= 1 && Trayo.x >= 0 && Trayo.y >= 0 && Trayo.z >= 0)) ? dirac_multi : 0.f;
-    //*/
-
-    //printf("Length: %f\n", length(Trayo));
-    //float dirac_multi = density * calc_dirac(Trayd, face_id);
+    float t = ray_intersect_plane(rayo, rayd, normal, tri_a);
     ControlPoint out = {
-        t+1e-5, dirac_multi, dirac_multi*color.x, dirac_multi*color.y, dirac_multi*color.z 
+        t, density, density*color.x, density*color.y, density*color.z 
     };
     return out;
 }

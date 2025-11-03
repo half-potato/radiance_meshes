@@ -13,29 +13,12 @@
 // limitations under the License.
 
 import sh;
-import sh_half;
 
 float3 get_float3(TensorView<float> view, uint ind) {
     return {
         view[ind, 0],
         view[ind, 1],
         view[ind, 2]
-    };
-}
-
-half3 get_half3(TensorView<half> view, uint ind) {
-    return {
-        view[ind, 0],
-        view[ind, 1],
-        view[ind, 2]
-    };
-}
-
-half3 get_half3(TensorView<half> view, uint ind, uint feat_ind) {
-    return {
-        view[ind, feat_ind, 0],
-        view[ind, feat_ind, 1],
-        view[ind, feat_ind, 2]
     };
 }
 
@@ -61,12 +44,6 @@ void atomic_add_float3(TensorView<float> view, uint ind, uint feat_ind, float3 v
     view.InterlockedAdd(uint3(ind, feat_ind, 0u), val.x, temp);
     view.InterlockedAdd(uint3(ind, feat_ind, 1u), val.y, temp);
     view.InterlockedAdd(uint3(ind, feat_ind, 2u), val.z, temp);
-}
-
-void add_half3(TensorView<half> view, uint ind, uint feat_ind, half3 val) {
-    view[uint3(ind, feat_ind, 0u)] += val.x;
-    view[uint3(ind, feat_ind, 1u)] += val.y;
-    view[uint3(ind, feat_ind, 2u)] += val.z;
 }
 
 void add_float3(TensorView<float> view, uint ind, uint feat_ind, float3 val) {
@@ -131,33 +108,6 @@ Features get_feats(in TensorView<float> features, in uint prim_ind, in uint sh_d
                 feat.f13 = get_float3(features, prim_ind, 13);
                 feat.f14 = get_float3(features, prim_ind, 14);
                 feat.f15 = get_float3(features, prim_ind, 15);
-            }
-        }
-    }
-    return feat;
-}
-
-HalfFeatures half_get_feats(in TensorView<half> features, in uint prim_ind, in uint sh_degree) {
-    HalfFeatures feat;
-    feat.f0 = get_half3(features, prim_ind, 0);
-    if (sh_degree > 0) {
-        feat.f1 = get_half3(features, prim_ind, 1);
-        feat.f2 = get_half3(features, prim_ind, 2);
-        feat.f3 = get_half3(features, prim_ind, 3);
-        if (sh_degree > 1) {
-            feat.f4 = get_half3(features, prim_ind, 4);
-            feat.f5 = get_half3(features, prim_ind, 5);
-            feat.f6 = get_half3(features, prim_ind, 6);
-            feat.f7 = get_half3(features, prim_ind, 7);
-            feat.f8 = get_half3(features, prim_ind, 8);
-            if (sh_degree > 2) {
-                feat.f9 = get_half3(features, prim_ind, 9);
-                feat.f10 = get_half3(features, prim_ind, 10);
-                feat.f11 = get_half3(features, prim_ind, 11);
-                feat.f12 = get_half3(features, prim_ind, 12);
-                feat.f13 = get_half3(features, prim_ind, 13);
-                feat.f14 = get_half3(features, prim_ind, 14);
-                feat.f15 = get_half3(features, prim_ind, 15);
             }
         }
     }

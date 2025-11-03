@@ -18,6 +18,10 @@ uint mod(uint a, uint b) {
   __intrinsic_asm "$0 % $1";
 }
 
+bool isFrontFaceHit() {
+  __intrinsic_asm "optixIsTriangleFrontFaceHit()";
+}
+
 float3 toSRGB(float3 c)
 {
   const float invGamma = 1.f / 2.4f;

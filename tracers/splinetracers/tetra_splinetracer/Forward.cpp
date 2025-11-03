@@ -5,25 +5,19 @@
 #include "Forward.h"
 #include "CUDABuffer.h"
 // #include <optix_function_table_definition.h>
-#include "initialize_density.h"
 
 void Forward::trace_rays(const OptixTraversableHandle &handle,
                          const size_t num_rays, float3 *ray_origins,
-                         float3 *ray_directions, void *image_out, uint sh_deg,
+                         float3 *ray_directions, void *image_out,
                          float tmin, float tmax, const size_t max_iters, 
-                         const float max_prim_size,
                          uint *iters, uint *last_face,
                          uint *touch_count,
                          float4 *last_dirac, SplineState *last_state,
                          int *tri_collection,
-                         float4 *initial_drgb_ret) {
+                         int *start_tet_ids) {
   CUDA_CHECK(cudaSetDevice(device));
   {
-    if (enable_backward) {
-      params.fimage.data = (float4 *)image_out;
-    } else {
-      params.image.data = (uchar4 *)image_out;
-    }
+    params.fimage.data = (float4 *)image_out;
     params.last_state.data = last_state;
     params.last_state.size = num_rays;
     params.last_dirac.data = last_dirac;
@@ -36,8 +30,6 @@ void Forward::trace_rays(const OptixTraversableHandle &handle,
     params.last_face.size = num_rays;
     params.touch_count.data = touch_count;
     // params.touch_count.size = num_prims;
-    params.sh_degree = sh_deg;
-    params.max_prim_size = max_prim_size;
     params.max_iters = max_iters;
     params.ray_origins.data = ray_origins;
     params.ray_origins.size = num_rays;
@@ -45,16 +37,8 @@ void Forward::trace_rays(const OptixTraversableHandle &handle,
     params.ray_directions.size = num_rays;
     params.tmin = tmin;
     params.tmax = tmax;
-
-    if (tmin > 1e-5) {
-      initialize_density_zero(&params);
-    } else {
-      initialize_density(&params);
-    }
-    // printf("Init density: %f, %f, %f, %f\n", params.initial_drgb.x, params.initial_drgb.y, params.initial_drgb.z, params.initial_drgb.w);
-    if (initial_drgb_ret) {
-      *initial_drgb_ret = params.initial_drgb;
-    }
+    params.start_tet_ids.data = start_tet_ids;
+    params.start_tet_ids.size = num_rays;
 
     params.handle = handle;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_param), sizeof(Params)));
@@ -83,7 +67,7 @@ Forward::Forward(const OptixDeviceContext &context, int8_t device,
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipeline_compile_options.numPayloadValues = 8;
+    pipeline_compile_options.numPayloadValues = 32;
     pipeline_compile_options.numAttributeValues = 3;
 #ifdef DEBUG // Enables debug exceptions during optix launches. This may incur
              // significant performance cost and should only be done during
@@ -103,7 +87,7 @@ Forward::Forward(const OptixDeviceContext &context, int8_t device,
   {
     OptixModuleCompileOptions module_compile_options = {};
 #if !defined(NDEBUG)
-    module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+    module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_3;
     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
 #endif
     size_t inputSize = 0;
@@ -123,11 +107,7 @@ Forward::Forward(const OptixDeviceContext &context, int8_t device,
     OptixProgramGroupDesc raygen_prog_group_desc = {};   //
     raygen_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     raygen_prog_group_desc.raygen.module = module;
-    if (enable_backward) {
-      raygen_prog_group_desc.raygen.entryFunctionName = "__raygen__rg_float";
-    } else {
-      raygen_prog_group_desc.raygen.entryFunctionName = "__raygen__rg";
-    }
+    raygen_prog_group_desc.raygen.entryFunctionName = "__raygen__rg_float";
     OPTIX_CHECK_LOG(optixProgramGroupCreate(context, &raygen_prog_group_desc,
                                             1, // num program groups
                                             &program_group_options, log,
@@ -235,12 +215,9 @@ Forward::Forward(const OptixDeviceContext &context, int8_t device,
   }
 
   {
-    params.means.data = (float3 *)model.means;
-    params.means.size = model.num_prims;
-    params.scales.data = (float3 *)model.scales;
-    params.scales.size = model.num_prims;
-    params.quats.data = (float4 *)model.quats;
-    params.quats.size = model.num_prims;
+    params.side_index.data = (int2 *) model.side_index;
+    params.side_index.size = model.num_faces;
+
     params.densities.data = (float *)model.densities;
     params.densities.size = model.num_prims;
     params.features.data = model.features;
