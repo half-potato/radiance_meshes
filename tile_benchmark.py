@@ -53,7 +53,7 @@ else:
 
 indices = model.indices
 vertices = model.vertices
-circumcenters, normalized, density, rgb, grd, sh = model.compute_batch_features(
+circumcenters, density, rgb, grd, sh = model.compute_batch_features(
     vertices, indices)
 
 for split, cameras in splits:

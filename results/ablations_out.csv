@@ -1,0 +1,9 @@
+,dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM,total_thresh,within_thresh
+,/optane/nerf_datasets/360/bicycle,3,images_4,output/bicycle_ifimages_4_wt1.00E+09_tt2,22.754520836660255,0.47157755494117737,23.617630004882812,0.6021854877471924,2,1.00E+09
+,/optane/nerf_datasets/360/room,2,images_2,output/room_ifimages_2_wt1.5_tt1.00E+09,31.807451986855508,0.3194522559642792,30.49327278137207,0.9136402606964111,1.00E+09,1.5
+,/optane/nerf_datasets/360/room,3,images_2,output/room_ifimages_2_wt1.00E+09_tt2,31.481353703004658,0.3620959520339966,30.22957420349121,0.899441659450531,2,1.00E+09
+,/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_wt1.5_tt1.00E+09,23.842092183687686,0.3039311468601227,24.687719345092773,0.7366771697998047,1.00E+09,1.5
+--ablate_gradient,/optane/nerf_datasets/360/room,3,images_2,output/room_ifimages_2_wt1.5_tt2_ag,32.238075089979915,0.3132198750972748,30.940521240234375,0.9123995900154114,2,1.5
+--ablate_gradient,/optane/nerf_datasets/360/bicycle,2,images_4,output/bicycle_ifimages_4_wt1.5_tt2_ag,23.892805885578415,0.33439886569976807,24.415708541870117,0.7142738103866577,2,1.5
+--ablate_circumsphere,/optane/nerf_datasets/360/room,3,images_2,output/room_ifimages_2_wt1.5_tt2_ac,32.299128680446124,0.3082694411277771,30.919292449951172,0.9166458249092102,2,1.5
+--ablate_circumsphere,/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_wt1.5_tt2_ac,24.389270581703357,0.29445624351501465,24.855398178100586,0.7432186603546143,2,1.5

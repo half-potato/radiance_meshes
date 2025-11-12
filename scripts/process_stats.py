@@ -2,7 +2,7 @@ import re
 import pandas as pd
 import os
 
-data = os.popen('bash collect_stats.bash r43').read()
+data = os.popen('bash scripts/collect_stats.bash r43').read()
 print(data)
 
 lines = data.strip().split('\n')

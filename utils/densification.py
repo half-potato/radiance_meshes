@@ -355,11 +355,11 @@ def apply_densification(
 
     clone_indices = model.indices[clone_mask]
     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
-    grow_point = safe_math.safe_div(
-        stats.tet_moments[:, :3],
-        stats.tet_moments[:, 3:4]
-    )
-    split_point[bad] = grow_point[bad]
+    # grow_point = safe_math.safe_div(
+    #     stats.tet_moments[:, :3],
+    #     stats.tet_moments[:, 3:4]
+    # )
+    # split_point[bad] = grow_point[bad]
     split_point = split_point[clone_mask]
     bad = bad[clone_mask]
     barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
@@ -370,9 +370,9 @@ def apply_densification(
     tet_optim.split(clone_indices,
                     split_point,
                     **args.as_dict())
-    keep_verts = keep_verts > 0
-    keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
-    print(f"Pruned: {(~keep_verts).sum()}")
+    # keep_verts = keep_verts > 0
+    # keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
+    # print(f"Pruned: {(~keep_verts).sum()}")
     # tet_optim.remove_points(keep_verts.reshape(-1))
 
     gc.collect()

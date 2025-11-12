@@ -173,7 +173,6 @@ class FrozenTetModel(BaseModel):
             )
         else:
             circumcenter = circumcenters
-        normalized = (circumcenter - self.center) / self.scene_scaling
 
         if mask is not None:
             density  = self.density[mask]
@@ -186,12 +185,12 @@ class FrozenTetModel(BaseModel):
             rgb      = self.rgb
             sh       = self.sh
 
-        return circumcenter, normalized, density, rgb, grd, sh
+        return circumcenter, density, rgb, grd, sh
 
     def compute_features(self, offset=False):
         vertices = self.vertices
         indices = self.indices
-        circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
+        circumcenters, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
         tets = vertices[indices]
         if offset:
             base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
@@ -211,7 +210,7 @@ class FrozenTetModel(BaseModel):
     ):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-        cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
+        cc, density, rgb, grd, sh = self.compute_batch_features(
             vertices, indices, mask, circumcenters=all_circumcenters
         )
         cell_output = activate_output(
@@ -237,7 +236,7 @@ class FrozenTetModel(BaseModel):
     def calc_tet_density(self):
         densities = []
         verts = self.vertices
-        _, _, densities, _, _, _ = self.compute_batch_features(verts, self.indices)
+        _, densities, _, _, _ = self.compute_batch_features(verts, self.indices)
         return densities.reshape(-1)
 
 
@@ -376,7 +375,7 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
     d_list, rgb_list, grd_list, sh_list = [], [], [], []
     for start in range(0, indices.shape[0], chunk_size):
         end = min(start + chunk_size, indices.shape[0])
-        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
+        _, density, rgb, grd, sh = base_model.compute_batch_features(
             vertices_full, indices, start, end
         )
         d_list.append(density.detach().cpu())

@@ -1,0 +1,9 @@
+dataset_path	image_folder	within_thresh	total_thresh	
+/optane/nerf_datasets/360/bicycle	images_4	1.5	1.00E+09	
+/optane/nerf_datasets/360/room	images_2	1.5	1.00E+09	
+/optane/nerf_datasets/360/bicycle	images_4	1.00E+09	2	
+/optane/nerf_datasets/360/room	images_2	1.00E+09	2	
+/optane/nerf_datasets/360/bicycle	images_4	1.5	2	--ablate_gradient
+/optane/nerf_datasets/360/room	images_2	1.5	2	--ablate_gradient
+/optane/nerf_datasets/360/bicycle	images_4	1.5	2	--ablate_circumsphere
+/optane/nerf_datasets/360/room	images_2	1.5	2	--ablate_circumsphere

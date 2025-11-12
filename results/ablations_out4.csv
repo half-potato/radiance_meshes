@@ -1,9 +1,0 @@
- ,dataset_path,gpu_id,image_folder,output_folder,percent_total,percent_within,psnr,test_LPIPS,test_PSNR,test_SSIM
-,/optane/nerf_datasets/360/bicycle,3,images_4,output/bicycle_ifimages_4_pw0_pt1,1,0,23.995396982028268,0.40322139859199524,24.221569061279297,0.6747801303863525
-,/optane/nerf_datasets/360/bicycle,1,images_4,output/bicycle_ifimages_4_pw1_pt0,0,1,23.823422686649742,0.3554721474647522,24.402687072753906,0.7103032469749451
-,/optane/nerf_datasets/360/room,2,images_2,output/room_ifimages_2_pw1_pt0,0,1,32.706723615721174,0.2966945469379425,31.209745407104492,0.9177111983299255
---ablate_circumsphere,/optane/nerf_datasets/360/bicycle,3,images_4,output/bicycle_ifimages_4_pw0.7_pt0.3_ac,0.3,0.7,24.182872282843658,0.3527078926563263,24.426767349243164,0.710452139377594
---ablate_circumsphere,/optane/nerf_datasets/360/room,1,images_2,output/room_ifimages_2_pw0.7_pt0.3_ac,0.3,0.7,32.76720310571787,0.2894594669342041,31.10875129699707,0.9173051714897156
---ablate_gradient,/optane/nerf_datasets/360/room,3,images_2,output/room_ifimages_2_pw0.7_pt0.3_ag,0.3,0.7,32.78760171991828,0.2962351441383362,31.078598022460938,0.9162594676017761
---ablate_gradient,/optane/nerf_datasets/360/bicycle,2,images_4,output/bicycle_ifimages_4_pw0.7_pt0.3_ag,0.3,0.7,23.760659748901983,0.38344696164131165,24.098234176635742,0.6870784163475037
-,/optane/nerf_datasets/360/room,1,images_2,output/room_ifimages_2_pw0_pt1,1,0,32.62033994348044,0.3018382489681244,30.884878158569336,0.9123889207839966

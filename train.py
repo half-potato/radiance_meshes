@@ -118,6 +118,8 @@ args.lambda_dist = 1e-4
 
 # Clone Settings
 args.num_samples = 200
+args.k_samples = 1
+args.trunc_sigma = 0.35
 args.clone_lambda_ssim = 0.0
 args.split_std = 1e-1
 args.split_mode = "split_point"
@@ -129,7 +131,7 @@ args.densify_interval = 500
 args.budget = 2_000_000
 args.percent_within = 0.70
 args.percent_total = 0.30
-args.within_thresh = 2.0
+args.within_thresh = 1.5
 args.total_thresh = 2.0
 args.clone_min_contrib = 0.003
 
@@ -144,6 +146,7 @@ args.threshold_start = 4500
 
 args.ablate_gradient = False
 args.ablate_circumsphere = True
+args.ablate_downweighing = False
 args.voxel_size = 0.01
 
 args.use_bilateral_grid = False
@@ -175,7 +178,7 @@ else:
     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
                                 current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
                                 **args.as_dict())
-min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+min_t = args.min_t = args.base_min_t# * model.scene_scaling.item()
 ic(min_t)
 
 tet_optim = TetOptimizer(model, **args.as_dict())
@@ -199,58 +202,7 @@ num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
-def target_num(x):
-    if args.clone_schedule == "linear":
-        k = (args.budget - S) // N
-        return k * x + S
-    elif args.clone_schedule == "quadratic":
-        k = 2 * (args.budget - S) // N
-        a = (args.budget - S - k * N) // N**2
-        return a * x**2 + k * x + S
-    else:
-        raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
-
-# ----------------------------------------------------------------
-# new helper: front‑loaded (high‑frequency‑then‑slow‑down) schedule
-def densify_schedule(start: int,
-                     end: int,
-                     n_events: int,
-                     mode: str = "sqrt"):
-    """
-    Generate `n_events` iteration indices between `start` and `end`
-    with decreasing frequency.  Modes:
-        • 'sqrt'    – spacing ∝ √t   (simple, monotone)
-        • 'exp'     – exponential easing
-        • 'logistic'– S‑curve
-    """
-    t = np.linspace(0.0, 1.0, n_events)
-    if mode == "linear":
-        w = t
-    elif mode == "sqrt":
-        w = t**2                         # lots of points early, sparse later
-    elif mode == "exp":
-        g = 4.0
-        w = (np.exp(g*t) - 1) / (np.exp(g) - 1)
-    elif mode == "logistic":
-        k = 10.0
-        w = 1 / (1 + np.exp(-k*(t-0.5)))
-        w = (w - w.min()) / (w.max() - w.min())
-    else:
-        raise ValueError("mode must be 'sqrt', 'exp', or 'logistic'")
-    iters = np.round(start + w * (end - start)).astype(int)
-    iters[0] = start                     # make sure start & end are included
-    iters[-1] = end
-    return list(np.unique(iters))
-
-# dschedule = densify_schedule(args.densify_start,
-#                             args.densify_end,
-#                             N,
-#                             mode="linear")
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
-targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
-fig = tpl.figure()
-fig.plot(dschedule, targets, width=100, height=20)
-fig.show()
 
 print("Encoding LR")
 xs = list(range(args.iterations))

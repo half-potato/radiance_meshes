@@ -58,7 +58,7 @@ else:
 ic(model.empty_indices.shape)
 indices = torch.cat([model.indices, model.empty_indices], dim=0)
 vertices = model.vertices
-circumcenters, normalized, density, rgb, base_grd, sh = model.compute_batch_features(
+circumcenters, density, rgb, base_grd, sh = model.compute_batch_features(
     vertices, model.indices, start=0, end=model.indices.shape[0])
 
 # lookup = TetWalkLookup(indices.cpu().numpy(), model.vertices.detach().cpu().numpy())

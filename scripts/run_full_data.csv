@@ -1,0 +1,14 @@
+dataset_path,image_folder
+/data/nerf_datasets/360/bicycle,images_4
+/data/nerf_datasets/360/garden,images_4
+/data/nerf_datasets/360/stump,images_4
+/data/nerf_datasets/360/treehill,images_4
+/data/nerf_datasets/360/flowers,images_4
+/data/nerf_datasets/360/room,images_2
+/data/nerf_datasets/360/counter,images_2
+/data/nerf_datasets/360/kitchen,images_2
+/data/nerf_datasets/360/bonsai,images_2
+/data/nerf_datasets/tandt/train,images
+/data/nerf_datasets/tandt/truck,images
+/data/nerf_datasets/db/drjohnson,images
+/data/nerf_datasets/db/playroom,images

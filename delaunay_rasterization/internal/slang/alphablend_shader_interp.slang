@@ -543,7 +543,7 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
                     T_p = 1;
                     tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(mismatch), old_val);
+                    tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(pixel_err), old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 5), T * ssim_err, old_val);
 
                     float w = T;

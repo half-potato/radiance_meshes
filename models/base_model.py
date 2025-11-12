@@ -37,7 +37,7 @@ class BaseModel(nn.Module):
             start = 0
             for start in range(0, indices.shape[0], self.chunk_size):
                 end = min(start + self.chunk_size, indices.shape[0])
-                circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
+                circumcenters, density, rgb, grd, sh = self.compute_batch_features(
                     vertices, indices, start, end, circumcenters=all_circumcenters)
                 dvrgbs = activate_output(camera.camera_center.to(self.device),
                                          density, rgb, grd, sh, indices[start:end],

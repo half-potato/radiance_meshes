@@ -80,7 +80,8 @@ def compute_vertex_colors_from_field(
 
 @torch.jit.script
 def offset_normalize(rgb, grd, circumcenters, tets):
-    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True).detach()
+    grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).min(dim=1, keepdim=True).values
+    # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True)#.detach()
     radius = torch.linalg.norm(tets[:, 0] - circumcenters, dim=-1, keepdim=True).reshape(-1, 1, 1)
     normed_grd = safe_div(grd, radius)
     vcolors = compute_vertex_colors_from_field(
