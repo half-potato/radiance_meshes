@@ -352,7 +352,9 @@ class Model(BaseModel):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
 
+        sh_dim = (self.max_sh_deg+1)**2 - 1
         features = torch.empty((indices.shape[0], self.feature_dim), device=self.device)
+        shs = torch.empty((indices.shape[0], sh_dim, 3), device=self.device)
         start = 0
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
@@ -361,15 +363,16 @@ class Model(BaseModel):
             if self.ablate_gradient:
                 grd = torch.zeros_like(grd)
             centroids = vertices[indices[start:end]].mean(dim=1)
+            shs[start:end] = sh.reshape(-1, sh_dim, 3)
             dvrgbs = activate_output(camera.camera_center.to(self.device),
                                      density, rgb, grd,
-                                     sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
+                                     sh.reshape(-1, sh_dim, 3),
                                      indices[start:end],
                                      centroids,
                                      vertices.detach(),
                                      self.current_sh_deg, self.max_sh_deg)
             features[start:end] = dvrgbs
-        return None, features
+        return shs, features
 
     @staticmethod
     def init_from_pcd(point_cloud, cameras, device, max_sh_deg,

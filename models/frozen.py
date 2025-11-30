@@ -221,7 +221,7 @@ class FrozenTetModel(BaseModel):
             cc, vertices,
             self.max_sh_deg, self.max_sh_deg,
         )
-        return None, cell_output
+        return sh, cell_output
 
     # ------------------------------------------------------------------
     # geometry is frozen

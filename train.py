@@ -91,7 +91,7 @@ args.L = 8
 args.hashmap_dim = 8
 args.base_resolution = 64
 args.density_offset = -4
-args.lambda_weight_decay = 0.01
+args.lambda_weight_decay = 0.1
 args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 
@@ -113,7 +113,8 @@ args.freeze_lr = 1e-3
 args.final_freeze_lr = 1e-4
 
 # Distortion Settings
-args.lambda_dist = 0
+args.lambda_dist = 0.0
+args.lambda_sh = 0.0
 
 # Clone Settings
 args.num_samples = 200
@@ -251,7 +252,8 @@ for iteration in progress_bar:
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
-           args.lambda_dist * dl_loss
+           args.lambda_dist * dl_loss + \
+           args.lambda_sh * render_pkg['sh_reg']
 
     loss.backward()
 

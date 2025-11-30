@@ -41,13 +41,15 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         tcam,
         render_grid)
     extras = {}
+    sh_reg = 0
     if cell_values is None:
         cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
         if mask.sum() > 0 and model.mask_values:
-            vertex_color, values = model.get_cell_values(camera, mask, circumcenter[mask])
+            shs, values = model.get_cell_values(camera, mask, circumcenter[mask])
             cell_values[mask] = values
         else:
-            vertex_color, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+            shs, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+        sh_reg = (shs**2).mean()
 
     image_rgb, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
@@ -67,6 +69,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         'alpha': alpha,
         'distortion_loss': distortion_loss.mean(),
         'mask': mask,
+        'sh_reg': sh_reg,
         **extras
     }
     return render_pkg
