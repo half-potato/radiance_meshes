@@ -4,10 +4,12 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from data.camera import Camera
-from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender as Render
+from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
-from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant_color
+from utils.eval_sh_py import weigh_degree
+import time
+from icecream import ic
 
 cmap = plt.get_cmap("jet")
 
@@ -41,15 +43,18 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         tcam,
         render_grid)
     extras = {}
+    sh_reg = 0
     if cell_values is None:
         cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
         if mask.sum() > 0 and model.mask_values:
-            vertex_color, values = model.get_cell_values(camera, mask, circumcenter[mask])
+            shs, values = model.get_cell_values(camera, mask, circumcenter[mask])
             cell_values[mask] = values
         else:
-            vertex_color, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+            shs, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+        weighting = weigh_degree(shs, [0, 0.1, 0.5, 1])
+        sh_reg = ((weighting * shs)**2).mean()
 
-    image_rgb, xyzd_img, distortion_img, tet_alive = Render.apply(
+    image_rgb, xyzd_img, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
         tile_ranges,
         model.indices,
@@ -72,6 +77,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
         'distortion_loss': distortion_loss.mean(),
         'mask': mask,
         'xyzd': rxyzd_img,
+        'sh_reg': sh_reg,
         **extras
     }
     return render_pkg
@@ -162,44 +168,3 @@ class SpikingLR:
         peak_ind = iteration - last_peak
         height = self.peak_height_fn(peak_ind) - self.base_function(peak_ind)
         return base_f + self.peak_fn(last_peak, height)
-
-def render_debug(render_tensor, model, camera, density_multi=1, tile_size=16):
-
-    # Convert to RGB (NxMx3) using the colormap
-    _, features = model.get_cell_values(camera)
-    tet_grad_color = torch.zeros((features.shape[0], 4), device=features.device)
-    if render_tensor.shape[1] == 1:
-        tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
-        normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
-        normalized_tensor = torch.as_tensor(
-            cmap(normalized_tensor.reshape(-1).cpu().numpy())).float().cuda()
-    else:
-        normalized_tensor = render_tensor
-    tet_grad_color[:, :normalized_tensor.shape[1]] = normalized_tensor
-    if render_tensor.shape[1] < 4:
-        tet_grad_color[:, 3] = features[:, 0] * density_multi# * render_tensor.reshape(-1)
-    render_pkg = render_constant_color(model.indices, model.vertices, None, camera, cell_values=tet_grad_color, tile_size=tile_size)
-
-    image = render_pkg['render']
-    image = image.permute(1, 2, 0)
-    image = (image.detach().cpu().numpy() * 255).clip(min=0, max=255).astype(np.uint8)
-
-    del render_pkg, render_tensor
-    return image
-
-def visualize_depth_numpy(depth, minmax=None, cmap=cv2.COLORMAP_JET):
-    """
-    depth: (H, W)
-    """
-
-    x = np.nan_to_num(depth) # change nan to 0
-    if minmax is None:
-        mi = np.min(x[x>0]) # get minimum positive depth (ignore background)
-        ma = np.max(x)
-    else:
-        mi,ma = minmax
-
-    x = (x-mi)/(ma-mi+1e-8) # normalize to 0~1
-    x = (255*x).clip(min=0, max=255).astype(np.uint8)
-    x_ = cv2.applyColorMap(x, cmap)
-    return x_, [mi,ma]

@@ -41,14 +41,13 @@ class FrozenTetModel(BaseModel):
         int_vertices: torch.Tensor,          # (N_int, 3)
         ext_vertices: torch.Tensor,          # (N_ext, 3)
         indices: torch.Tensor,               # (T, 4)
+        empty_indices: torch.Tensor,               # (T, 4)
         density: torch.Tensor,               # (T, 1)
         rgb: torch.Tensor,                   # (T, 3)
         gradient: torch.Tensor,              # (T, 3, 3)
         sh: torch.Tensor,                    # (T, ((max_sh_deg+1)**2-1), 3)
         center: torch.Tensor,                # (1, 3)
         scene_scaling: torch.Tensor | float,
-        mask: torch.Tensor,
-        full_indices: torch.Tensor,
         *,
         max_sh_deg: int = 2,
         chunk_size: int = 408_576,
@@ -60,8 +59,7 @@ class FrozenTetModel(BaseModel):
         self.interior_vertices = nn.Parameter(int_vertices.cuda(), requires_grad=True)          # immutable
         self.register_buffer("ext_vertices", ext_vertices.cuda())
         self.register_buffer("indices", indices.int())
-        self.full_indices = full_indices
-        self.mask = mask
+        self.empty_indices = indices
         self.register_buffer("center", center.reshape(1, 3))
         self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
 
@@ -111,14 +109,13 @@ class FrozenTetModel(BaseModel):
         # Extract required parameters from checkpoint
         int_vertices = ckpt['interior_vertices']
         ext_vertices = ckpt['ext_vertices']
-        if 'full_indices' in ckpt:
-            full_indices = ckpt['full_indices']
-            mask = ckpt['mask']
-            indices = full_indices[mask]
+        indices = ckpt['indices']
+        if 'empty_indices' in ckpt:
+            empty_indices = ckpt['empty_indices']
+            del ckpt['empty_indices']
         else:
-            full_indices = ckpt['indices']
-            indices = full_indices
-            mask = torch.ones((full_indices.shape[0]), dtype=bool)
+            empty_indices = torch.empty((0, 4), dtype=indices.dtype, device=indices.device)
+
         density = ckpt['density']
         rgb = ckpt['rgb']
         gradient = ckpt['gradient']
@@ -133,8 +130,7 @@ class FrozenTetModel(BaseModel):
             int_vertices=int_vertices.to(device),
             ext_vertices=ext_vertices.to(device),
             indices=indices.to(device),
-            full_indices=full_indices,
-            mask=mask,
+            empty_indices=empty_indices.to(device),
             density=density.to(device),
             rgb=rgb.to(device),
             gradient=gradient.to(device),
@@ -144,6 +140,7 @@ class FrozenTetModel(BaseModel):
             max_sh_deg=config.max_sh_deg,
             chunk_size=config.chunk_size if hasattr(config, 'chunk_size') else 408_576,
         )
+
         
         # Load state dict to ensure all parameters are properly loaded
         model.load_state_dict(ckpt)
@@ -169,6 +166,7 @@ class FrozenTetModel(BaseModel):
         indices: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         circumcenters: Optional[torch.Tensor] = None,
+        **kwargs
     ):
 
         if circumcenters is None:
@@ -177,7 +175,6 @@ class FrozenTetModel(BaseModel):
             )
         else:
             circumcenter = circumcenters
-        print(self.density.grad)
 
         if mask is not None:
             density  = self.density[mask]
@@ -190,12 +187,13 @@ class FrozenTetModel(BaseModel):
             rgb      = self.rgb
             sh       = self.sh
 
-        return circumcenter, None, density, rgb, grd, sh
+        sh_dim = (self.max_sh_deg+1)**2 - 1
+        return circumcenter, density, rgb, grd, sh.reshape(-1, sh_dim, 3)
 
     def compute_features(self, offset=False):
         vertices = self.vertices
         indices = self.indices
-        circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
+        circumcenters, density, rgb, grd, sh = self.compute_batch_features(vertices, indices)
         tets = vertices[indices]
         if offset:
             base_color_v0_raw, normed_grd = offset_normalize(rgb, grd, circumcenters, tets)
@@ -215,7 +213,7 @@ class FrozenTetModel(BaseModel):
     ):
         indices = self.indices[mask] if mask is not None else self.indices
         vertices = self.vertices
-        cc, normalized, density, rgb, grd, sh = self.compute_batch_features(
+        cc, density, rgb, grd, sh = self.compute_batch_features(
             vertices, indices, mask, circumcenters=all_circumcenters
         )
         cell_output = activate_output(
@@ -226,7 +224,7 @@ class FrozenTetModel(BaseModel):
             cc, vertices,
             self.max_sh_deg, self.max_sh_deg,
         )
-        return None, cell_output
+        return sh, cell_output
 
     @torch.no_grad()
     def update_triangulation(self, old_vertices, old_indices, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
@@ -266,7 +264,7 @@ class FrozenTetModel(BaseModel):
     def calc_tet_density(self):
         densities = []
         verts = self.vertices
-        _, _, densities, _, _, _ = self.compute_batch_features(verts, self.indices)
+        _, densities, _, _, _ = self.compute_batch_features(verts, self.indices)
         return densities.reshape(-1)
 
 
@@ -461,10 +459,9 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
     vertices_full = base_model.vertices.detach()
     int_vertices  = vertices_full[: base_model.num_int_verts]
     ext_vertices  = base_model.ext_vertices.detach()
-    full_mask     = base_model.mask.cpu()
     # full_mask[full_mask] = mask.cpu()
-    indices       = base_model.indices[mask].detach()
-    full_indices = base_model.full_indices.cpu()
+    indices       = base_model.indices.detach()
+    empty_indices       = base_model.empty_indices.detach()
     max_sh_deg = base_model.max_sh_deg
     center = base_model.center
     scene_scaling = base_model.scene_scaling
@@ -472,7 +469,7 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
     d_list, rgb_list, grd_list, sh_list = [], [], [], []
     for start in range(0, indices.shape[0], chunk_size):
         end = min(start + chunk_size, indices.shape[0])
-        _, _, density, rgb, grd, sh = base_model.compute_batch_features(
+        _, density, rgb, grd, sh = base_model.compute_batch_features(
             vertices_full, indices, start, end
         )
         d_list.append(density.detach().cpu())
@@ -494,8 +491,7 @@ def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetMod
         int_vertices=int_vertices.to(device),
         ext_vertices=ext_vertices.to(device),
         indices=indices.to(device),
-        full_indices=full_indices,
-        mask=full_mask,
+        empty_indices=empty_indices,
         density=density.to(device),
         rgb=rgb.to(device),
         gradient=gradient.to(device),

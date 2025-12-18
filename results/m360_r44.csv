@@ -1,0 +1,3 @@
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/data/nerf_datasets/360/bicycle,0,images_4,output/bicycle_ifimages_4,23.928977775238913,0.323167085647583,24.633556365966797,0.7256082892417908
+/data/nerf_datasets/360/garden,0,images_4,output/garden_ifimages_4,26.750388802975365,0.1910361647605896,26.523582458496094,0.8302868008613586

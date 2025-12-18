@@ -1,0 +1,14 @@
+dataset_path,image_folder
+/optane/nerf_datasets/360/bicycle,images_4
+/optane/nerf_datasets/360/garden,images_4
+/optane/nerf_datasets/360/stump,images_4
+/optane/nerf_datasets/360/treehill,images_4
+/optane/nerf_datasets/360/flowers,images_4
+/optane/nerf_datasets/360/room,images_2
+/optane/nerf_datasets/360/counter,images_2
+/optane/nerf_datasets/360/kitchen,images_2
+/optane/nerf_datasets/360/bonsai,images_2
+/optane/nerf_datasets/tandt/train,images
+/optane/nerf_datasets/tandt/truck,images
+/optane/nerf_datasets/db/drjohnson,images
+/optane/nerf_datasets/db/playroom,images

@@ -1,0 +1,3 @@
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/stump,3,images_4,output/stump_ifimages_4_r44_nocc_noclip,28.238194277080066,0.2897012233734131,25.96181297302246,0.7506075501441956
+/optane/nerf_datasets/360/garden,2,images_4,output/garden_ifimages_4_r44_nocc_noclip,27.019335520913796,0.16976438462734222,26.76936912536621,0.8413205146789551

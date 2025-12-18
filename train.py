@@ -16,7 +16,7 @@ import time
 from tqdm import tqdm
 import numpy as np
 from utils import cam_util
-from utils.train_util import *
+from utils.train_util import render, pad_image2even, pad_hw2even
 # from models.vertex_color import Model, TetOptimizer
 from models.ingp_color import Model, TetOptimizer
 # from models.frozen import FrozenTetModel as Model
@@ -36,7 +36,7 @@ from torch.optim.lr_scheduler import ExponentialLR, LinearLR, ChainedScheduler
 import gc
 from utils.densification import collect_render_stats, apply_densification, determine_cull_mask
 import mediapy
-from utils.loss_utils import calculate_norm_loss, depth_to_normals
+from utils.graphics_utils import calculate_norm_loss, depth_to_normals
 from icecream import ic
 
 torch.set_num_threads(1)
@@ -71,7 +71,7 @@ args.image_folder = "images_2"
 args.eval = False
 args.dataset_path = Path("/optane/nerf_datasets/360/bonsai")
 args.output_path = Path("output/test/")
-args.iterations = 26000
+args.iterations = 30000
 args.ckpt = ""
 args.resolution = 1
 args.render_train = False
@@ -82,10 +82,10 @@ args.sh_interval = 0
 args.sh_step = 1
 
 # iNGP Settings
+args.use_tccn = False
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
 args.network_lr = 1e-3
-args.sh_lr = 1e-3
 args.final_network_lr = 1e-4
 args.hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
@@ -95,8 +95,8 @@ args.L = 8
 args.hashmap_dim = 8
 args.base_resolution = 64
 args.density_offset = -4
-args.lambda_weight_decay = 0.01
-args.percent_alpha = 0.02 # preconditioning
+args.lambda_weight_decay = 1
+args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 
 args.g_init=1.0
@@ -118,47 +118,41 @@ args.final_freeze_lr = 1e-4
 
 # Distortion Settings
 args.lambda_dist = 1e-4
-args.lambda_norm = 1e-3
+args.lambda_norm = 0.0
+args.lambda_sh = 0.0
 
 # Clone Settings
 args.num_samples = 200
-args.clone_lambda_ssim = 0.0
-args.split_std = 1e-1
-args.split_mode = "split_point"
-args.clone_schedule = "quadratic"
+args.k_samples = 1
+args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 2000
 args.densify_end = 16000
 args.densify_interval = 500
 args.budget = 2_000_000
-args.percent_within = 0.70
-args.percent_total = 0.30
+args.within_thresh = 0.5
+args.total_thresh = 2.0
 args.clone_min_contrib = 0.003
+args.split_min_contrib = 0.01
 
 args.lambda_ssim = 0.2
-args.base_min_t = 0.2
+args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
 args.threshold_start = 4500
-
-args.ablate_gradient = False
-args.ablate_circumsphere = False
 args.voxel_size = 0.01
 
-args.use_bilateral_grid = False
-args.bilateral_grid_shape = [16, 16, 8]
-args.bilateral_grid_lr = 0.003
-args.lambda_tv_grid = 0.0
+args.ablate_gradient = False
+args.ablate_circumsphere = True
+args.ablate_downweighing = False
 
-args.checkpoint_iterations = []
 
 args = Args.from_namespace(args.get_parser().parse_args())
 
 args.output_path.mkdir(exist_ok=True, parents=True)
-# args.checkpoint_iterations.append(args.freeze_start-1)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval, resolution=args.resolution)
@@ -177,9 +171,7 @@ else:
     model = Model.init_from_pcd(scene_info.point_cloud, train_cameras, device,
                                 current_sh_deg = args.max_sh_deg if args.sh_interval <= 0 else 0,
                                 **args.as_dict())
-model = model.to(device)
-print(model.device)
-min_t = args.min_t = args.base_min_t * model.scene_scaling.item()
+min_t = args.min_t
 
 tet_optim = TetOptimizer(model, **args.as_dict())
 if args.eval:
@@ -202,58 +194,7 @@ num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
-def target_num(x):
-    if args.clone_schedule == "linear":
-        k = (args.budget - S) // N
-        return k * x + S
-    elif args.clone_schedule == "quadratic":
-        k = 2 * (args.budget - S) // N
-        a = (args.budget - S - k * N) // N**2
-        return a * x**2 + k * x + S
-    else:
-        raise Exception(f"Clone Schedule: {args.clone_schedule} is not supported")
-
-# ----------------------------------------------------------------
-# new helper: front‑loaded (high‑frequency‑then‑slow‑down) schedule
-def densify_schedule(start: int,
-                     end: int,
-                     n_events: int,
-                     mode: str = "sqrt"):
-    """
-    Generate `n_events` iteration indices between `start` and `end`
-    with decreasing frequency.  Modes:
-        • 'sqrt'    – spacing ∝ √t   (simple, monotone)
-        • 'exp'     – exponential easing
-        • 'logistic'– S‑curve
-    """
-    t = np.linspace(0.0, 1.0, n_events)
-    if mode == "linear":
-        w = t
-    elif mode == "sqrt":
-        w = t**2                         # lots of points early, sparse later
-    elif mode == "exp":
-        g = 4.0
-        w = (np.exp(g*t) - 1) / (np.exp(g) - 1)
-    elif mode == "logistic":
-        k = 10.0
-        w = 1 / (1 + np.exp(-k*(t-0.5)))
-        w = (w - w.min()) / (w.max() - w.min())
-    else:
-        raise ValueError("mode must be 'sqrt', 'exp', or 'logistic'")
-    iters = np.round(start + w * (end - start)).astype(int)
-    iters[0] = start                     # make sure start & end are included
-    iters[-1] = end
-    return list(np.unique(iters))
-
-# dschedule = densify_schedule(args.densify_start,
-#                             args.densify_end,
-#                             N,
-#                             mode="linear")
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
-targets = [target_num((i - args.densify_start) / num_densify_iter * N+1) for i in dschedule]
-fig = tpl.figure()
-fig.plot(dschedule, targets, width=100, height=20)
-fig.show()
 
 # print("Encoding LR")
 # xs = list(range(args.iterations))
@@ -263,34 +204,6 @@ fig.show()
 # fig.show()
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples)
-
-# ----- Initialize bilateral grid if enabled -----
-bil_grids = None
-bil_optimizer = None
-if args.use_bilateral_grid:
-    print("\nInitializing Bilateral Grid:")
-    print(f"- Grid shape: {args.bilateral_grid_shape}")
-    print(f"- Learning rate: {args.bilateral_grid_lr}")
-    print(f"- TV loss weight: {args.lambda_tv_grid}")
-    bil_grids = BilateralGrid(
-        len(train_cameras),
-        grid_X=args.bilateral_grid_shape[0],
-        grid_Y=args.bilateral_grid_shape[1],
-        grid_W=args.bilateral_grid_shape[2],
-    ).to("cuda")
-    bil_optimizer = torch.optim.Adam([bil_grids.grids], lr=args.bilateral_grid_lr, eps=1e-15)
-    
-    # Create a chained scheduler with warmup like in gsplat
-    # First 1000 iterations: linear warmup from 1% to 100% of learning rate
-    # Then exponential decay to 1% of initial learning rate by the end of training
-    bil_warmup = LinearLR(bil_optimizer, start_factor=0.01, total_iters=1000)
-    bil_decay = ExponentialLR(bil_optimizer, gamma=0.01**(1.0/args.iterations))
-    bil_scheduler = ChainedScheduler([bil_warmup, bil_decay])
-    
-    print(f"- Number of grids: {len(train_cameras)}")
-    print("- Using LinearLR warmup + ExponentialLR decay scheduler")
-    print("Bilateral Grid initialized successfully!\n")
-# ------------------------------------------------
 
 video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
                                pad_hw2even(sample_camera.image_width, sample_camera.image_height))
@@ -318,21 +231,6 @@ for iteration in progress_bar:
     render_pkg = render(camera, model, scene_scaling=model.scene_scaling, ray_jitter=ray_jitter, **args.as_dict())
     image = render_pkg['render']
 
-    if args.use_bilateral_grid:
-        camera_id = camera_inds[camera.uid]
-        h, w = image.shape[1], image.shape[2]
-        y_coords, x_coords = torch.meshgrid(
-            (torch.arange(h, device="cuda") + 0.5) / h,
-            (torch.arange(w, device="cuda") + 0.5) / w,
-            indexing="ij"
-        )
-        coords = torch.stack([x_coords, y_coords], dim=-1).reshape(-1, 2)
-        img_for_bil = image.permute(1, 2, 0).reshape(-1, 3)
-        img_ids = torch.full((img_for_bil.shape[0],), camera_id, 
-                              device="cuda", dtype=torch.long)
-        transformed = slice(bil_grids, coords, img_for_bil, img_ids)
-        image = transformed["rgb"].reshape(h, w, 3).permute(2, 0, 1)
-
     l1_loss = ((target - image).abs() * gt_mask).mean()
     l2_loss = ((target - image)**2 * gt_mask).mean()
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
@@ -343,17 +241,8 @@ for iteration in progress_bar:
            args.lambda_ssim*ssim_loss + \
            reg + \
            args.lambda_dist * dl_loss + \
-           args.lambda_norm * norm_loss
-
-    if args.use_bilateral_grid:
-        tvloss = args.lambda_tv_grid * total_variation_loss(bil_grids.grids)
-        loss += tvloss
-
-    mask = render_pkg['mask']
-    st = time.time()
-
-    old_vertices = model.vertices.detach().clone()
-    old_indices = model.full_indices.detach().clone()
+           args.lambda_sh * render_pkg['sh_reg']
+        #    args.lambda_norm * norm_loss + \
 
     loss.backward()
 
@@ -367,11 +256,6 @@ for iteration in progress_bar:
     if do_delaunay:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
-
-    if args.use_bilateral_grid:
-        bil_optimizer.step()
-        bil_optimizer.zero_grad(set_to_none=True)
-        bil_scheduler.step()
 
     tet_optim.update_learning_rate(iteration)
 
@@ -398,15 +282,15 @@ for iteration in progress_bar:
             sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
 
             pred_normal = depth_to_normals(render_pkg['xyzd'][..., 3:], camera.fx, camera.fy)
-            vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
+            # vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
             vis_normal = (render_pkg['xyzd'][..., :3] * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             vis_pred_normal = (pred_normal * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             imageio.imwrite(args.output_path / f"normal{iteration}.png",
                             vis_normal)
             imageio.imwrite(args.output_path / f"pred_normal{iteration}.png",
                             vis_pred_normal)
-            imageio.imwrite(args.output_path / f"depth{iteration}.png",
-                            vis_depth)
+            # imageio.imwrite(args.output_path / f"depth{iteration}.png",
+            #                 vis_depth)
             # video_writer.write(pad_image2even(sample_image))
 
             gc.collect()
@@ -414,7 +298,8 @@ for iteration in progress_bar:
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = targets[dschedule.index(iteration)] - model.vertices.shape[0]
+            # target_addition = targets[dschedule.index(iteration)] - model.vertices.shape[0]
+            target_addition = args.budget - model.vertices.shape[0]
 
             apply_densification(
                 stats,
@@ -432,37 +317,6 @@ for iteration in progress_bar:
             del stats
             gc.collect()
             torch.cuda.empty_cache()
-
-    if do_delaunay or do_freeze:
-        st = time.time()
-        # tet_optim.update_triangulation(old_indices=old_indices, old_vertices = old_vertices,
-        #     density_threshold=args.density_threshold if iteration > args.threshold_start else 0,
-        #     alpha_threshold=args.alpha_threshold if iteration > args.threshold_start else 0, high_precision=do_freeze)
-        if do_freeze:
-            del tet_optim
-            # model.eval()
-            # mask = determine_cull_mask(train_cameras, model, args, device)
-            n_tets = model.indices.shape[0]
-            mask = torch.ones((n_tets), device=device, dtype=bool)
-            # model.train()
-            print(f"Kept {mask.sum()} tets")
-            model, tet_optim = freeze_model(model, mask, args)
-            # model, tet_optim = freeze_model(model, **args.as_dict())
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    # Save checkpoints at specified iterations
-    if iteration in args.checkpoint_iterations:
-        checkpoint_dir = args.output_path / f"checkpoint_{iteration}"
-        checkpoint_dir.mkdir(exist_ok=True, parents=True)
-        model.save2ply(checkpoint_dir / "ckpt.ply")
-        sd = model.state_dict()
-        sd['indices'] = model.indices
-        torch.save(sd, checkpoint_dir / "ckpt.pth")
-        print(f"Saved checkpoint at iteration {iteration}")
-
-        with (checkpoint_dir / "config.json").open("w") as f:
-            json.dump(args.as_dict(), f, cls=CustomEncoder)
 
     psnr = -20 * math.log10(math.sqrt(l2_loss.detach().cpu().clip(min=1e-6).item()))
     psnrs[-1].append(psnr)
@@ -510,4 +364,5 @@ mediapy.write_video(args.output_path / "rotating.mp4", eimages)
 model.save2ply(args.output_path / "ckpt.ply")
 sd = model.state_dict()
 sd['indices'] = model.indices
+sd['empty_indices'] = model.empty_indices
 torch.save(sd, args.output_path / "ckpt.pth")

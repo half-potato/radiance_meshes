@@ -129,7 +129,7 @@ def set_pose(camera, T):
     return camera
 
 
-def load_dataset(source_path, images_folder, data_device, eval, white_background=True, resolution_scale=1.0, resolution=-1):
+def load_dataset(source_path, images_folder, data_device, eval, white_background=True, resolution_scale=1.0, resolution=-1, apply_pcd=True):
     if os.path.exists(os.path.join(source_path, "sparse")):
         scene_info = sceneLoadTypeCallbacks["Colmap"](source_path, images_folder, eval)
     elif os.path.exists(os.path.join(source_path, "transforms_train.json")):
@@ -144,16 +144,17 @@ def load_dataset(source_path, images_folder, data_device, eval, white_background
     test_cameras = load_cameras(scene_info.test_cameras, resolution_scale, resolution, data_device)
     print(f"Loaded Test Cameras: {len(test_cameras)}")
 
-    print("Transforming poses")
-    _, pca_transform = transform_cameras_pca(train_cameras + test_cameras)
-    xyz = scene_info.point_cloud.points
-    xyz_hom = np.hstack((xyz, np.ones((xyz.shape[0], 1))))
-    xyz_transformed_hom = (pca_transform @ xyz_hom.T).T
-    transformed_pcd = scene_info.point_cloud._replace(points=xyz_transformed_hom[:, :3])
-    scene_info = scene_info._replace(
-        point_cloud=transformed_pcd,
-        transform=pca_transform,
-    )
+    if apply_pcd:
+        print("Transforming poses")
+        _, pca_transform = transform_cameras_pca(train_cameras + test_cameras)
+        xyz = scene_info.point_cloud.points
+        xyz_hom = np.hstack((xyz, np.ones((xyz.shape[0], 1))))
+        xyz_transformed_hom = (pca_transform @ xyz_hom.T).T
+        transformed_pcd = scene_info.point_cloud._replace(points=xyz_transformed_hom[:, :3])
+        scene_info = scene_info._replace(
+            point_cloud=transformed_pcd,
+            transform=pca_transform,
+        )
 
 
     return train_cameras, test_cameras, scene_info

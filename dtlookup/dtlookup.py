@@ -29,6 +29,127 @@ tet_splatter_module = slangtorch.loadModule(os.path.join(shaders_path, "tet_spla
 key_generator_module = slangtorch.loadModule(os.path.join(shaders_path, "key_generator.slang"))
 lookup_module = slangtorch.loadModule(os.path.join(shaders_path, "lookup_kernel.slang"))
 
+class TetrahedraLookup:
+    """
+    Pre-computes an acceleration structure for a fixed set of tetrahedra
+    to allow for repeated, fast point containment lookups.
+    """
+    def __init__(self, indices: torch.Tensor, vertices: torch.Tensor, grid_dim_size: int = 128):
+        """
+        Initializes the lookup structure by building the grid.
+
+        Args:
+            indices (torch.Tensor): (N_tets, 4) tensor of tetrahedron vertex indices.
+            vertices (torch.Tensor): (N_verts, 3) tensor of vertex positions.
+            grid_dim_size (int): The resolution of the acceleration grid (e.g., 128).
+        """
+        self.indices = indices.int() # Ensure correct type
+        self.vertices = vertices.float() # Ensure correct type
+        self.device = vertices.device
+        self.n_tets = indices.shape[0]
+
+        # --- 1. Determine Grid Parameters ---
+        self.grid_dim = torch.tensor([grid_dim_size] * 3, device=self.device, dtype=torch.int32)
+        
+        world_min, _ = torch.min(vertices, dim=0)
+        world_max, _ = torch.max(vertices, dim=0)
+        padding = (world_max - world_min) * 0.01
+        self.world_min = world_min - padding
+        self.world_max = world_max + padding
+
+        self.cell_size = (self.world_max - self.world_min) / (self.grid_dim.float())
+        self.grid_size = self.grid_dim[0] * self.grid_dim[1] * self.grid_dim[2]
+        
+        # --- 2. Build the Grid Acceleration Structure ---
+        tiles_touched = torch.zeros(self.n_tets, device=self.device, dtype=torch.int32)
+        cell_rect = torch.zeros((self.n_tets, 6), device=self.device, dtype=torch.int32)
+
+        tet_splatter_module.splat_tetrahedra(
+            indices=self.indices,
+            vertices=self.vertices,
+            world_min=self.world_min.tolist(),
+            cell_size=self.cell_size.tolist(),
+            grid_dim=self.grid_dim.tolist(),
+            out_tiles_touched=tiles_touched,
+            out_cell_rect=cell_rect
+        ).launchRaw(blockSize=(256, 1, 1), gridSize=((self.n_tets + 255) // 256, 1, 1))
+
+        index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int32)
+        self.total_keys = index_buffer_offset[-1].item() if self.n_tets > 0 else 0
+
+        if self.total_keys > 0:
+            unsorted_keys = torch.empty(self.total_keys, device=self.device, dtype=torch.int32)
+            unsorted_tet_idx = torch.empty(self.total_keys, device=self.device, dtype=torch.int32)
+
+            key_generator_module.generate_keys(
+                cell_rect=cell_rect, index_buffer_offset=index_buffer_offset, grid_dim=self.grid_dim.tolist(),
+                out_unsorted_keys=unsorted_keys, out_unsorted_tet_idx=unsorted_tet_idx
+            ).launchRaw(blockSize=(256, 1, 1), gridSize=((self.n_tets + 255) // 256, 1, 1))
+
+            self.sorted_keys, sort_indices = torch.sort(unsorted_keys)
+            self.sorted_tet_idx = unsorted_tet_idx[sort_indices]
+
+            self.tile_ranges = torch.zeros((self.grid_size, 2), device=self.device, dtype=torch.int32)
+            key_generator_module.compute_tile_ranges(
+                sorted_keys=self.sorted_keys, out_tile_ranges=self.tile_ranges
+            ).launchRaw(blockSize=(256, 1, 1), gridSize=((self.total_keys + 255) // 256, 1, 1))
+        else: # Handle case with no tetrahedra
+            self.sorted_keys = None
+            self.sorted_tet_idx = None
+            self.tile_ranges = None
+
+
+    def lookup(self, points: torch.Tensor) -> torch.Tensor:
+        """
+        Performs a massively parallel lookup using the pre-built structure.
+
+        Args:
+            points (torch.Tensor): (N_queries, 3) tensor of query points.
+
+        Returns:
+            torch.Tensor: (N_queries,) tensor containing the index of the containing
+                          tetrahedron for each point, or -1 if not found.
+        """
+        n_queries = points.shape[0]
+        if n_queries == 0:
+            return torch.empty(0, dtype=torch.int32, device=self.device)
+
+        # --- 3. Sort Query Points by Morton Code ---
+        with torch.no_grad():
+            int_coords = ((points - self.world_min) / self.cell_size).clamp(min=0).to(torch.int32)
+            # Handle potential OOB on the max side
+            int_coords = torch.min(int_coords, self.grid_dim - 1)
+            
+            morton_codes = torch.from_numpy(
+                morton_encode(int_coords.cpu().numpy())
+            ).to(self.device)
+            
+            morton_sort_indices = torch.argsort(morton_codes)
+            sorted_query_points = points[morton_sort_indices]
+
+        # --- 4. Run the Lookup Kernel ---
+        output_tet_ids = torch.full((n_queries,), -1, dtype=torch.int32, device=self.device)
+        if self.total_keys > 0 and n_queries > 0:
+            lookup_module.lookup_points(
+                query_points=sorted_query_points, 
+                indices=self.indices, 
+                vertices=self.vertices,
+                sorted_keys=self.sorted_keys, 
+                sorted_tet_idx=self.sorted_tet_idx,
+                tile_ranges=self.tile_ranges, 
+                world_min=self.world_min.tolist(), 
+                cell_size=self.cell_size.tolist(),
+                grid_dim=self.grid_dim.tolist(), 
+                out_tet_ids=output_tet_ids
+            ).launchRaw(blockSize=(256, 1, 1), gridSize=((n_queries + 255) // 256, 1, 1))
+
+        # --- 5. Un-sort Results and Return ---
+        inverse_sort_indices = torch.empty_like(morton_sort_indices)
+        inverse_sort_indices[morton_sort_indices] = torch.arange(n_queries, device=self.device)
+        final_results = output_tet_ids[inverse_sort_indices]
+        
+        return final_results
+
 def lookup_inds(indices, vertices, points):
     """
     Performs a massively parallel lookup to find which tetrahedron contains each query point.

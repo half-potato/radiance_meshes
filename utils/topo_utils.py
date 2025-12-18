@@ -383,3 +383,75 @@ def build_adj_matrix(num_tets, owners):
         adj_sparse.size(),
         dtype=torch.bool
     )
+
+def build_adj(verts, tets, device=None):
+    """
+    Builds a (T, 4) adjacency map for a tetrahedron mesh.
+
+    verts : (V,3)
+    tets  : (T,4)
+    returns:
+        tet_adj : (T,4) int64
+                  tet_adj[i, j] = index of tet adjacent to face j of tet i
+                  (face j is opposite vertex j)
+                  Value is -1 if it's a boundary face.
+    """
+    if device is None: device = verts.device
+    T = tets.shape[0]
+
+    face_lists = torch.stack([
+        tets[:, (0, 2, 1)], 
+        tets[:, (1, 2, 3)], 
+        tets[:, (0, 3, 2)], 
+        tets[:, (3, 0, 1)], 
+        # tets[:, (1, 2, 3)], 
+        # tets[:, (0, 3, 2)], 
+        # tets[:, (0, 1, 3)], 
+        # tets[:, (0, 2, 1)], 
+    ], dim=1).reshape(-1, 3)                         # (4T,3)
+    face_sorted, _ = face_lists.sort(dim=1)          # canonical key
+    
+    # owner_tet[i] = tet index for global face i
+    owner_tet = torch.arange(T, device=device).repeat_interleave(4) # (4T,)
+    # local_face[i] = local face index (0-3) for global face i
+    local_face = torch.arange(4, device=device).repeat(T)           # (4T,)
+
+
+    # ---- group identical faces ------------------------------------
+    uniq, inv, counts = torch.unique(face_sorted, dim=0,
+                                     return_inverse=True,
+                                     return_counts=True)
+    interior = counts == 2
+    mask     = interior[inv]                         # (4T,) boolean
+    
+    # Get global face indices (0..4T-1) for all interior faces
+    face_rows = torch.nonzero(mask, as_tuple=False)[:,0] # (2*M,)
+
+    # ---- build (T,4) map ------------------------------------------
+    
+    # 1. Sort face_rows by their unique face id
+    face_id   = inv[face_rows]
+    sort_idx  = torch.argsort(face_id)
+    face_rows = face_rows[sort_idx] # Shape (2*M,)
+
+    # 2. Get tet owners and local faces for each pair
+    tet_owners  = owner_tet[face_rows]  # (2*M,)
+    local_faces = local_face[face_rows] # (2*M,)
+
+    # 3. Reshape to get pairs
+    # tet_A[i] and tet_B[i] are neighbors
+    # face_A[i] is local face of tet_A leading to tet_B
+    # face_B[i] is local face of tet_B leading to tet_A
+    tet_A  = tet_owners[::2]
+    tet_B  = tet_owners[1::2]
+    face_A = local_faces[::2]
+    face_B = local_faces[1::2]
+
+    # 4. Create and populate the (T, 4) adjacency map
+    # Initialize all faces to -1 (boundary)
+    tet_adj = torch.full((T, 4), -1, device=device, dtype=torch.int64)
+    
+    tet_adj[tet_A, face_A] = tet_B
+    tet_adj[tet_B, face_B] = tet_A
+    
+    return tet_adj

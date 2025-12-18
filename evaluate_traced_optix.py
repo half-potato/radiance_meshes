@@ -1,0 +1,224 @@
+from tracers.splinetracers.tetra_splinetracer import trace_rays, get_tet_adjacency, FastTracer
+# from models.vertex_color import Model
+import pickle
+import torch
+from tqdm import tqdm
+from pathlib import Path
+import imageio
+import numpy as np
+from data import loader
+from utils import test_util
+from utils.args import Args
+from utils import cam_util
+import mediapy
+from icecream import ic
+import time
+
+from utils.model_util import *
+from utils.topo_utils import build_adj
+from utils.train_util import render
+from dtlookup import lookup_inds, TetrahedraLookup, TetWalkLookup
+
+args = Args()
+args.tile_size = 4
+args.image_folder = "images_4"
+args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
+args.output_path = Path("output/test/")
+args.eval = True
+args.use_ply = False
+args.render_train = False
+args.min_t = 0.2
+args.resolution = "test"
+args = Args.from_namespace(args.get_parser().parse_args())
+
+device = torch.device('cuda')
+if args.use_ply:
+    from models.tet_color import Model
+    model = Model.load_ply(args.output_path / "ckpt.ply", device)
+else:
+    from models.ingp_color import Model
+    from models.frozen import FrozenTetModel
+    try:
+        model = Model.load_ckpt(args.output_path, device)
+    except:
+        model = FrozenTetModel.load_ckpt(args.output_path, device)
+
+# model.light_offset = -1
+train_cameras, test_cameras, scene_info = loader.load_dataset(
+    args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
+
+# ic(model.min_t)
+# model.min_t = args.min_t
+ic(model.min_t)
+if args.render_train:
+    splits = zip(['train', 'test'], [train_cameras, test_cameras])
+else:
+    splits = zip(['test'], [test_cameras])
+
+ic(model.empty_indices.shape)
+indices = torch.cat([model.indices, model.empty_indices], dim=0)
+vertices = model.vertices
+circumcenters, density, rgb, base_grd, sh = model.compute_batch_features(
+    vertices, model.indices, start=0, end=model.indices.shape[0])
+
+# lookup = TetWalkLookup(indices.cpu().numpy(), model.vertices.detach().cpu().numpy())
+lookup = TetrahedraLookup(indices, vertices, 256)
+face_indices, side_index = get_tet_adjacency(model.indices)
+
+def render_rt(camera, model, camera_directions, density, cell_values, min_t, lookup_tool):
+    rays = camera.get_world_space_rays(camera_directions, 'cuda')
+    output_img = trace_rays(
+            model.vertices,
+            indices,
+            face_indices,
+            side_index,
+            density.contiguous(),
+            # cell_values[:, 1:].contiguous(),
+            cell_values,
+            rays[:, :3].contiguous(),
+            rays[:, 3:].contiguous(),
+            min_t,
+            200,
+            lookup
+    )
+    return output_img[:, :3].reshape(camera.image_height, camera.image_width, 3)
+
+for split, cameras in splits:
+    camera = cameras[0]
+    if args.resolution == "1080p":
+        camera.image_width = 1920
+        camera.image_height = 1080
+    elif args.resolution == "2k":
+        camera.image_width = 2560
+        camera.image_height = 1440
+    elif args.resolution == "4k":
+        camera.image_width = 3840
+        camera.image_height = 2160
+
+    camera.gt_alpha_mask = torch.ones((1, camera.image_height, camera.image_width), device=camera.data_device)
+    cds = camera.get_camera_space_directions('cuda')
+    # for idx, camera in enumerate(tqdm(cameras, desc=f"Rendering {split} set")):
+    #     with torch.no_grad():
+    #         dvrgbs = activate_output(camera.camera_center.to(model.device),
+    #                     density, rgb, base_grd,
+    #                     sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+    #                     model.indices,
+    #                     circumcenters,
+    #                     vertices, model.max_sh_deg, model.max_sh_deg)
+    #         features = dvrgbs[:, 1:]
+    #         grd = features[..., 3:]
+    #         # offset = ((rays[0, :3].reshape(1, 3) - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    #         offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    #         base_color = features[..., :3] + offset
+    #         features = torch.cat([base_color, grd], dim=1).contiguous()
+    #
+    #         render_pkg = render_rt(camera, model, cds, min_t=args.min_t, density=dvrgbs[:, :1], cell_values=features, lookup_tool=lookup)
+    #         # render_pkg = render(camera, model, tile_size=args.tile_size, min_t=args.min_t, cell_values=dvrgbs)['render'][:3].permute(1, 2, 0)
+    #         imageio.imwrite(f'test/{idx:03d}.png', (render_pkg.clip(max=1).detach().cpu().numpy()*255).astype(np.uint8))
+
+    dvrgbs = activate_output(cameras[0].camera_center.to(model.device),
+                density, rgb, base_grd,
+                sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+                model.indices,
+                circumcenters,
+                vertices, model.max_sh_deg, model.max_sh_deg)
+    features = dvrgbs[:, 1:]
+    grd = features[..., 3:]
+    # offset = ((rays[0, :3].reshape(1, 3) - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    base_color = features[..., :3] + offset
+    features = torch.cat([base_color, grd], dim=1).contiguous()
+
+    tracer = FastTracer(vertices, face_indices, side_index, dvrgbs[:, :1].contiguous(), features, lookup, 0, 1000)
+    #
+    # for idx, camera in enumerate(tqdm(cameras, desc=f"Rendering {split} set")):
+    #     with torch.no_grad():
+    #         rays = camera.get_world_space_rays(cds, 'cuda')
+    #
+    #         # dvrgbs = activate_output(cameras[0].camera_center.to(model.device),
+    #         #             density, rgb, base_grd,
+    #         #             sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+    #         #             model.indices,
+    #         #             circumcenters,
+    #         #             vertices, model.max_sh_deg, model.max_sh_deg)
+    #         # features = dvrgbs[:, 1:]
+    #         # grd = features[..., 3:]
+    #         # # offset = ((rays[0, :3].reshape(1, 3) - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    #         # offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+    #         # base_color = features[..., :3] + offset
+    #         # features = torch.cat([base_color, grd], dim=1).contiguous()
+    #
+    #         render_pkg = tracer.trace(
+    #             features,
+    #             rays[:, :3].contiguous(),
+    #             rays[:, 3:].contiguous(),
+    #         )
+    #         render_pkg = render_pkg[:, :3].reshape(camera.image_height, camera.image_width, 3)
+    #         imageio.imwrite(f'test/{idx:03d}.png', (render_pkg.detach().cpu().numpy()*255).clip(max=255).astype(np.uint8))
+
+    for idx, camera in enumerate(tqdm(cameras, desc=f"Rendering {split} set")):
+        times = []
+        with torch.no_grad():
+            if args.resolution == "1080p":
+                camera.image_width = 1920
+                camera.image_height = 1080
+            elif args.resolution == "2k":
+                camera.image_width = 2560
+                camera.image_height = 1440
+            elif args.resolution == "4k":
+                camera.image_width = 3840
+                camera.image_height = 2160
+
+            camera.gt_alpha_mask = torch.ones((1, camera.image_height, camera.image_width), device=camera.data_device)
+            start_time = time.time()
+            # render_pkg = render_rt(camera, model, cds, min_t=args.min_t, density=dvrgbs[:, :1], cell_values=features, lookup_tool=lookup)
+            rays = camera.get_world_space_rays(cds, 'cuda')
+
+            # dvrgbs = activate_output(cameras[0].camera_center.to(model.device),
+            #             density, rgb, base_grd,
+            #             sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+            #             model.indices,
+            #             circumcenters,
+            #             vertices, model.max_sh_deg, model.max_sh_deg)
+            # features = dvrgbs[:, 1:]
+            # grd = features[..., 3:]
+            # # offset = ((rays[0, :3].reshape(1, 3) - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+            # offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+            # base_color = features[..., :3] + offset
+            # features = torch.cat([base_color, grd], dim=1).contiguous()
+
+            output_img = tracer.trace(
+                features,
+                rays[:, :3].contiguous(),
+                rays[:, 3:].contiguous(),
+            )
+            # render_pkg = render(camera, model, tile_size=args.tile_size, min_t=args.min_t, cell_values=dvrgbs)
+            dt = time.time() - start_time
+            times.append(dt)
+    print(f"Average FPS: {1/np.mean(times)}")
+
+# with torch.no_grad():
+#     epath = cam_util.generate_cam_path(train_cameras, 400)
+#     eimages = []
+#     for camera in tqdm(epath):
+#         dvrgbs = activate_output(camera.camera_center.to(model.device),
+#                     density, rgb, base_grd,
+#                     sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+#                     model.indices,
+#                     circumcenters,
+#                     vertices, model.max_sh_deg, model.max_sh_deg)
+#         features = dvrgbs[:, 1:]
+#         grd = features[..., 3:]
+#         # offset = ((rays[0, :3].reshape(1, 3) - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+#         offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
+#         base_color = features[..., :3] + offset
+#         features = torch.cat([base_color, grd], dim=1).contiguous()
+#         render_pkg = render_rt(camera, model, cds, min_t=args.min_t, density=dvrgbs[:, :1], cell_values=features, lookup_tool=lookup)
+#         image = render_pkg
+#         # image = render_pkg['render']
+#         # image = image.permute(1, 2, 0)
+#         image = image.detach().cpu().numpy()
+#         eimages.append(image)
+#
+# mediapy.write_video(args.output_path / "rotating_rt.mp4", eimages)
+#

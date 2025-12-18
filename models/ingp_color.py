@@ -21,6 +21,10 @@ import open3d as o3d
 from utils.model_util import *
 from models.base_model import BaseModel
 from utils.ingp_util import grid_scale, compute_grid_offsets
+from utils.hashgrid import HashEmbedderOptimized
+from utils import hashgrid
+import tinycudann as tcnn
+import time
 
 torch.set_float32_matmul_precision('high')
 
@@ -50,6 +54,159 @@ def pad_for_tinycudann(x: torch.Tensor, granularity: int):
         
         return x_padded, padding_needed
 
+def gaussian_in_circumsphere(cc: torch.Tensor,       # (T,3)
+                             r:  torch.Tensor,       # (T,1)
+                             k:  int,
+                             trunc_sigma: float = 0.3) -> torch.Tensor:
+    """
+    Draw `k` 3‑D points from N(cc, (trunc_sigma*r)^2 I), truncated so ‖x‑cc‖≤r.
+
+    Returns: (T,k,3)
+    """
+    T = cc.shape[0]
+    # iid standard normal                                                          (T,k,3)
+    x  = torch.randn((T, k, 3), device=cc.device)
+
+    # scale by radius*trunc_sigma
+    x  = x * (trunc_sigma * r).unsqueeze(1)
+
+    # rejection‑sampling for the few out‑of‑sphere samples ------------------------
+    inside = (x.norm(dim=-1, p=2) <= r.unsqueeze(1)).all(dim=-1)
+    while not inside.all():
+        # re‑draw only the failed rows (≈ 1 % for σ=0.3)
+        mask   = ~inside
+        num    = mask.sum()
+        x[mask] = torch.randn((num, 3), device=x.device) * (trunc_sigma * r[mask])
+        inside  = (x.norm(dim=-1) <= r[mask]).all(dim=-1)
+
+    return cc.unsqueeze(1) + x                 # (T,k,3)
+
+def approx_erf(x):
+  """An approximation of erf() that is accurate to within 0.007."""
+  return torch.sign(x) * torch.sqrt(1 - torch.exp(-(4 / torch.pi) * x**2))
+
+class iNGPDW(nn.Module):
+    def __init__(self, 
+                 sh_dim=0,
+                 scale_multi=0.5,
+                 log2_hashmap_size=16,
+                 base_resolution=16,
+                 per_level_scale=2,
+                 L=10,
+                 hashmap_dim=4,
+                 hidden_dim=64,
+                 g_init=1,
+                 s_init=1e-4,
+                 d_init=0.1,
+                 c_init=0.6,
+                 density_offset=-4,
+                 ablate_downweighing=False,
+                 k_samples=1,
+                 trunc_sigma=1,
+                 use_tcnn=False,
+                 **kwargs):
+        super().__init__()
+        self.scale_multi = scale_multi
+        self.L = L
+        self.dim = hashmap_dim
+        self.per_level_scale = per_level_scale
+        self.base_resolution = base_resolution
+        self.density_offset = density_offset
+        self.ablate_downweighing = ablate_downweighing
+        self.k_samples = k_samples
+        self.trunc_sigma = trunc_sigma
+
+        self.config = dict(
+            per_level_scale=per_level_scale,
+            n_levels=L,
+            otype="HashGrid",
+            n_features_per_level=self.dim,
+            base_resolution=base_resolution,
+            log2_hashmap_size=log2_hashmap_size,
+        )
+        if use_tcnn:
+            self.encoding = tcnn.Encoding(3, self.config)
+            print("Using TCNN")
+            self.compile = False
+        else:
+            print("Using PyTorch iNGP")
+            self.encoding = hashgrid.HashEmbedderOptimized(
+                [torch.zeros((3)), torch.ones((3))],
+                self.L, n_features_per_level=self.dim,
+                log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
+                finest_resolution=base_resolution*per_level_scale**self.L)
+            self.compile = True
+
+
+        def mk_head(n):
+            network = nn.Sequential(
+                nn.Linear(self.encoding.n_output_dims, hidden_dim),
+                nn.SELU(inplace=True),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.SELU(inplace=True),
+                nn.Linear(hidden_dim, n)
+            )
+            gain = nn.init.calculate_gain('relu')  # for example, if using ReLU activations
+            network.apply(lambda m: init_linear(m, gain))
+            return network
+
+        self.network = mk_head(1+12+sh_dim)
+
+        self.density_net   = mk_head(1)
+        self.color_net     = mk_head(3)
+        self.gradient_net  = mk_head(3)
+        self.sh_net        = mk_head(sh_dim)
+
+        last = self.network[-1]
+        with torch.no_grad():
+            last.weight[4:, :].zero_()
+            last.bias[4:].zero_()
+            for network, eps in zip(
+                [self.gradient_net, self.sh_net, self.density_net, self.color_net], 
+                [g_init, s_init, d_init, c_init]):
+                last = network[-1]
+                with torch.no_grad():
+                    nn.init.uniform_(last.weight.data, a=-eps, b=eps)
+                    # nn.init.xavier_uniform_(m.weight, gain)
+                    last.bias.zero_()
+
+
+    def _encode(self, x: torch.Tensor, cr: torch.Tensor):
+        output = self.encoding(x)
+        output = output.reshape(-1, self.dim, self.L)
+        if not self.ablate_downweighing:
+            cr = cr.detach() * self.scale_multi
+            n = torch.arange(self.L, device=x.device).reshape(1, 1, -1)
+            erf_x = safe_div(torch.tensor(1.0, device=x.device),
+                            safe_sqrt(self.per_level_scale * 4*n*cr.reshape(-1, 1, 1)))
+            scaling = approx_erf(erf_x)
+            output = output * scaling
+        return output
+
+
+    def forward(self, x, cr):
+        # output = self._encode(x, cr)
+        if self.k_samples > 1:
+            output = self._encode(x, cr)
+            output = output.view(-1, self.k_samples, output.shape[-1]).mean(dim=1)
+        else:
+            output = self._encode(x, cr)
+
+        h = output.reshape(-1, self.L * self.dim).float()
+
+        sigma = self.density_net(h)
+        rgb = self.color_net(h)
+        field_samples = self.gradient_net(h)
+        sh  = self.sh_net(h).half()
+
+        rgb = rgb.reshape(-1, 3, 1) + 0.5
+        density = safe_exp(sigma+self.density_offset)
+        # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
+        grd = field_samples.reshape(-1, 1, 3)
+        grd = grd / ((grd * grd).sum(dim=-1, keepdim=True) + 1).sqrt()
+        # grd = rgb * torch.tanh(field_samples.reshape(-1, 3, 3))  # shape (T, 3, 3)
+        return density, rgb.reshape(-1, 3), grd, sh
+
 class Model(BaseModel):
     def __init__(self,
                  vertices: torch.Tensor,
@@ -60,6 +217,7 @@ class Model(BaseModel):
                  current_sh_deg=2,
                  max_sh_deg=2,
                  ablate_circumsphere=False,
+                 ablate_gradient=False,
                  **kwargs):
         super().__init__()
         self.device = vertices.device
@@ -69,10 +227,17 @@ class Model(BaseModel):
         self.dir_offset = torch.tensor([
             [0, 0],
             [math.pi, 0],
+            [math.pi/3, math.pi/3],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
 
-        self.backbone = torch.compile(iNGPDW(sh_dim, **kwargs)).to(self.device)
+        module = iNGPDW(sh_dim, **kwargs)
+        self.compile = module.compile
+        if module.compile:
+            self.backbone = torch.compile(module).to(self.device)
+        else:
+            self.backbone = module.to(self.device)
+
 
         # backbone = iNGPDW(sh_dim, **kwargs).to(self.device)
         # sample_cv = torch.rand((512, 3)).to(self.device)
@@ -103,6 +268,36 @@ class Model(BaseModel):
         self.feature_dim = 7
         self.alpha = 0
         self.ablate_circumsphere = ablate_circumsphere
+        self.ablate_gradient = ablate_gradient
+
+        k_samples = self.backbone.k_samples
+        # indices = torch.arange(k_samples, dtype=torch.float32) + 0.5
+        # r = (indices / k_samples).pow(1.0/3.0) # Shape [k_samples]
+        # golden_ratio = (1. + math.sqrt(5.)) / 2.
+        # phi = indices * (2. * math.pi / golden_ratio)  # Azimuthal angle
+        # y = 1. - (indices * (2. / k_samples))          # y-coordinate (from 1 down to -1)
+        # r_surface = torch.sqrt(1. - y*y)
+        # x = r_surface * torch.cos(phi)
+        # z = r_surface * torch.sin(phi)
+        # surface_dirs = torch.stack([x, y, z], dim=-1) # Shape [k_samples, 3]
+        # sphere_pattern = surface_dirs * r.unsqueeze(-1) # Shape [k_samples, 3]
+
+        # sobol_engine = torch.quasirandom.SobolEngine(dimension=3, scramble=True)
+        # qmc_samples_01 = sobol_engine.draw(k_samples) + 1e-6
+        # ic(qmc_samples_01)
+        # sphere_pattern = torch.special.ndtri(qmc_samples_01)
+        # ic(sphere_pattern*0.35)
+
+        s = math.sqrt(1/3)
+        fixed_pattern = torch.tensor([
+            [ 0.0,  0.0,  0.0],
+            [   s,    s,    s],
+            [   s,   -s,   -s],
+            [  -s,    s,   -s],
+            [  -s,   -s,    s]
+        ], dtype=torch.float32)
+        sphere_pattern = fixed_pattern[:k_samples]
+        self.register_buffer('sphere_pattern', sphere_pattern.to(self.device))
 
         self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
@@ -128,11 +323,30 @@ class Model(BaseModel):
             radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         if self.ablate_circumsphere:
             circumcenter = tets.mean(dim=1)
+            # radius = torch.linalg.norm(circumcenter - vertices[indices[start:end, 0]], dim=-1)
         if self.training:
             circumcenter += self.alpha*torch.randn_like(circumcenter) * radius.reshape(-1, 1)
-        normalized = (circumcenter - self.center) / self.scene_scaling
-        cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
-        x = (cv/2 + 1)/2
+        if self.backbone.k_samples > 1:
+            # eps = torch.randn((circumcenter.shape[0], self.backbone.k_samples, 3),
+            #                   device=circumcenter.device)
+
+            eps = self.sphere_pattern.unsqueeze(0)
+            if self.training:
+                rand_mat = torch.randn(3, 3, device=circumcenter.device)
+                q, _ = torch.linalg.qr(rand_mat)
+                if torch.det(q) < 0:
+                    q[:, 0] = -q[:, 0] # Flip one axis
+                eps = torch.matmul(q, eps.transpose(-1, -2)).transpose(-1, -2)
+
+            sampled_cc = circumcenter.reshape(-1, 1, 3) + eps * radius.reshape(-1, 1, 1) * self.backbone.trunc_sigma
+            sampled_radius = radius.reshape(-1, 1, 1).expand(-1, self.backbone.k_samples, 1)
+            normalized = (sampled_cc.detach() - self.center) / self.scene_scaling
+            cv, cr = contract_mean_std(normalized.reshape(-1, 3), sampled_radius.reshape(-1) / self.scene_scaling)
+            x = (cv/2 + 1)/2
+        else:
+            normalized = (circumcenter.detach() - self.center) / self.scene_scaling
+            cv, cr = contract_mean_std(normalized, radius / self.scene_scaling)
+            x = (cv/2 + 1)/2
 
         output = checkpoint(self.backbone, x, cr, use_reentrant=True)
 
@@ -142,27 +356,34 @@ class Model(BaseModel):
         # N = circumcenter.shape[0]
         # output = self.backbone(x, cr.reshape(-1, 1))
         # output = [v[:N] for v in output]
-        return circumcenter, normalized, *output
+        return circumcenter, *output
 
     def get_cell_values(self, camera: Camera, mask=None,
                         all_circumcenters=None, radii=None):
         indices = self.indices[mask] if mask is not None else self.indices
-        vertices = self.vertices.detach()
+        vertices = self.vertices
 
+        sh_dim = (self.max_sh_deg+1)**2 - 1
         features = torch.empty((indices.shape[0], self.feature_dim), device=self.device)
+        shs = torch.empty((indices.shape[0], sh_dim, 3), device=self.device)
         start = 0
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
-            circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
+            circumcenters, density, rgb, grd, sh = self.compute_batch_features(
                 vertices, indices, start, end, circumcenters=all_circumcenters)
+            if self.ablate_gradient:
+                grd = torch.zeros_like(grd)
+            centroids = vertices[indices[start:end]].mean(dim=1)
+            shs[start:end] = sh.reshape(-1, sh_dim, 3)
             dvrgbs = activate_output(camera.camera_center.to(self.device),
                                      density, rgb, grd,
-                                     sh.reshape(-1, (self.max_sh_deg+1)**2 - 1, 3),
+                                     sh.reshape(-1, sh_dim, 3),
                                      indices[start:end],
-                                     circumcenters,
-                                     vertices, self.current_sh_deg, self.max_sh_deg)
+                                     centroids,
+                                     vertices.detach(),
+                                     self.current_sh_deg, self.max_sh_deg)
             features[start:end] = dvrgbs
-        return None, features
+        return shs, features
 
     @staticmethod
     def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
@@ -221,7 +442,6 @@ class Model(BaseModel):
         #     ext_vertices = ext_vertices[inds]
         # else:
         #     num_ext = ext_vertices.shape[0]
-
         # vertices = torch.cat([vertices, ext_vertices], dim=0)
         # ext_vertices = torch.empty((0, 3))
 
@@ -231,7 +451,7 @@ class Model(BaseModel):
 
     @staticmethod
     def load_ckpt(path: Path, device):
-        ckpt_path = path / "ckpt_prefreeze.pth"
+        ckpt_path = path / "ckpt.pth"
         config_path = path / "config.json"
         config = Args.load_from_json(str(config_path))
         ckpt = torch.load(ckpt_path)
@@ -239,12 +459,18 @@ class Model(BaseModel):
         vertices = ckpt['contracted_vertices']
         indices = ckpt["indices"]  # shape (N,4)
         del ckpt["indices"]
+        if 'empty_indices' in ckpt:
+            empty_indices = ckpt['empty_indices']
+            del ckpt['empty_indices']
+        else:
+            empty_indices = torch.empty((0, 4), dtype=indices.dtype, device=indices.device)
         print(f"Loaded {vertices.shape[0]} vertices")
         ext_vertices = ckpt['ext_vertices']
         model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
         model.min_t = model.scene_scaling * config.base_min_t
         model.indices = torch.as_tensor(indices).cuda()
+        model.empty_indices = torch.as_tensor(empty_indices).cuda()
         return model
 
     def calc_tet_density(self):
@@ -253,7 +479,7 @@ class Model(BaseModel):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
+            _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
 
             densities.append(density.reshape(-1))
         return torch.cat(densities)
@@ -265,7 +491,7 @@ class Model(BaseModel):
         for start in range(0, indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, indices.shape[0])
 
-            circumcenters, _, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
+            circumcenters, density, rgb, grd, sh = self.compute_batch_features(vertices, indices, start, end)
             tets = vertices[indices[start:end]]
             cs.append(circumcenters)
             ds.append(density)
@@ -316,16 +542,18 @@ class Model(BaseModel):
             indices[reverse_mask] = indices[reverse_mask][:, [1, 0, 2, 3]]
 
         # Cull tets with low density
-        self.full_indices = indices.clone()
+        # self.full_indices = indices.clone()
         self.indices = indices
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.calc_tet_density()
             tet_alpha = self.calc_tet_alpha(mode="min", density=tet_density)
             mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
+            self.empty_indices = self.indices[~mask]
             self.indices = self.indices[mask]
             self.mask = mask
         else:
-            self.mask = torch.ones((self.full_indices.shape[0]), dtype=bool, device='cuda')
+            self.empty_indices = torch.empty((0, 4), dtype=self.indices.dtype, device='cuda')
+            # self.mask = torch.ones((self.full_indices.shape[0]), dtype=bool, device='cuda')
             
         torch.cuda.empty_cache()
 
@@ -334,7 +562,18 @@ class Model(BaseModel):
         
 
     def compute_weight_decay(self):
-        return sum([(embed.weight**2).mean() for embed in self.backbone.encoding.embeddings])
+        if self.compile:
+            return sum([(embed.weight**2).mean() for embed in self.backbone.encoding.embeddings])
+        else:
+            param = list(self.backbone.encoding.parameters())[0]
+            weight_decay = 0
+            ind = 0
+            for i in range(self.different_size):
+                o = self.offsets[i+1] - self.offsets[i]
+                weight_decay = weight_decay + (param[ind:self.offsets[i+1]]**2).mean()
+                ind += o
+            weight_decay = weight_decay + (param[ind:].reshape(-1, self.nominal_offset_size)**2).mean(dim=1).sum()
+            return weight_decay
 
 class TetOptimizer:
     def __init__(self,
@@ -346,7 +585,6 @@ class TetOptimizer:
                  vertices_lr: float=4e-4,
                  final_vertices_lr: float=4e-7,
                  vertices_lr_delay_multi: float=0.01,
-                 split_std: float = 0.5,
                  lr_delay: int = 500,
                  freeze_start: int = 10000,
                  vert_lr_delay: int = 500,
@@ -377,7 +615,6 @@ class TetOptimizer:
             {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
         ])
         self.model = model
-        self.split_std = split_std
 
         self.alpha_sched = get_expon_lr_func(lr_init=percent_alpha*float(model.scene_scaling.cpu()),
                                                 lr_final=1e-20,
@@ -394,8 +631,8 @@ class TetOptimizer:
         self.net_scheduler_args = SpikingLR(
             spike_duration, freeze_start, base_net_scheduler,
             midpoint, densify_interval, densify_end,
-            # network_lr, network_lr)
             network_lr, network_lr)
+            # network_lr, final_network_lr)
 
         base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
                                                 lr_final=final_encoding_lr,
@@ -409,9 +646,10 @@ class TetOptimizer:
             # encoding_lr, encoding_lr)
             encoding_lr, encoding_lr)
 
-        self.vertex_lr = self.vert_lr_multi*vertices_lr
-        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertex_lr,
-                                                lr_final=self.vert_lr_multi*final_vertices_lr,
+        self.vertices_lr = self.vert_lr_multi*vertices_lr
+        self.final_vertices_lr = self.vert_lr_multi*final_vertices_lr
+        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertices_lr,
+                                                lr_final=self.final_vertices_lr,
                                                 lr_delay_mult=vertices_lr_delay_multi,
                                                 max_steps=freeze_start,
                                                 lr_delay_steps=vert_lr_delay)
@@ -420,8 +658,8 @@ class TetOptimizer:
         self.vertex_scheduler_args = SpikingLR(
             spike_duration, freeze_start, base_vertex_scheduler,
             midpoint, densify_interval, densify_end,
-            self.vertex_lr, self.vertex_lr)
-            # self.vertex_lr, self.vertex_lr)
+            # self.vertices_lr, self.final_vertices_lr)
+            self.vertices_lr, self.vertices_lr)
         self.iteration = 0
 
     def update_learning_rate(self, iteration):
@@ -438,7 +676,7 @@ class TetOptimizer:
         for param_group in self.vertex_optim.param_groups:
             if param_group["name"] == "contracted_vertices":
                 lr = self.vertex_scheduler_args(iteration)
-                self.vertex_lr = lr
+                self.vertices_lr = lr
                 param_group['lr'] = lr
 
     def add_points(self, new_verts: torch.Tensor, raw_verts=False):
@@ -453,39 +691,8 @@ class TetOptimizer:
         self.model.update_triangulation()
 
     @torch.no_grad()
-    def split(self, clone_indices, split_point, split_mode, split_std, **kwargs):
-        device = self.model.device
-        clone_vertices = self.model.vertices[clone_indices]
-
-        if split_mode == "circumcenter":
-            circumcenters, radius = calculate_circumcenters_torch(clone_vertices)
-            radius = radius.reshape(-1, 1)
-            circumcenters = circumcenters.reshape(-1, 3)
-            sphere_loc = sample_uniform_in_sphere(circumcenters.shape[0], 3).to(device)
-            r = torch.randn((clone_indices.shape[0], 1), device=self.model.device)
-            r[r.abs() < 1e-2] = 1e-2
-            sampled_radius = (r * self.split_std + 1) * radius
-            new_vertex_location = l2_normalize_th(sphere_loc) * sampled_radius + circumcenters
-        elif split_mode == "barycenter":
-            barycentric_weights = 0.25*torch.ones((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-        elif split_mode == "barycentric":
-            barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
-            barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-        elif split_mode == "split_point":
-            _, radius = calculate_circumcenters_torch(self.model.vertices[clone_indices])
-            split_point += (split_std * radius.reshape(-1, 1)).clip(min=1e-3, max=3) * torch.randn(*split_point.shape, device=self.model.device)
-            new_vertex_location = split_point
-            # new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
-        elif split_mode == "split_point_c":
-            barycentric_weights = calc_barycentric(split_point, clone_vertices).clip(min=0)
-            barycentric_weights = barycentric_weights / (1e-3+barycentric_weights.sum(dim=1, keepdim=True))
-            barycentric_weights += 1e-4*torch.randn(*barycentric_weights.shape, device=self.model.device)
-            new_vertex_location = (self.model.vertices[clone_indices] * barycentric_weights.unsqueeze(-1)).sum(dim=1)
-        else:
-            raise Exception(f"Split mode: {split_mode} not supported")
-        self.add_points(new_vertex_location)
+    def split(self, split_point, **kwargs):
+        self.add_points(split_point)
 
     def main_step(self):
         self.optim.step()

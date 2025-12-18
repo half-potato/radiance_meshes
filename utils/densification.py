@@ -5,7 +5,7 @@ import imageio
 from utils import safe_math
 from typing import NamedTuple, List
 from delaunay_rasterization.internal.render_err import render_err
-
+from icecream import ic
 
 
 @torch.no_grad()
@@ -27,7 +27,6 @@ def determine_cull_mask(
             target, cam, model,
             scene_scaling=model.scene_scaling,
             tile_size=args.tile_size,
-            lambda_ssim=0,
             # glo=glo_list(torch.LongTensor([cam.uid]).to(device))
         )
 
@@ -36,7 +35,6 @@ def determine_cull_mask(
         # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
         peak_contrib = torch.maximum(max_T, peak_contrib)
 
-    tet_density = model.calc_tet_density()
     mask = ((peak_contrib > args.contrib_threshold))
     return mask
 
@@ -131,7 +129,6 @@ class RenderStats(NamedTuple):
     tet_moments: torch.Tensor           # (T, 4)
     tet_view_count: torch.Tensor             # (T,)
     peak_contrib: torch.Tensor              # (T,)
-    total_err: torch.Tensor
     top_ssim: torch.Tensor
     top_size: torch.Tensor
 
@@ -152,7 +149,6 @@ def collect_render_stats(
 
     top_ssim = torch.zeros((n_tets, 2), device=device)
     top_size = torch.zeros((n_tets, 2), device=device)
-    total_err = torch.zeros((n_tets), device=device)
     peak_contrib = torch.zeros((n_tets), device=device)
     within_var_rays = torch.zeros((n_tets, 2, 6), device=device)
     total_var_moments = torch.zeros((n_tets, 3), device=device)
@@ -162,12 +158,7 @@ def collect_render_stats(
     for cam in sampled_cameras:
         target = cam.original_image.cuda()
 
-        image_votes, extras = render_err(
-            target, cam, model,
-            scene_scaling=model.scene_scaling,
-            tile_size=args.tile_size,
-            lambda_ssim=args.clone_lambda_ssim
-        )
+        image_votes, extras = render_err( target, cam, model, tile_size=args.tile_size)
 
         tc = extras["tet_count"][..., 0]
         max_T = extras["tet_count"][..., 1].float() / 65535
@@ -179,11 +170,9 @@ def collect_render_stats(
 
         # --- Moments (s0: sum of T, s1: sum of err, s2: sum of err^2)
         image_T, image_err, image_err2 = image_votes[:, 0], image_votes[:, 1], image_votes[:, 2]
-        # total_T_p, image_err, image_err2 = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
-        _, image_Terr, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
+        _, _, image_ssim = image_votes[:, 3], image_votes[:, 4], image_votes[:, 5]
         N = tc
         image_ssim[~update_mask] = 0
-        total_err += image_Terr
 
         # -------- Within-Image Variance (Top-2 per tet) -----------------------
         within_var_mu = safe_math.safe_div(image_err, N)
@@ -191,20 +180,15 @@ def collect_render_stats(
         within_var_std[N < 10] = 0
         within_var_std[~update_mask] = 0 # Use the unified mask
 
-        within_var_votes = image_T * within_var_std
-
         # ray buffer: (enter | exit) → (N, 6)
         w = image_votes[:, 12:13]
         seg_exit = safe_math.safe_div(image_votes[:, 9:12], w)
         seg_enter = safe_math.safe_div(image_votes[:, 6:9], w)
 
-        # keep top-2 candidates per tet across all views
+        image_ssim = image_ssim / tc.clip(min=1)
 
+        # keep top-2 candidates per tet across all views
         top_ssim, idx_sorted = torch.cat([top_ssim[:, :2], image_ssim.reshape(-1, 1)], dim=1).sort(1, descending=True)
-        top_size = torch.gather(
-            torch.cat([top_size, tc.reshape(-1, 1)], dim=1), 1,
-            idx_sorted[:, :2]
-        )
 
         # -------- Other stats -------------------------------------------------
         tet_moments[update_mask, :3] += image_votes[update_mask, 13:16]
@@ -248,7 +232,6 @@ def collect_render_stats(
         total_var_moments = total_var_moments,
         tet_moments = tet_moments,
         tet_view_count = tet_view_count,
-        total_err = total_err,
         top_ssim = top_ssim[:, :2],
         top_size = top_size[:, :2],
         peak_contrib = peak_contrib # used for determining what to clone
@@ -275,16 +258,16 @@ def apply_densification(
     total_var_std[s0_t < 1] = 0
 
     N_b = stats.tet_view_count # Num views
-    within_var = stats.top_ssim.sum(dim=1) / stats.top_size.sum(dim=1).clip(min=1).sqrt()
-    total_var = stats.total_err * total_var_std
+    within_var = (stats.top_ssim).sum(dim=1)
+    total_var = s0_t * total_var_std
     total_var[(N_b < 2) | (s0_t < 1)] = 0
 
     # --- Masking and target calculation --------------------------------------
     mask_alive = stats.peak_contrib > args.clone_min_contrib
-    total_var[~mask_alive] = 0
-    within_var[~mask_alive] = 0
+    total_var[stats.peak_contrib < args.clone_min_contrib] = 0
+    within_var[stats.peak_contrib < args.split_min_contrib] = 0
 
-    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=stats.total_err.device)
+    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=device)
     indices = model.indices.long()
     reduce_type = "sum"
     mask_alive_i = mask_alive.int()
@@ -293,37 +276,34 @@ def apply_densification(
     keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
     keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
 
-    target_addition = min(target_addition, stats.tet_view_count.shape[0])
+    target_addition = int(min(target_addition, stats.tet_view_count.shape[0]))
     if target_addition < 0:
         return
 
-    target_total = int(args.percent_total * target_addition)
-    target_within = int(args.percent_within * target_addition)
 
-    grow_mask = torch.zeros_like(total_var, dtype=torch.bool)
-    within_mask = torch.zeros_like(grow_mask)
+    total_mask = torch.zeros_like(total_var, dtype=torch.bool)
+    within_mask = torch.zeros_like(total_mask)
 
-    temp_total_score = total_var.clone()
-    temp_within_score = within_var.clone()
+    # if target_total > 0:
+    #     top_total = torch.topk(temp_total_score, target_total).indices
+    #     ic(temp_total_score[top_total].min())
+    #     total_mask[top_total] = temp_total_score[top_total] > 0
+    #     temp_within_score[total_mask] = 0
 
-    if target_total > 0:
-        top_total = torch.topk(temp_total_score, target_total).indices
-        grow_mask[top_total] = temp_total_score[top_total] > 0
-        temp_within_score[grow_mask] = 0
-
-    if target_within > 0:
-        top_within = torch.topk(temp_within_score, target_within).indices
-        within_mask[top_within] = temp_within_score[top_within] > 0
+    # if target_within > 0:
+    #     top_within = torch.topk(temp_within_score, target_within).indices
+    #     ic(temp_within_score[top_within].min())
+    #     within_mask[top_within] = temp_within_score[top_within] > 0
     
-    clone_mask = within_mask | grow_mask
+    # clone_mask = within_mask | total_mask
 
     if args.output_path is not None:
 
-        f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
-        color = torch.rand_like(f[:, :3])
-        # color = rgb + 0.5#torch.rand_like(f[:, :3])
-        f[:, :3] = color
-        f[:, 3] *= 2.0    # alpha
+        # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
+        # color = torch.rand_like(f[:, :3])
+        # # color = rgb + 0.5#torch.rand_like(f[:, :3])
+        # f[:, :3] = color
+        # f[:, 3] *= 2.0    # alpha
         # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
         #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
         # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
@@ -340,34 +320,41 @@ def apply_densification(
         imageio.imwrite(args.output_path / f"im{iteration}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 
+    within_mask = (within_var > args.within_thresh)
+    total_mask = (total_var > args.total_thresh)
+    clone_mask = within_mask | total_mask
+    if clone_mask.sum() > target_addition:
+        true_indices = clone_mask.nonzero().squeeze(-1)
+        perm = torch.randperm(true_indices.size(0))
+        selected_indices = true_indices[perm[:target_addition]]
+        
+        clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
+        clone_mask[selected_indices] = True
 
     clone_indices = model.indices[clone_mask]
     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
-    grow_point = safe_math.safe_div(
-        stats.tet_moments[:, :3],
-        stats.tet_moments[:, 3:4]
-    )
-    split_point[bad] = grow_point[bad]
+    # grow_point = safe_math.safe_div(
+    #     stats.tet_moments[:, :3],
+    #     stats.tet_moments[:, 3:4]
+    # )
+    # split_point[bad] = grow_point[bad]
     split_point = split_point[clone_mask]
     bad = bad[clone_mask]
     barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
     barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-    split_point[bad] = random_locations[bad]    # fall back
+    # split_point[bad] = random_locations[bad]    # fall back
 
-    tet_optim.split(clone_indices,
-                    split_point,
-                    **args.as_dict())
-    keep_verts = keep_verts > 0
-    keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
-    print(f"Pruned: {(~keep_verts).sum()}")
+    tet_optim.split(split_point, **args.as_dict())
+    # keep_verts = keep_verts > 0
+    # keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
+    # print(f"Pruned: {(~keep_verts).sum()}")
     # tet_optim.remove_points(keep_verts.reshape(-1))
 
     gc.collect()
     torch.cuda.empty_cache()
 
     print(
-        f"#Grow: {grow_mask.sum():4d} #Split: {within_mask.sum():4d} | "
-        f"T_Total: {target_total:4d} T_Within: {target_within:4d} "
+        f"#Grow: {total_mask.sum():4d} #Split: {within_mask.sum():4d} | "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} "
     )

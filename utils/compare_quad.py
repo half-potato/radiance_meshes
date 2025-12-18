@@ -144,7 +144,7 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
     jax_dist_loss = np.asarray(jax_image[..., 4].mean())
     jax_dist_img = np.asarray(jax_image[..., 4])
     torch_dist_loss = render_pkg['distortion_loss'].cpu().detach().numpy()
-    torch_dist_img = render_pkg['distortion_img'].cpu().detach().numpy()
+    # torch_dist_img = render_pkg['distortion_img'].cpu().detach().numpy()
     diff = jax_image[..., :3] - torch_image_np
     mean_error = np.abs(diff).mean()
     max_error = np.abs(diff).max()
@@ -160,7 +160,7 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
         'jax_dist_loss': jax_dist_loss,
         'torch_dist_loss': torch_dist_loss,
         'jax_dist_img': jax_dist_img,
-        'torch_dist_img': torch_dist_img,
+        # 'torch_dist_img': torch_dist_img,
         # 'vs_tetra': vs_tetra,
         # 'circumcenter': circumcenter,
         # 'rect_tile_space': rect_tile_space,
@@ -170,7 +170,6 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
     if check_gradients:
         # Compute gradients through both implementations
         torch_loss = torch_image[..., :3].sum() + render_pkg['distortion_loss'].mean()
-        # ic(torch_loss)
         torch_loss.backward()
         
         # Store PyTorch gradients

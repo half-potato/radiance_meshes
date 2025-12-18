@@ -21,11 +21,6 @@ TILE_SIZES_HW = [(4,4)]#, (8,8), (16,16)]
 
 vertex_shader = slangtorch.loadModule(os.path.join(shaders_path, "vertex_shader.slang"))
 tile_shader = slangtorch.loadModule(os.path.join(shaders_path, "tile_shader.slang"))
-alpha_blend_shaders = {}
-for tile_height, tile_width in TILE_SIZES_HW:
-  alpha_blend_shaders[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader.slang"), 
-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
-
 alpha_blend_shaders_interp = {}
 for tile_height, tile_width in TILE_SIZES_HW:
   alpha_blend_shaders_interp[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader_interp.slang"), 

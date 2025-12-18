@@ -30,9 +30,7 @@ def gaussian_blur(img: torch.Tensor,
     return F.conv2d(img.unsqueeze(0), kernel, padding=pad,
                     groups=img.shape[0]).squeeze(0)
 
-def render_err(gt_image, camera: Camera, model, tile_size=16,
-               scene_scaling=1, min_t=0.1, lambda_ssim=0.2, 
-               **kwargs):
+def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
     device = model.device
     indices = model.indices
     vertices = model.vertices
@@ -63,7 +61,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
     except:
         pass
     cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
-    vertex_color, cell_values[mask] = model.get_cell_values(camera, mask)
+    _, cell_values[mask] = model.get_cell_values(camera, mask)
     # vertex_color, cell_values = model.get_cell_values(camera)
 
     # torch.cuda.synchronize()
@@ -103,8 +101,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         n_contributors=n_contributors,
         tcam=tcam,
     )
-    if vertex_color is not None:
-        args['vertex_color'] = vertex_color
 
     splat_kernel_with_args = shader.splat_tiled(
         **args,
@@ -119,38 +115,35 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         gridSize=(render_grid.grid_width, 
                     render_grid.grid_height, 1)
     )
-    # torch.cuda.synchronize()
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    alpha = 1-output_img.permute(2,0,1)[3, ...]
     render_img = output_img.permute(2,0,1)[:3, ...].clip(min=0, max=1)
     l1_err = ((render_img - gt_image)).mean(dim=0)
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
-    pixel_err = ((1-lambda_ssim) * l1_err + lambda_ssim * ssim_err).contiguous()
+    pixel_err = (l1_err).contiguous()
 
     mask = camera.gt_alpha_mask.cuda()
-    gt_img = (mask*gt_image).permute(1, 2, 0).contiguous()
+    gt_img = (mask*gt_image).permute(1, 2, 0)
 
     pixel_err *= mask[0]
     ssim_err *= mask[0]
-    l1_err *= mask[0]
     render_img *= mask
-
+    
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
+    assert(ssim_err.shape[0] == render_grid.image_height)
+    assert(ssim_err.shape[1] == render_grid.image_width)
+    assert(gt_img.shape[0] == render_grid.image_height)
+    assert(gt_img.shape[1] == render_grid.image_width)
 
     tet_err = torch.zeros((tet_vertices.shape[0], 16), dtype=torch.float, device=device)
     tet_count = torch.zeros((tet_vertices.shape[0], 2), dtype=torch.int32, device=device)
 
-    debug_img = torch.zeros((render_grid.image_height, 
-                                render_grid.image_width, 4), 
-                                device=device)
-
     shader.calc_tet_err(
         **args,
-        pixel_err=pixel_err,
-        ssim_err=ssim_err,
-        debug_img=debug_img,
-        gt=gt_img,
+        pixel_err=pixel_err.contiguous(),
+        ssim_err=ssim_err.contiguous(),
+        gt=gt_img.contiguous(),
         tet_err=tet_err,
         tet_count=tet_count,
     ).launchRaw(
@@ -165,8 +158,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16,
         tet_count = tet_count,
         pixel_err = pixel_err,
         ssim_err = ssim_err,
-        l1_err = l1_err,
         render_img = render_img,
         cell_values = cell_values,
-        debug_img = debug_img,
     )

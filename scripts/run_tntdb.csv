@@ -1,0 +1,5 @@
+dataset_path,image_folder
+/optane/nerf_datasets/tandt/train,images
+/optane/nerf_datasets/tandt/truck,images
+/optane/nerf_datasets/db/drjohnson,images
+/optane/nerf_datasets/db/playroom,images

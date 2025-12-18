@@ -1,6 +1,0 @@
-dataset_path	image_folder	percent_within	percent_total	 
-/optane/nerf_datasets/360/room	images_2	0	1	
-/optane/nerf_datasets/360/bicycle	images_4	0.7	0.3	--ablate_gradient
-/optane/nerf_datasets/360/room	images_2	0.7	0.3	--ablate_gradient
-/optane/nerf_datasets/360/bicycle	images_4	0.7	0.3	--ablate_circumsphere
-/optane/nerf_datasets/360/room	images_2	0.7	0.3	--ablate_circumsphere

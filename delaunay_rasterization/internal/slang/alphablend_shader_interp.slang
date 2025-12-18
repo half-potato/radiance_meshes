@@ -147,26 +147,6 @@ DistortionState5 undo_distortion_state(
     old_state.v = new_state.v - self_dist(start, end, d, T);
     return old_state;
 }
-/* 
-[Differentiable]
-float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
-{
-    float3 color_t_n = pixel_state_t_nm1.rgb + gauss_rgba_t_n.rgb * pixel_state_t_nm1.a;
-    float transmittance_t_n = pixel_state_t_nm1.a * (1 - gauss_rgba_t_n.a);
-    return float4(color_t_n, transmittance_t_n);
-}
-
-float4 undo_pixel_state(float4 pixel_state_t_n, float4 gauss_rgba_t_n)
-{
-    float transmittance_t_nm1;
-    if (1 - gauss_rgba_t_n.a < 1e-3) {
-        transmittance_t_nm1 = 1;
-    } else {
-        transmittance_t_nm1 = safe_div(pixel_state_t_n.a, (1 - gauss_rgba_t_n.a));
-    }
-    float3 color_t_nm1 = pixel_state_t_n.rgb - gauss_rgba_t_n.rgb * transmittance_t_nm1;
-    return float4(color_t_nm1, transmittance_t_nm1);
-} */
 
 #define LOG_EPS 1e-6f
 
@@ -183,11 +163,8 @@ float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
 float4 undo_pixel_state(float4 pixel_state_t_n, float4 gauss_rgba_t_n)
 {
     float log_transmittance_t_nm1 = pixel_state_t_n.a + gauss_rgba_t_n.a;
-
     float transmittance_t_nm1 = safe_exp(log_transmittance_t_nm1);
-    
     float3 color_t_nm1 = pixel_state_t_n.rgb - gauss_rgba_t_n.rgb * transmittance_t_nm1;
-    
     return float4(color_t_nm1, log_transmittance_t_nm1);
 }
 
@@ -258,15 +235,14 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     //bool print = thread_rank == 0;
     bool print = false;
 
-
     Ray ray = get_ray(cam, center_pix_coord);
+    int exit_face;
     // if (print) {
     //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
     // }
 
     int32_t local_n_contrib = 0;
     // int32_t low = 0;
-    int countdown = 1;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
@@ -291,7 +267,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                     ao = new_ao;
                     // if (new_ao.rgba.a < 1./255.f) {
-                    if (new_ao.rgba.a < -9) {
+                    if (new_ao.rgba.a < -5.5) {
                         thread_active = false;
                         break;
                     }
@@ -356,6 +332,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = {current_pixel_state, curr_distortion_state, current_xyzd_state};
 
     Ray ray = get_ray(cam, center_pix_coord);
+    int exit_face;
 
     DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
 
@@ -394,12 +371,10 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                     bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
                     float midpt = tetra_ctrl.dist.x;
-                    float grad_scale = 1;//min(1, midpt*midpt);// / scene_scaling / scene_scaling);
-                    //float grad_scale = midpt*midpt / scene_scaling / scene_scaling;
                     CtrlPt.Differential d_tetra_scale = {
-                        grad_scale * dp_tetra_ctrl.d.rgba,
-                        grad_scale * dp_tetra_ctrl.d.dist,
-                        grad_scale * dp_tetra_ctrl.d.density,
+                        dp_tetra_ctrl.d.rgba,
+                        dp_tetra_ctrl.d.dist,
+                        dp_tetra_ctrl.d.density,
                     };
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, dp_g.d);
@@ -479,13 +454,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
     }
 }
 
-struct VarInfo {
-    float S0, S1, S2;
-    float2 dist;
-    int g_idx;
-};
-
-VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   TensorView<int32_t> indices,
                   TensorView<float> vertices,
                   TensorView<float> tet_density,
@@ -514,16 +483,13 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
 
-
     Ray ray = get_ray(cam, center_pix_coord);
+    int exit_face;
 
     float max_split_alpha = 0.f;
     float max_grow_alpha = 0.f;
-    VarInfo split_info = {0.f, 0.f, 0.f, -1};
 
     int32_t local_n_contrib = 0;
-    // int32_t low = 0;
-    int countdown = 1;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
@@ -548,14 +514,11 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     //if (tetra_ctrl.rgba.a < 1/255.f) continue;
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
-                    // calc grad scale to remove floaters
-                    float grad_scale = 1;//min(1, tetra_ctrl.dist.x*tetra_ctrl.dist.x);
-
                     float trans = exp(ao.rgba.a);
-                    float T = grad_scale * trans * tetra_ctrl.rgba.a;
-                    float T_p = grad_scale * trans;
-                    // grow and split quantities
-                    float err = pixel_err;
+                    float T = trans * tetra_ctrl.rgba.a;
+                    // float T = safe_exp(new_ao.rgba.a);
+                    // float3 diff = new_ao.rgba.rgb - gt_pixel;
+                    // float mismatch = (diff.x + diff.y + diff.z)/3;
                     float mismatch = pixel_err;
 
                     float old_val;
@@ -564,9 +527,8 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
-                    T_p = 1;
-                    tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
-                    tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(mismatch), old_val);
+                    // tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
+                    // tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(pixel_err), old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 5), T * ssim_err, old_val);
 
                     float w = T;
@@ -581,7 +543,6 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 12), w, old_val);
 
                     float3 centroid = 0.5*(tetra_ctrl.dist.x+tetra_ctrl.dist.y) * ray.d + ray.o;
-                    // float3 centroid = tetra_ctrl.dist.y * ray.d + ray.o;
                     tet_err.InterlockedAdd(uint2(g_idx, 13), w * centroid.x, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 14), w * centroid.y, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 15), w * centroid.z, old_val);
@@ -591,7 +552,7 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_count.InterlockedMax(uint2(g_idx, 1), T_int, old_ival);
 
                     ao = new_ao;
-                    if (new_ao.rgba.a < -9) {
+                    if (new_ao.rgba.a < -5.5) {
                         // This Splat never registred so we subtract it before we break.
                         // local_n_contrib--;
                         thread_active = false;
@@ -602,7 +563,6 @@ VarInfo kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         }
         splats_left_to_process -= block_size;
     }
-    return split_info;
 }
 
 [AutoPyBindCUDA]
@@ -617,7 +577,6 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                  TensorView<float> pixel_err,
                  TensorView<float> ssim_err,
                  TensorView<float> tet_err,
-                 TensorView<float> debug_img,
                  TensorView<int32_t> tet_count,
                  TensorView<int32_t> n_contributors,
                  TensorCamera tcam)
@@ -632,12 +591,11 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
     bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
-
-
     float this_pixel_err = 0;
     float this_ssim_err = 0;
     float3 this_gt = {0.f, 0.f, 0.f};
     if (is_inside) {
+
         this_pixel_err = pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
         this_ssim_err = ssim_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
         this_gt = {
@@ -645,9 +603,9 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
             gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
             gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
         };
-    }
 
-    VarInfo vi = kern_calc_tet_err(
+    }
+    kern_calc_tet_err(
         sorted_gauss_idx,
         indices,
         vertices,
@@ -663,10 +621,4 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         this_pixel_err,
         this_ssim_err,
         this_gt);
-    if (is_inside) {
-      debug_img[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)] = vi.S0;
-      debug_img[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)] = vi.S1;
-      debug_img[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)] = vi.S2;
-      debug_img[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)] = (float)vi.g_idx;
-    }
 }

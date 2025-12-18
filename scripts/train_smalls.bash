@@ -1,0 +1,13 @@
+within_thresh	total_thresh	budget	voxel_size	iterations	freeze_start	lambda_sh	dataset_path	image_folder	max_sh_deg
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/bicycle	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/garden	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/stump	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/treehill	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/flowers	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/room	images_2	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/counter	images_2	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/kitchen	images_2	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/360/bonsai	images_2	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/zipnerf_ud/london	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/zipnerf_ud/berlin	images_4	1
+4	15	450000	0.1	10000	8000	1.00E-02	/data/nerf_datasets/zipnerf_ud/nyc	images_4	1

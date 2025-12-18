@@ -1,6 +1,0 @@
- ,dataset_path,error,gpu_id,image_folder,output_folder,percent_total,percent_within,psnr,test_LPIPS,test_PSNR,test_SSIM
---ablate_gradient,/optane/nerf_datasets/360/bicycle,,2,images_4,output/bicycle_ifimages_4_pw0.7_pt0.3_ag,0.3,0.7,23.760659748901983,0.38344696164131165,24.098234176635742,0.6870784163475037
---ablate_circumsphere,/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,2,images_4,output/bicycle_ifimages_4_pw0.7_pt0.3_ac,0.3,0.7,,,,
---ablate_circumsphere,/optane/nerf_datasets/360/room,Process failed and no JSON output file found,2,images_2,output/room_ifimages_2_pw0.7_pt0.3_ac,0.3,0.7,,,,
---ablate_gradient,/optane/nerf_datasets/360/room,,3,images_2,output/room_ifimages_2_pw0.7_pt0.3_ag,0.3,0.7,32.78760171991828,0.2962351441383362,31.078598022460938,0.9162594676017761
-,/optane/nerf_datasets/360/room,,1,images_2,output/room_ifimages_2_pw0_pt1,1,0,32.62033994348044,0.3018382489681244,30.884878158569336,0.9123889207839966

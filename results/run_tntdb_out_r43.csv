@@ -1,0 +1,5 @@
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/db/drjohnson,3,images,output/drjohnson_ifimages_r43,34.925657974564004,0.3427799344062805,29.30735206604004,0.9056873917579651
+/optane/nerf_datasets/tandt/truck,2,images,output/truck_ifimages_r43,26.5992139081463,0.16499413549900055,24.525278091430664,0.8830525279045105
+/optane/nerf_datasets/db/playroom,3,images,output/playroom_ifimages_r43,35.601329606035925,0.3067795932292938,30.361433029174805,0.9097645878791809
+/optane/nerf_datasets/tandt/train,1,images,output/train_ifimages_r43,26.287041523114887,0.23376405239105225,21.424915313720703,0.8295778036117554

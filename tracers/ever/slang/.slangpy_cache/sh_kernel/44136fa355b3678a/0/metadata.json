@@ -1,0 +1,74 @@
+{
+    "cpp": {
+        "options": [],
+        "deps": [
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh_kernel.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/safe-math.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/tensor-util.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh-half.slang",
+                1738369897.4220328
+            ],
+            [
+                "/usr/local/bin/slangc",
+                1704337331.0
+            ],
+            [
+                "/usr/local/bin/libslang.so",
+                1703805635.7835217
+            ]
+        ],
+        "version": "1.1.20",
+        "includePaths": []
+    },
+    "cuda": {
+        "options": [],
+        "deps": [
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh_kernel.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/safe-math.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/tensor-util.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh.slang",
+                1738369897.4220328
+            ],
+            [
+                "/home/amai/ever_training/ever/splinetracers/slang/sh-half.slang",
+                1738369897.4220328
+            ],
+            [
+                "/usr/local/bin/slangc",
+                1704337331.0
+            ],
+            [
+                "/usr/local/bin/libslang.so",
+                1703805635.7835217
+            ]
+        ],
+        "version": "1.1.20",
+        "includePaths": []
+    },
+    "moduleName": "_slangpy_sh_kernel_44136fa355b3678a",
+    "moduleBinary": "/home/amai/ever_training/ever/splinetracers/slang/.slangpy_cache/sh_kernel/44136fa355b3678a/0/_slangpy_sh_kernel_44136fa355b3678a.pyd"
+}

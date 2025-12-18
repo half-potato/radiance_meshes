@@ -309,3 +309,37 @@ def render_camera(vertices, indices, vertex_color, tet_density, height, width, v
     
     image, extras = batched_render(ray_origins, ray_directions)
     return image[..., 0, :], extras
+
+@functools.partial(jax.jit)
+def render_rays(vertices, indices, vertex_color, tet_density, ray_origins, ray_directions, viewmat, tmin, linspace):
+    # ray_origins, ray_directions: (N, 3)
+    """Vectorized camera renderer using JAX."""
+    # Extract camera position and convert inputs
+    cam_pos = jnp.linalg.inv(viewmat)[:3, 3]
+    
+    # Generate sample points
+    # point_dist = jnp.linalg.norm(cam_pos.reshape(1, 3) - vertices, axis=1)
+    point_dist = viewmat @ jnp.concatenate([vertices.T, jnp.ones_like(vertices.T[:1, :])], axis=0)
+    # test_pts = point_dist[:3] / point_dist[2:3]
+    # jax.debug.print("NDC: {}\ncam_space: {}", test_pts, point_dist)
+    
+    start = tmin
+    end = point_dist[2].max()*1.2
+    # jax.debug.print("start: {} - {}", start, end)
+    tdist = (end - start) * linspace + start
+    
+    # Vectorize rendering over all pixels
+    batched_render = jax.vmap(
+        jax.vmap(
+            lambda o, d: render_tetrahedra_volume(
+                o[None], d[None], tdist,
+                vertices, indices, tet_density.reshape(-1, 1), vertex_color,
+                return_extras=True
+            ),
+            in_axes=(0, 0)
+        ),
+        in_axes=(0, 0)
+    )
+    
+    image, extras = batched_render(ray_origins, ray_directions)
+    return image[..., 0, :], extras

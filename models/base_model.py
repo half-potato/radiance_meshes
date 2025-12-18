@@ -37,7 +37,7 @@ class BaseModel(nn.Module):
             start = 0
             for start in range(0, indices.shape[0], self.chunk_size):
                 end = min(start + self.chunk_size, indices.shape[0])
-                circumcenters, normalized, density, rgb, grd, sh = self.compute_batch_features(
+                circumcenters, density, rgb, grd, sh = self.compute_batch_features(
                     vertices, indices, start, end, circumcenters=all_circumcenters)
                 dvrgbs = activate_output(camera.camera_center.to(self.device),
                                          density, rgb, grd, sh, indices[start:end],
@@ -127,8 +127,8 @@ class BaseModel(nn.Module):
         sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
 
         tetra_dict = {}
-        tetra_dict["full_indices"] = self.full_indices.cpu().numpy().astype(np.int32)
-        tetra_dict["mask"] = self.mask.cpu().numpy().astype(np.uint8)
+        tetra_dict["indices"] = self.indices.cpu().numpy().astype(np.int32)
+        # tetra_dict["mask"] = self.mask.cpu().numpy().astype(np.uint8)
         tetra_dict["s"] = np.ascontiguousarray(densities)
         for i, co in enumerate(["x", "y", "z"]):
             tetra_dict[f"grd_{co}"]         = np.ascontiguousarray(grds[:, i])
