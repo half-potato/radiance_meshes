@@ -507,7 +507,7 @@ class Model(BaseModel):
         for start in range(0, self.indices.shape[0], self.chunk_size):
             end = min(start + self.chunk_size, self.indices.shape[0])
             
-            _, density, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
+            _, density, _, _, _, _ = self.compute_batch_features(verts, self.indices, start, end)
 
             densities.append(density.reshape(-1))
         return torch.cat(densities)
