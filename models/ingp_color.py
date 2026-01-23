@@ -6,7 +6,7 @@ from gdel3d import Del
 from torch import nn
 from icecream import ic
 
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, get_tet_adjacency
 from utils import topo_utils
 from utils.contraction import contract_mean_std
 
@@ -16,7 +16,7 @@ from torch.utils.checkpoint import checkpoint
 from pathlib import Path
 import numpy as np
 from utils.args import Args
-from scipy.spatial import  Delaunay, ConvexHull
+from scipy.spatial import  Delaunay
 import open3d as o3d
 from utils.model_util import *
 from models.base_model import BaseModel
@@ -25,6 +25,27 @@ from utils.hashgrid import HashEmbedderOptimized
 from utils import hashgrid
 import tinycudann as tcnn
 import time
+
+def get_tet_adjacency_from_scipy(tri):
+    # tri.simplices is (N, 4)
+    # tri.neighbors is (N, 4)
+    
+    tets = tri.simplices
+    neighbors = tri.neighbors
+    N = tets.shape[0]
+
+    # Define the local face indices (which vertices form face j)
+    # Face 0: vertices [1, 2, 3], Face 1: [0, 2, 3], etc.
+    face_map = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
+    # 1. Create all faces and their corresponding tet indices
+    # We only take faces where the current tet index < neighbor index
+    # or the neighbor is -1 (boundary) to avoid double-counting.
+    
+    tet_ids, face_ids = np.where((np.arange(N)[:, None] < neighbors) | (neighbors == -1))
+    faces = tets[tet_ids[:, None], face_map[face_ids]]
+    side_index = np.stack([tet_ids, neighbors[tet_ids, face_ids]], axis=1)
+    
+    return faces, side_index
 
 torch.set_float32_matmul_precision('high')
 
@@ -228,6 +249,7 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
+        # density = torch.nn.functional.softplus(sigma+self.density_offset)
         # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
         grd = field_samples.reshape(-1, 1, 3)
         grd = grd / ((grd * grd).sum(dim=-1, keepdim=True) + 1).sqrt()
@@ -547,12 +569,19 @@ class Model(BaseModel):
     def sh_up(self):
         self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
 
+    def compute_adjacency(self):
+        self.faces, self.side_index = get_tet_adjacency(self.indices)
+
     @torch.no_grad()
     def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
         torch.cuda.empty_cache()
         verts = self.vertices
         if high_precision:
-            indices_np = Delaunay(verts.detach().cpu().numpy()).simplices.astype(np.int32)
+            d = Delaunay(verts.detach().cpu().numpy())
+            faces, side_index = get_tet_adjacency_from_scipy(d)
+            self.faces = torch.as_tensor(faces).cuda()
+            self.side_index = torch.as_tensor(side_index).cuda()
+            indices_np = d.simplices.astype(np.int32)
             # self.indices = torch.tensor(indices_np, device=verts.device).int().cuda()
         else:
             v = Del(verts.shape[0])
@@ -568,6 +597,8 @@ class Model(BaseModel):
         reverse_mask = vols < 0
         if reverse_mask.sum() > 0:
             indices[reverse_mask] = indices[reverse_mask][:, [1, 0, 2, 3]]
+        if not high_precision:
+            self.compute_adjacency()
 
         # Cull tets with low density
         # self.full_indices = indices.clone()

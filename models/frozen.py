@@ -18,6 +18,7 @@ from utils import mesh_util
 from utils.args import Args
 from models.base_model import BaseModel
 from dtlookup import lookup_inds
+from utils.topo_utils import get_tet_adjacency
 
 
 class FrozenTetModel(BaseModel):
@@ -224,6 +225,13 @@ class FrozenTetModel(BaseModel):
             self.max_sh_deg, self.max_sh_deg,
         )
         return sh, cell_output
+
+    def compute_adjacency(self):
+        vols = tet_volumes(self.vertices[self.indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            self.indices[reverse_mask] = self.indices[reverse_mask][:, [1, 0, 2, 3]]
+        self.faces, self.side_index = get_tet_adjacency(self.indices)
 
     @torch.no_grad()
     def update_triangulation(self, old_vertices, old_indices, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):

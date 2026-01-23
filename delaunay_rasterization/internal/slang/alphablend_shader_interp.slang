@@ -21,7 +21,6 @@ struct DistortionState5 : IDifferentiable {
 
 [Differentiable]
 float tukey_power_ladder(float x, float p) {
-  // Compute sign(x) * |p - 1|/p * ((|x|/|p-1| + 1)^p - 1)
   if (p == 1) {
     return x;
   }
@@ -35,38 +34,6 @@ float tukey_power_ladder(float x, float p) {
 float safe_exp4alpha(float x) {
     return safe_clip(safe_exp(x), 0, 1);
 }
-
-// [Differentiable]
-// float moment_0_int(float a, float b, float s1, float T) {
-//     return T * safe_div((-safe_expm1(s1*(a - b))),s1);
-// }
-// [Differentiable]
-// float moment_1_int(float a, float b, float s1, float T) {
-//     float s12 = s1*s1;
-//     if (s12 < 1e-6) {
-//         return T * 0.5 * max(b * b - a * a, 0);
-//     } else {
-//         // return (a*s1 - (b*s1 + 1)*safe_exp4alpha(s1*(a - b)) + 1) / (s1*s1);
-//         return T * max(
-//             - safe_div(safe_expm1(s1*(a - b)), s12)
-//             + safe_div(a - b*safe_exp(s1*(a - b)), s1), 0);
-//     }
-// }
-// [Differentiable]
-// float self_dist(float a, float b, float s, float T) {
-//     float dt = (a - b);
-//     float ds = s * dt;
-//     float s3 = s*s*s;
-//     if (abs(ds) < 1e-4 || s3 < 1e-5) {
-//         return T * T * max(-1 / 3 * pow(dt, 3), 0);
-//     } else {
-//         return T * T * max(
-//             safe_div(
-//                 ( 2 * s * (a - b) * exp(ds) - safe_expm1(2 * ds)),
-//                 s3),
-//             0);
-//     }
-// }
 
 [Differentiable]
 float moment_0_int(float a, float b, float s1, float T) {
@@ -89,16 +56,12 @@ DistortionState5 update_distortion_state(
     float density,
     float2 dist)
 {
-    // no_diff float start = tukey_power_ladder(500*dist.x, -0.1);
-    // no_diff float end = tukey_power_ladder(500*dist.y, -0.1);
-    // float start = (2*dist.x) / (2+dist.x);
-    // float end = (2*dist.y) / (2+dist.y);
     float start = dist.x;
-    float end = dist.y;
+    float end = max(dist.x, dist.y);
     float scaling = 1;
     float d = density;
 
-    float m0 = moment_0_int(start, end, d, T); // just weight
+    float m0 = moment_0_int(start, end, d, T);
     float m1 = moment_1_int(start, end, d, T);
 
     DistortionState5 new_state;
@@ -106,9 +69,7 @@ DistortionState5 update_distortion_state(
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    // new_state.v = old_state.v + T * T * self_dist(start, end, d);
     new_state.v = old_state.v + self_dist(start, end, d, T);
-    // printf("%f - %f, d: %f, v: %f T: %f, m0: %f, m1: %f\n", start, end, d, new_state.v, T, m0, m1);
 
     return new_state;
 }
@@ -120,7 +81,7 @@ DistortionState5 undo_distortion_state(
     float2 dist)
 {
     float start = dist.x;
-    float end = dist.y;
+    float end = max(dist.x, dist.y);
     float scaling = 1;
     float d = density;
 
@@ -191,7 +152,7 @@ AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
     };
 }
 
-[BackwardDerivative(bwd_alpha_blend)] // Use a custom derivative so that we can hand-write the structure of the reverse loop
+[BackwardDerivative(bwd_alpha_blend)]
 AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                    TensorView<int32_t> indices,
                    DiffTensorView vertices,
@@ -220,31 +181,23 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
-    //bool print = thread_rank == 0;
     bool print = false;
 
     Ray ray = get_ray(cam, center_pix_coord);
-    int exit_face;
-    // if (print) {
-    //     printf("ray_o: %f, %f, %f, ray_d: %f, %f, %f\n", ray.o.x, ray.o.y, ray.o.z, ray.d.x, ray.d.y, ray.d.z);
-    // }
-
     int32_t local_n_contrib = 0;
-    // int32_t low = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
-        // Collectively fetch per-Gaussian data from global to shared
         AllMemoryBarrierWithGroupSync();
         int splat_pointer_offset = i * block_size + thread_rank;
         if (tile_idx_start + splat_pointer_offset < tile_idx_end)
         {
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
-            if (coll_id >= indices.size(0)) {
-                coll_id = 0;
-            }
-            collected_idx[thread_rank] = coll_id;
-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
+            bool valid = coll_id < indices.size(0);
+            collected_idx[thread_rank] = valid ? coll_id : 0;
+            SplatTetrahedra_interp g = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_density);
+            if (!valid) g.density = 0;
+            collected_splats[thread_rank] = g;
         }
         AllMemoryBarrierWithGroupSync();
         if (thread_active) {
@@ -253,11 +206,10 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 local_n_contrib++;
                 SplatTetrahedra_interp g = collected_splats[j];
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
+                    tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
-
                     ao = new_ao;
-                    // if (new_ao.rgba.a < 1./255.f) {
                     if (new_ao.rgba.a < -5.5) {
                         thread_active = false;
                         break;
@@ -292,7 +244,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      AlphaOut d_ao)
 {
     float2 center_pix_coord = {pix_coord.x+ray_jitter_x, pix_coord.y+ray_jitter_y};
-    // Load the final pixel state.
     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     uint32_t block_size = cam.tile_height * cam.tile_width;
     const int rounds = ((tile_idx_end - tile_idx_start + block_size - 1) / block_size);
@@ -323,24 +274,19 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = {current_pixel_state, curr_distortion_state, current_xyzd_state};
 
     Ray ray = get_ray(cam, center_pix_coord);
-    int exit_face;
-
-    DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
-
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
     for (int i = 0; i < rounds; i++)
     {
-        // Collectively fetch per-Gaussian data from global to shared
         AllMemoryBarrierWithGroupSync();
         int progress = i * block_size + thread_rank;
         if (tile_idx_start + progress < tile_idx_end)
         {
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_end - progress - 1]);
-            if (coll_id >= indices.size(0)) {
-                coll_id = 0;
-            }
-            collected_idx[thread_rank] = coll_id;
-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
+            bool valid = coll_id < indices.size(0);
+            collected_idx[thread_rank] = valid ? coll_id : 0;
+            SplatTetrahedra_interp splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_density);
+            if (!valid) splat.density = 0;
+            collected_splats[thread_rank] = splat;
         }
         AllMemoryBarrierWithGroupSync();
         if (is_inside) {
@@ -353,10 +299,10 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra_interp g = collected_splats[j];
 
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
+                    tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
                     ao = undo_alpha_out(ao, tetra_ctrl);
 
-                    // Back-prop automatically through blending and gaussian evaluation.
                     DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
                     DifferentialPair<Ray> dp_ray = diffPair(ray);
                     DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
@@ -364,7 +310,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                     bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
-                    float midpt = tetra_ctrl.dist.x;
                     CtrlPt.Differential d_tetra_scale = {
                         dp_tetra_ctrl.d.rgba,
                         dp_tetra_ctrl.d.dist,
@@ -372,7 +317,6 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                     };
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, dp_g.d);
-
                 }
             }
         }
@@ -402,6 +346,9 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
     Camera cam = no_diff load_tensor_camera(tcam);
 
     uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
+    if (tile_idx >= tile_ranges.size(0)) {
+        return;
+    }
     uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
@@ -478,26 +425,20 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
 
     Ray ray = get_ray(cam, center_pix_coord);
-    int exit_face;
-
-    float max_split_alpha = 0.f;
-    float max_grow_alpha = 0.f;
-
     int32_t local_n_contrib = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
-        // Collectively fetch per-Gaussian data from global to shared
         AllMemoryBarrierWithGroupSync();
         int splat_pointer_offset = i * block_size + thread_rank;
         if (tile_idx_start + splat_pointer_offset < tile_idx_end)
         {
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
-            if (coll_id >= indices.size(0)) {
-                coll_id = 0;
-            }
-            collected_idx[thread_rank] = coll_id;
-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
+            bool valid = coll_id < indices.size(0);
+            collected_idx[thread_rank] = valid ? coll_id : 0;
+            SplatTetrahedra_interp splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_density);
+            if (!valid) splat.density = 0;
+            collected_splats[thread_rank] = splat;
         }
         AllMemoryBarrierWithGroupSync();
         if (thread_active) {
@@ -507,15 +448,12 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra_interp g = collected_splats[j];
                 uint32_t g_idx = collected_idx[j];
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
-                    //if (tetra_ctrl.rgba.a < 1/255.f) continue;
+                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
+                    tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
                     float trans = exp(ao.rgba.a);
                     float T = trans * tetra_ctrl.rgba.a;
-                    // float T = safe_exp(new_ao.rgba.a);
-                    // float3 diff = new_ao.rgba.rgb - gt_pixel;
-                    // float mismatch = (diff.x + diff.y + diff.z)/3;
                     float mismatch = pixel_err;
 
                     float old_val;
@@ -524,8 +462,6 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
-                    // tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
-                    // tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(pixel_err), old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 5), T * ssim_err, old_val);
 
                     float w = T;
@@ -550,8 +486,6 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
                     ao = new_ao;
                     if (new_ao.rgba.a < -5.5) {
-                        // This Splat never registred so we subtract it before we break.
-                        // local_n_contrib--;
                         thread_active = false;
                         break;
                     }
@@ -584,6 +518,9 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
     Camera cam = load_tensor_camera(tcam);
     uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
+    if (tile_idx >= tile_ranges.size(0)) {
+        return;
+    }
     uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
@@ -592,7 +529,6 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     float this_ssim_err = 0;
     float3 this_gt = {0.f, 0.f, 0.f};
     if (is_inside) {
-
         this_pixel_err = pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
         this_ssim_err = ssim_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
         this_gt = {
@@ -600,7 +536,6 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
             gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
             gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
         };
-
     }
     kern_calc_tet_err(
         sorted_gauss_idx,

@@ -335,6 +335,12 @@ video_writer.release()
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
 
+model.save2ply(args.output_path / "ckpt.ply")
+sd = model.state_dict()
+sd['indices'] = model.indices
+sd['empty_indices'] = model.empty_indices
+torch.save(sd, args.output_path / "ckpt.pth")
+
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
 else:
@@ -358,9 +364,3 @@ with torch.no_grad():
         image = image.detach().cpu().numpy()
         eimages.append(pad_image2even(image))
 mediapy.write_video(args.output_path / "rotating.mp4", eimages)
-
-model.save2ply(args.output_path / "ckpt.ply")
-sd = model.state_dict()
-sd['indices'] = model.indices
-sd['empty_indices'] = model.empty_indices
-torch.save(sd, args.output_path / "ckpt.pth")
