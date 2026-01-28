@@ -8,7 +8,7 @@ dependencies = [
     "gdel3d",
     "open3d",
     "icecream>=2.1.5",
-    "imageio>=2.37.0",
+    "imageio[ffmpeg]>=2.37.0",
     "jax[cuda12]>=0.5.3",
     "matplotlib>=3.10.3",
     "mediapy>=1.2.4",

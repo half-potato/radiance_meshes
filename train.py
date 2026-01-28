@@ -35,6 +35,9 @@ import mediapy
 from utils.graphics_utils import calculate_norm_loss, depth_to_normals
 from icecream import ic
 
+# from tracers.splinetracers.tetra_splinetracer import render_rt
+# render = render_rt
+
 torch.set_num_threads(1)
 
 class CustomEncoder(json.JSONEncoder):
@@ -59,9 +62,10 @@ args.render_train = False
 args.max_sh_deg = 3
 args.sh_interval = 0
 args.sh_step = 1
+args.max_norm = 1
 
 # iNGP Settings
-args.use_tccn = False
+args.use_tcnn = False
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
 args.network_lr = 1e-3
@@ -79,10 +83,10 @@ args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 args.additional_attr = 0
 
-args.g_init=1.0
+args.g_init=1e-0
 args.s_init=1e-4
 args.d_init=0.1
-args.c_init=0.8
+args.c_init=1e-2
 
 # Vertex Settings
 args.lr_delay = 0
@@ -185,8 +189,7 @@ dschedule = list(range(args.densify_start, args.densify_end, args.densify_interv
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, device)
 
-video_writer = cv2.VideoWriter(str(args.output_path / "training.mp4"), cv2.VideoWriter_fourcc(*'mp4v'), 30,
-                               pad_hw2even(sample_camera.image_width, sample_camera.image_height))
+video_writer = imageio.get_writer(str(args.output_path / "training.mp4"), fps=10)
 
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
@@ -226,23 +229,25 @@ for iteration in progress_bar:
 
     st = time.time()
     ray_jitter = torch.rand((camera.image_height, camera.image_width, 2), device=device)
-    render_pkg = render(camera, model, scene_scaling=model.scene_scaling, ray_jitter=ray_jitter, **args.as_dict())
+    render_pkg = render(camera, model, ray_jitter=ray_jitter, **args.as_dict())
     image = render_pkg['render']
 
     l1_loss = ((target - image).abs() * gt_mask).mean()
     l2_loss = ((target - image)**2 * gt_mask).mean()
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
-    dl_loss = render_pkg['distortion_loss']
-    norm_loss = calculate_norm_loss(render_pkg['xyzd'], camera.fx, camera.fy)
+    # dl_loss = render_pkg['distortion_loss']
+    # norm_loss = calculate_norm_loss(render_pkg['xyzd'], camera.fx, camera.fy)
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
-           reg + \
-           args.lambda_dist * dl_loss + \
-           args.lambda_sh * render_pkg['sh_reg']
+           reg
+        #    args.lambda_sh * render_pkg['sh_reg']
+        #    args.lambda_dist * dl_loss + \
         #    args.lambda_norm * norm_loss + \
 
     loss.backward()
+
+    # tet_optim.clip_grad_norm_(args.max_norm)
 
     tet_optim.main_step()
     tet_optim.main_zero_grad()
@@ -260,14 +265,14 @@ for iteration in progress_bar:
     if do_sh_up:
         model.sh_up()
 
-    # if iteration % 10 == 0:
-    #     with torch.no_grad():
-    #         render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-    #         sample_image = render_pkg['render']
-    #         sample_image = sample_image.permute(1, 2, 0)
-    #         sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-    #         sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-    #         video_writer.write(pad_image2even(sample_image))
+    if iteration % 10 == 0:
+        with torch.no_grad():
+            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+            sample_image = render_pkg['render']
+            sample_image = sample_image.permute(1, 2, 0)
+            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+            # sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
+            video_writer.append_data(pad_image2even(sample_image))
 
     if do_cloning and not model.frozen:
         with torch.no_grad():
@@ -277,19 +282,19 @@ for iteration in progress_bar:
             sample_image = render_pkg['render']
             sample_image = sample_image.permute(1, 2, 0)
             sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
 
             pred_normal = depth_to_normals(render_pkg['xyzd'][..., 3:], camera.fx, camera.fy)
             # vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
             vis_normal = (render_pkg['xyzd'][..., :3] * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             vis_pred_normal = (pred_normal * 127 + 128).clamp(0, 255).byte().cpu().numpy()
-            imageio.imwrite(args.output_path / f"normal{iteration}.png",
-                            vis_normal)
+            # imageio.imwrite(args.output_path / f"normal{iteration}.png",
+            #                 vis_normal)
             imageio.imwrite(args.output_path / f"pred_normal{iteration}.png",
                             vis_pred_normal)
             # imageio.imwrite(args.output_path / f"depth{iteration}.png",
             #                 vis_depth)
-            # video_writer.write(pad_image2even(sample_image))
+            video_writer.append_data(pad_image2even(sample_image))
+            sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
 
             gc.collect()
             torch.cuda.empty_cache()
@@ -326,11 +331,11 @@ for iteration in progress_bar:
         "Mean": repr(f"{avg_psnr:>5.2f}"),
         "#V": len(model),
         "#T": model.indices.shape[0],
-        "DL": repr(f"{dl_loss:>5.2f}"),
+        # "DL": repr(f"{dl_loss:>5.2f}"),
     })
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
-video_writer.release()
+video_writer.close()
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()

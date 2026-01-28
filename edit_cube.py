@@ -25,13 +25,11 @@ import gc
 from tracers.splinetracers.tetra_splinetracer import render_rt
 
 @torch.no_grad()
-def insert_cube_conforming(model, cube_center=(0, 0, 0), cube_size=0.5, resolution=8):
-    # 1. Generate Cube Surface Geometry
-    # PLC requires a triangular surface mesh as the constraint
+def insert_cube_conforming(model, cube_center=(0, 0, 0), cube_size=0.5, resolution=32):
+    # 1. Generate Steiner points (Shell sampling)
     c = np.array(cube_center)
     s = cube_size / 2.0
     
-    # 1. Generate Steiner points (Shell sampling)
     steiner_points = []
     lin = np.linspace(-s, s, resolution)
     grid_x, grid_y = np.meshgrid(lin, lin)
@@ -46,56 +44,57 @@ def insert_cube_conforming(model, cube_center=(0, 0, 0), cube_size=0.5, resoluti
     stein_torch = torch.from_numpy(stein_np).float().to(model.device)
 
     # 2. Merge radiance mesh points with cube vertices
-    # We treat the cube faces as the boundary (f) and all points as vertices (v)
     orig_verts = model.vertices
     new_vertices = torch.vstack([stein_torch, orig_verts])
 
-    indices_np = Delaunay(new_vertices.detach().cpu().numpy()).simplices.astype(np.int32)
-    # Ensure volume is positive
-    new_indices = torch.as_tensor(indices_np).cuda()
+    # 3. Create new Delaunay triangulation
+    new_vertices_np = new_vertices.detach().cpu().numpy()
+    tri = Delaunay(new_vertices_np)
+    new_indices = torch.as_tensor(tri.simplices.astype(np.int32), device=model.device)
+    
     vols = topo_utils.tet_volumes(new_vertices[new_indices])
-    reverse_mask = vols < 0
-    if reverse_mask.sum() > 0:
-        new_indices[reverse_mask] = new_indices[reverse_mask][:, [1, 0, 2, 3]]
+    new_indices[vols < 0] = new_indices[vols < 0][:, [1, 0, 2, 3]]
 
-    ic(new_vertices.shape, new_indices.shape, new_vertices[new_indices].shape)
-    new_centroids = new_vertices[new_indices].mean(dim=1)
-    ic(new_centroids.shape)
+    # 4. Reverse Lookup: Map old attributes to new tets
+    # Only use model.indices (active tets) to match model.density shape
+    old_indices = model.indices
+    old_centroids = model.vertices[old_indices].mean(dim=1).detach().cpu().numpy()
+    
+    new_tet_indices = tri.find_simplex(old_centroids)
+    # Mask for centroids that actually landed inside a new tetrahedron
+    valid_mask = new_tet_indices != -1
+    
+    num_new_tets = new_indices.shape[0]
+    new_density = torch.zeros((num_new_tets, 1), device=model.device)
+    new_gradient = torch.zeros((num_new_tets, 1, 3), device=model.device)
+    new_rgb = torch.zeros((num_new_tets, 3), device=model.device)
+    new_sh = torch.zeros((num_new_tets, model.sh.shape[1]), dtype=torch.half, device=model.device)
 
-    indices = torch.cat([model.indices, model.empty_indices], dim=0)
-    lookup = TetrahedraLookup(indices, model.vertices, 128)
+    # Map attributes from old tets to the new tets they now reside in
+    target_ids = torch.from_numpy(new_tet_indices[valid_mask]).long().to(model.device)
+    new_density[target_ids] = model.density[valid_mask]
+    new_gradient[target_ids] = model.gradient[valid_mask]
+    new_rgb[target_ids] = model.rgb[valid_mask]
+    new_sh[target_ids] = model.sh[valid_mask]
 
     # 5. Masking: Identify tetrahedra inside the cube
-    # Define the cube bounds
+    new_centroids = new_vertices[new_indices].mean(dim=1)
     half_size = cube_size / 2.0
     min_bound = torch.tensor(cube_center, device=model.device) - half_size
     max_bound = torch.tensor(cube_center, device=model.device) + half_size
 
-    # Boolean mask for tets inside the cube
     is_inside = (new_centroids >= min_bound).all(dim=-1) & \
                 (new_centroids <= max_bound).all(dim=-1)
-
-    ic(new_centroids.shape)
-    new_ids = lookup.lookup(new_centroids.reshape(-1, 3).cuda())
-    new_density = model.density[new_ids]
     new_density[is_inside] = 0
-    new_gradient = model.gradient[new_ids]
-    new_rgb = model.rgb[new_ids]
-    new_sh = model.sh[new_ids]
-    
-    # We update the model's parameters. 
-    # Since contracted_vertices is an nn.Parameter, we replace its data.
-    with torch.no_grad():
-        # Update vertices (we treat all as contracted for simplicity here)
-        model.contracted_vertices = torch.nn.Parameter(new_vertices)
-        # ext_vertices is usually for the shell, we can clear it or re-map it
-        model.ext_vertices = torch.empty((0, 3), device=model.device)
-        ic(new_indices.dtype, new_density.dtype, new_gradient.dtype, new_rgb.dtype, model.contracted_vertices.dtype)
-        model.indices.data = new_indices.int()
-        model.density.data = new_density
-        model.gradient.data = new_gradient
-        model.rgb.data = new_rgb
-        model.sh.data = new_sh
+
+    # 6. Update Model
+    model.interior_vertices = torch.nn.Parameter(new_vertices)
+    model.ext_vertices = torch.empty((0, 3), device=model.device)
+    model.indices.data = new_indices.int()
+    model.density.data = new_density
+    model.gradient.data = new_gradient
+    model.rgb.data = new_rgb
+    model.sh.data = new_sh
         
     gc.collect()
     print(f"Mesh updated: {len(new_vertices)} vertices, {len(new_indices)} tetrahedra.")
@@ -142,19 +141,19 @@ train_cameras, test_cameras, scene_info = loader.load_dataset(
 print("Inserting cube and re-triangulating...")
 # Position the cube somewhere within your scene bounds
 center = model.center.cpu().numpy().flatten()
-# insert_cube_conforming(model, cube_center=center, cube_size=model.scene_scaling.item() * 0.2)
+insert_cube_conforming(model, cube_center=center, cube_size=model.scene_scaling.item() * 0.5)
 
 # --- NEW: Visualization ---
 # visualize_with_pyvista(nodes, elem)
 
 # ic(model.min_t)
-# model.min_t = args.min_t
-# if args.render_train:
-#     splits = zip(['train', 'test'], [train_cameras, test_cameras])
-# else:
-#     splits = zip(['test'], [test_cameras])
-# test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t=model.min_t)
-#model.save2ply(Path('test.ply'))
+model.min_t = args.min_t
+if args.render_train:
+    splits = zip(['train', 'test'], [train_cameras, test_cameras])
+else:
+    splits = zip(['test'], [test_cameras])
+test_util.evaluate_and_save(model, splits, args.output_path / 'cut', args.tile_size, min_t=model.min_t)
+model.save2ply(Path('test.ply'))
 
 model.compute_adjacency()
 
@@ -162,7 +161,7 @@ with torch.no_grad():
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render_rt(camera, model, min_t=model.min_t)
+        render_pkg = render(camera, model, min_t=model.min_t)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()

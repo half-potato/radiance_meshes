@@ -61,7 +61,7 @@ class FastTracer:
             self.gas, rayo.contiguous(), rayd.contiguous(), self.tmin, self.tmax, self.max_iters, start_tet_ids.contiguous())
         return out["color"]
 
-def render_rt(camera, model, min_t=0):
+def render_rt(camera, model, ray_jitter=None, min_t=0, **kwargs):
     indices = torch.cat([model.indices, model.empty_indices], dim=0)
     # indices = model.indices
     vertices = model.vertices
@@ -69,7 +69,7 @@ def render_rt(camera, model, min_t=0):
         vertices, model.indices, start=0, end=model.indices.shape[0])
 
     lookup = TetrahedraLookup(indices, vertices, 256)
-    cds = camera.get_camera_space_directions('cuda')
+    cds = camera.get_camera_space_directions('cuda', ray_jitter)
 
     dvrgbs = activate_output(camera.camera_center.to(model.device),
                 density, rgb, base_grd,

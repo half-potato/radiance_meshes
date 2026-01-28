@@ -1,4 +1,5 @@
 dataset_path,image_folder
+/optane/nerf_datasets/zipnerf_ud/london,images_4
 /optane/nerf_datasets/360/bicycle,images_4
 /optane/nerf_datasets/360/garden,images_4
 /optane/nerf_datasets/360/stump,images_4
@@ -12,3 +13,5 @@ dataset_path,image_folder
 /optane/nerf_datasets/tandt/truck,images
 /optane/nerf_datasets/db/drjohnson,images
 /optane/nerf_datasets/db/playroom,images
+/optane/nerf_datasets/zipnerf_ud/nyc,images_4
+/optane/nerf_datasets/zipnerf_ud/berlin,images_4
