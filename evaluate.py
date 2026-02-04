@@ -12,6 +12,7 @@ from utils.args import Args
 from utils import cam_util
 import mediapy
 from icecream import ic
+from PIL import Image
 
 args = Args()
 args.tile_size = 4
@@ -36,13 +37,11 @@ else:
     except:
         model = FrozenTetModel.load_ckpt(args.output_path, device)
 
-# model.light_offset = -1
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=args.eval)
 
 # ic(model.min_t)
 # model.min_t = args.min_t
-ic(model.min_t)
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
 else:

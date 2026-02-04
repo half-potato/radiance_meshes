@@ -18,6 +18,7 @@ from utils import mesh_util
 from utils.args import Args
 from models.base_model import BaseModel
 from dtlookup import lookup_inds
+from utils.topo_utils import get_tet_adjacency
 
 
 class FrozenTetModel(BaseModel):
@@ -225,6 +226,13 @@ class FrozenTetModel(BaseModel):
         )
         return sh, cell_output
 
+    def compute_adjacency(self):
+        vols = tet_volumes(self.vertices[self.indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            self.indices[reverse_mask] = self.indices[reverse_mask][:, [1, 0, 2, 3]]
+        self.faces, self.side_index = get_tet_adjacency(self.indices)
+
     @torch.no_grad()
     def update_triangulation(self, old_vertices, old_indices, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
         return
@@ -313,9 +321,9 @@ class FrozenTetOptimizer:
             {"params": [model.rgb],      "lr": freeze_lr,    "name": "color"},
             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
         ])
-        self.sh_optim = optim.CustomAdam([
+        self.sh_optim = torch.optim.AdamW([
             {"params": [model.sh],       "lr": freeze_lr,       "name": "sh"},
-        ], eps=1e-6)
+        ], eps=1e-4)
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},
@@ -448,6 +456,13 @@ class FrozenTetOptimizer:
             new_inds, ['density', 'color', 'gradient'])
         self.model.density, self.model.rgb, self.model.gradient = tensors['density'], tensors['color'], tensors['gradient'], 
         self.model.sh = self.sh_optim.tensor_index(new_inds, ['sh'])['sh']
+
+    def clip_grad_norm_(self, max_norm):
+        torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.gradient, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.sh, max_norm)
+
 
 def bake_from_model(base_model, mask, chunk_size: int = 408_576) -> FrozenTetModel:
     """Convert an existing neural‑field `Model` into a parameter‑only

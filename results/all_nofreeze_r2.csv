@@ -1,0 +1,3 @@
+dataset_path,gpu_id,image_folder,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/data/nerf_datasets/zipnerf_ud/london,0,images_4,output/london_ifimages_4,25.669647588259917,0.35985565185546875,25.38495635986328,0.8201732039451599
+/data/nerf_datasets/360/bicycle,0,images_4,output/bicycle_ifimages_4,23.590396300624977,0.2904100716114044,24.827688217163086,0.7471087574958801

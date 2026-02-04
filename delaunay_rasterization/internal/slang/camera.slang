@@ -441,16 +441,20 @@ void update_bounds_from_edge(float3 v_start, float3 v_end, inout float3 minv, in
     }
 }
 
-
 // [Differentiable]
 void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam) 
 {
     minv = float3(FLT_MAX, FLT_MAX, FLT_MAX);
     maxv = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
     
-    float eps = 1e-4; // Use a slightly larger epsilon for robustness
+    // CHANGE 1: Use the camera's actual near plane. 
+    // If your Camera struct doesn't have min_t, pass it in as an argument.
+    // (Based on your previous code, 'cam.min_t' should exist).
+    float eps = cam.min_t; 
 
-    // Define the 4 faces of the tetrahedron by vertex indices
+    // Safety: Ensure we don't divide by zero if min_t is accidentally 0
+    if (eps < 1e-4) eps = 1e-4;
+
     int faces[4][3] = {
         {0, 1, 2},
         {0, 2, 3},
@@ -458,7 +462,6 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam)
         {1, 3, 2}
     };
 
-    // Process each of the 4 faces
     [loop]
     for (int i = 0; i < 4; ++i)
     {
@@ -468,37 +471,33 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam)
             tet.verts[faces[i][2]]
         };
 
-        // --- Simplified Clipping Stage ---
-        float3 final_verts[4]; // Max 4 verts for a clipped triangle
+        float3 final_verts[4]; 
         int final_vert_count = 0;
 
-        // Check each edge of the face for intersection with the near plane
         [unroll]
         for (int j = 0; j < 3; ++j) {
             float3 v_a = face_verts[j];
             float3 v_b = face_verts[(j + 1) % 3];
 
+            // CHANGE 2: Compare against the actual near plane
             bool a_in_front = v_a.z > eps;
             bool b_in_front = v_b.z > eps;
 
-            // If vertex 'a' is in front, add it to our list (if not already there)
             if (a_in_front) {
-                // A simple check to avoid adding duplicates. For 3-4 verts, this is fine.
                 bool found = false;
                 for(int k=0; k < final_vert_count; ++k) if(all(final_verts[k] == v_a)) found = true;
                 if(!found) final_verts[final_vert_count++] = v_a;
             }
 
-            // If the edge straddles the plane, add the intersection point
             if (a_in_front != b_in_front) {
+                // CHANGE 3: The intersection point is now at z = min_t (0.1)
+                // This guarantees the projected coordinate (x/z) is finite and reasonable.
                 float t = (eps - v_a.z) / (v_b.z - v_a.z);
                 float3 v_clip = lerp(v_a, v_b, t);
                 final_verts[final_vert_count++] = v_clip;
             }
         }
 
-        // --- Edge Sampling Stage ---
-        // If the clipped polygon has vertices, sample its edges
         if (final_vert_count > 1) {
             [loop]
             for (int j = 0; j < final_vert_count; ++j) {
@@ -509,4 +508,3 @@ void find_extent(Tetrahedra tet, out float3 minv, out float3 maxv, Camera cam)
         }
     }
 }
-

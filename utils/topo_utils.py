@@ -455,3 +455,129 @@ def build_adj(verts, tets, device=None):
     tet_adj[tet_B, face_B] = tet_A
     
     return tet_adj
+
+def get_tet_adjacency(tets: torch.Tensor):
+    """
+    Takes a tensor of N tetrahedra indices and finds all M unique
+    faces, returning the oriented faces and a map of their neighboring tets.
+
+    Args:
+        tets: A (N, 4) long tensor of tetrahedra indices.
+
+    Returns:
+        A tuple of (faces, side_index):
+        - faces: (M, 3) long tensor of unique, oriented face indices.
+        - side_index: (M, 2) long tensor.
+            - side_index[i, 0] is the index of the tet for the "front"
+              face (faces[i]).
+            - side_index[i, 1] is the index of the "back" face tet,
+              or -1 if it's a boundary face.
+    """
+    if not (tets.ndim == 2 and tets.shape[1] == 4):
+        raise ValueError(f"Input tensor must have shape (N, 4), "
+                         f"but got {tets.shape}")
+        
+    N = tets.shape[0]
+    device = tets.device
+
+    # ---
+    # 1. Define all 4 faces for all N tets
+    # We assume a standard winding order:
+    # face 0: [v0, v1, v2] (base)
+    # face 1: [v0, v3, v1] (side)
+    # face 2: [v1, v3, v2] (side)
+    # face 3: [v2, v3, v0] (side)
+    # ---
+    f0 = tets[:, [0, 1, 2]]
+    f1 = tets[:, [0, 3, 1]]
+    f2 = tets[:, [1, 3, 2]]
+    f3 = tets[:, [2, 3, 0]]
+    
+    # Stack into a (4*N, 3) tensor
+    all_faces = torch.stack([f0, f1, f2, f3], dim=1).reshape(-1, 3)
+
+    # ---
+    # 2. Create a (4*N) tensor to map each face back to its tet index
+    # ---
+    # [0, 0, 0, 0, 1, 1, 1, 1, ... N-1, N-1, N-1, N-1]
+    tet_idx_map = torch.arange(N, device=device).unsqueeze(1).expand(N, 4).reshape(-1)
+
+    # ---
+    # 3. Create a unique, hashable key for each face by sorting its indices
+    # ---
+    # (4*N, 3)
+    sorted_faces, _ = torch.sort(all_faces, dim=1)
+
+    # ---
+    # 4. Find unique sorted faces and group all 4*N faces by them
+    # ---
+    # unique_sorted_keys: (M, 3) tensor, where M is num unique faces
+    # inverse_map: (4*N) tensor mapping each of the 4N faces to its
+    #                unique ID (from 0 to M-1)
+    unique_sorted_keys, inverse_map = torch.unique(
+        sorted_faces, dim=0, return_inverse=True
+    )
+    
+    M = unique_sorted_keys.shape[0]
+
+    # ---
+    # 5. Sort by the unique ID. This groups matching faces (pairs) together.
+    # ---
+    # perm will be a (4*N) tensor of indices [0...4N-1]
+    perm = torch.argsort(inverse_map)
+    
+    # Re-order all our data using this permutation
+    sorted_inverse_map = inverse_map[perm]  # [0, 0, 1, 1, 2, 3, 3, ...]
+    sorted_tet_idx = tet_idx_map[perm]
+    sorted_all_faces = all_faces[perm]      # This has the original winding
+
+    # ---
+    # 6. Find the *first* instance of each unique face
+    # ---
+    # We find where the ID changes in sorted_inverse_map
+    # [True, False, True, False, True, True, False, ...]
+    change_mask = torch.cat(
+        (torch.tensor([True], device=device), 
+         sorted_inverse_map[1:] != sorted_inverse_map[:-1])
+    )
+    # first_indices will be (M) tensor giving the index into the
+    # sorted_* tensors for the first instance of each unique face.
+    first_indices = torch.where(change_mask)[0]
+
+    # ---
+    # 7. Build the final (M, 3) faces and (M, 2) side_index
+    # ---
+    
+    # Initialize outputs
+    # The (M, 3) oriented faces
+    faces = torch.zeros((M, 3), dtype=torch.long, device=device)
+    # The (M, 2) adjacency map, default to -1 (boundary)
+    side_index = torch.full((M, 2), -1, dtype=torch.long, device=device)
+
+    # Fill the "front" face (slot 0) for ALL M faces
+    # This is the oriented face from the first tet we found
+    faces = sorted_all_faces[first_indices]
+    side_index[:, 0] = sorted_tet_idx[first_indices]
+
+    # ---
+    # 8. Find internal faces (duplicates) and fill the "back" (slot 1)
+    # ---
+    
+    # A count of 2 means it's an internal face
+    counts = torch.bincount(sorted_inverse_map, minlength=M)
+    internal_mask = (counts == 2)
+    
+    # Get the M-indices of just the internal faces
+    internal_face_indices_M = torch.where(internal_mask)[0]
+    
+    # The *second* instance of these faces is at `first_indices + 1`
+    # in the sorted tensors
+    second_indices_sorted = first_indices[internal_mask] + 1
+    
+    # Get the tet ID for the second face in the pair
+    second_tet_idx = sorted_tet_idx[second_indices_sorted]
+    
+    # Scatter these tet IDs into slot 1 of the side_index
+    side_index[internal_face_indices_M, 1] = second_tet_idx
+
+    return faces, side_index

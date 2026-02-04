@@ -174,7 +174,7 @@ class Camera(nn.Module):
         return p_undistorted
 
     @torch.no_grad()
-    def get_camera_space_directions(self, device=None) -> torch.Tensor:
+    def get_camera_space_directions(self, device=None, ray_jitter=None) -> torch.Tensor:
         """
         Computes the camera-space ray directions for every pixel.
         
@@ -197,13 +197,21 @@ class Camera(nn.Module):
         cam_dict = self.to_dict(device)
         K = cam_dict['K']
         dist_params = cam_dict['distortion_params']
+        if ray_jitter is None:
+            ray_jitter = 0.5*torch.ones((self.image_height, self.image_width, 2), device=device)
+        else:
+            assert(ray_jitter.shape[0] == self.image_height)
+            assert(ray_jitter.shape[1] == self.image_width)
+            assert(ray_jitter.shape[2] == 2)
 
         # --- Step 1: Create Pixel Grid & Normalized Distorted Coords ---
-        Y, X = torch.meshgrid(
-            torch.arange(H, device=device, dtype=torch.float32) + 0.5,
-            torch.arange(W, device=device, dtype=torch.float32) + 0.5,
+        y, x = torch.meshgrid(
+            torch.arange(H, device=device, dtype=torch.float32),
+            torch.arange(W, device=device, dtype=torch.float32),
             indexing="ij"
         )
+        Y = y + ray_jitter[..., 1]
+        X = x + ray_jitter[..., 0]
         
         p_distorted_x = (X - K[0, 2]) / K[0, 0]
         p_distorted_y = (Y - K[1, 2]) / K[1, 1]

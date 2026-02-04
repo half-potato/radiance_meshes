@@ -13,7 +13,7 @@ from icecream import ic
 
 cmap = plt.get_cmap("jet")
 
-def render(camera: Camera, model, cell_values=None, tile_size=16, min_t=0.1,
+def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
            scene_scaling=1, clip_multi=0, ray_jitter=None,
            **kwargs):
     device = model.device

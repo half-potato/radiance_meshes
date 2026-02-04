@@ -82,6 +82,7 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
 
+    torch.cuda.synchronize()
     mod = slang_modules.alpha_blend_shaders_interp
     assert (render_grid.tile_height, render_grid.tile_width) in mod, (
         'Alpha Blend Shader was not compiled for this tile'
@@ -136,8 +137,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     assert(gt_img.shape[0] == render_grid.image_height)
     assert(gt_img.shape[1] == render_grid.image_width)
 
-    tet_err = torch.zeros((tet_vertices.shape[0], 16), dtype=torch.float, device=device)
-    tet_count = torch.zeros((tet_vertices.shape[0], 2), dtype=torch.int32, device=device)
+    tet_err = torch.zeros((indices.shape[0], 16), dtype=torch.float, device=device)
+    tet_count = torch.zeros((indices.shape[0], 2), dtype=torch.int32, device=device)
 
     shader.calc_tet_err(
         **args,

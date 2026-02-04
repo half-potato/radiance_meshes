@@ -6,7 +6,7 @@ from gdel3d import Del
 from torch import nn
 from icecream import ic
 
-from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, calc_barycentric, sample_uniform_in_sphere
+from utils.topo_utils import calculate_circumcenters_torch, fibonacci_spiral_on_sphere, get_tet_adjacency
 from utils import topo_utils
 from utils.contraction import contract_mean_std
 
@@ -16,7 +16,7 @@ from torch.utils.checkpoint import checkpoint
 from pathlib import Path
 import numpy as np
 from utils.args import Args
-from scipy.spatial import  Delaunay, ConvexHull
+from scipy.spatial import  Delaunay
 import open3d as o3d
 from utils.model_util import *
 from models.base_model import BaseModel
@@ -25,6 +25,27 @@ from utils.hashgrid import HashEmbedderOptimized
 from utils import hashgrid
 import tinycudann as tcnn
 import time
+
+def get_tet_adjacency_from_scipy(tri):
+    # tri.simplices is (N, 4)
+    # tri.neighbors is (N, 4)
+    
+    tets = tri.simplices
+    neighbors = tri.neighbors
+    N = tets.shape[0]
+
+    # Define the local face indices (which vertices form face j)
+    # Face 0: vertices [1, 2, 3], Face 1: [0, 2, 3], etc.
+    face_map = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
+    # 1. Create all faces and their corresponding tet indices
+    # We only take faces where the current tet index < neighbor index
+    # or the neighbor is -1 (boundary) to avoid double-counting.
+    
+    tet_ids, face_ids = np.where((np.arange(N)[:, None] < neighbors) | (neighbors == -1))
+    faces = tets[tet_ids[:, None], face_map[face_ids]]
+    side_index = np.stack([tet_ids, neighbors[tet_ids, face_ids]], axis=1)
+    
+    return faces, side_index
 
 torch.set_float32_matmul_precision('high')
 
@@ -228,6 +249,7 @@ class iNGPDW(nn.Module):
 
         rgb = rgb.reshape(-1, 3, 1) + 0.5
         density = safe_exp(sigma+self.density_offset)
+        # density = torch.nn.functional.softplus(sigma+self.density_offset)
         # grd = torch.tanh(field_samples.reshape(-1, 1, 3)) / math.sqrt(3)
         grd = field_samples.reshape(-1, 1, 3)
         grd = grd / ((grd * grd).sum(dim=-1, keepdim=True) + 1).sqrt()
@@ -330,12 +352,12 @@ class Model(BaseModel):
         self.register_buffer('ext_vertices', ext_vertices.to(self.device))
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
-        self.contracted_vertices = nn.Parameter(vertices.detach())
+        self.interior_vertices = nn.Parameter(vertices.detach())
         self.update_triangulation()
 
     @property
     def num_int_verts(self):
-        return self.contracted_vertices.shape[0]
+        return self.interior_vertices.shape[0]
 
     def get_circumcenters(self):
         circumcenter =  pre_calc_cell_values(
@@ -510,7 +532,7 @@ class Model(BaseModel):
         config_path = path / "config.json"
         config = Args.load_from_json(str(config_path))
         ckpt = torch.load(ckpt_path)
-        vertices = ckpt['contracted_vertices']
+        vertices = ckpt['interior_vertices']
         indices = ckpt["indices"]  # shape (N,4)
         del ckpt["indices"]
         if 'empty_indices' in ckpt:
@@ -567,18 +589,25 @@ class Model(BaseModel):
 
     @property
     def vertices(self):
-        verts = self.contracted_vertices
+        verts = self.interior_vertices
         return torch.cat([verts, self.ext_vertices])
 
     def sh_up(self):
         self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
+
+    def compute_adjacency(self):
+        self.faces, self.side_index = get_tet_adjacency(self.indices)
 
     @torch.no_grad()
     def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
         torch.cuda.empty_cache()
         verts = self.vertices
         if high_precision:
-            indices_np = Delaunay(verts.detach().cpu().numpy()).simplices.astype(np.int32)
+            d = Delaunay(verts.detach().cpu().numpy())
+            # faces, side_index = get_tet_adjacency_from_scipy(d)
+            # self.faces = torch.as_tensor(faces).cuda()
+            # self.side_index = torch.as_tensor(side_index).cuda()
+            indices_np = d.simplices.astype(np.int32)
             # self.indices = torch.tensor(indices_np, device=verts.device).int().cuda()
         else:
             v = Del(verts.shape[0])
@@ -599,6 +628,8 @@ class Model(BaseModel):
         # Cull tets with low density
         # self.full_indices = indices.clone()
         self.indices = indices
+        # if not high_precision:
+        #     self.compute_adjacency()
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.calc_tet_density()
             tet_alpha = self.calc_tet_alpha(mode="min", density=tet_density)
@@ -667,7 +698,7 @@ class TetOptimizer:
         ], ignore_param_list=[], betas=[0.9, 0.999], eps=1e-15)
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
-            {"params": [model.contracted_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "contracted_vertices"},
+            {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},
         ])
         self.model = model
 
@@ -729,20 +760,20 @@ class TetOptimizer:
                 lr = self.encoder_scheduler_args(iteration)
                 param_group['lr'] = lr
         for param_group in self.vertex_optim.param_groups:
-            if param_group["name"] == "contracted_vertices":
+            if param_group["name"] == "interior_vertices":
                 lr = self.vertex_scheduler_args(iteration)
                 self.vertices_lr = lr
                 param_group['lr'] = lr
 
     def add_points(self, new_verts: torch.Tensor, raw_verts=False):
-        self.model.contracted_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
-            contracted_vertices = new_verts
-        ))['contracted_vertices']
+        self.model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
+            interior_vertices = new_verts
+        ))['interior_vertices']
         self.model.update_triangulation()
 
     def remove_points(self, keep_mask: torch.Tensor):
-        keep_mask = keep_mask[:self.model.contracted_vertices.shape[0]]
-        self.model.contracted_vertices = self.vertex_optim.prune_optimizer(keep_mask)['contracted_vertices']
+        keep_mask = keep_mask[:self.model.interior_vertices.shape[0]]
+        self.model.interior_vertices = self.vertex_optim.prune_optimizer(keep_mask)['interior_vertices']
         self.model.update_triangulation()
 
     @torch.no_grad()
@@ -802,3 +833,7 @@ class TetOptimizer:
         keep_mask = vert_diff > diff_threshold
         print(f"Pruned {(~keep_mask).sum()} points. VD: {vert_diff.mean()} TD: {tet_diff.mean()}")
         self.remove_points(keep_mask)
+
+    def clip_grad_norm_(self, max_norm):
+        torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.interior_vertices, max_norm)

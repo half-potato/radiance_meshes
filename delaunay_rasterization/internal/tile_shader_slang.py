@@ -34,6 +34,17 @@ def vertex_and_tile_shader(indices,
     torch.cuda.synchronize()
 
     with torch.no_grad():
+        # index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int64)
+        # 
+        # # Check if we have a runaway allocation (e.g. > 200 million keys is suspicious)
+        # total_size_index_buffer = index_buffer_offset[-1].item() if index_buffer_offset.numel() > 0 else 0
+        # 
+        # # Hard limit to prevent OOM/Stomps if geometry explodes
+        # MAX_KEYS = 500_000_000
+        # if total_size_index_buffer > MAX_KEYS:
+        #      print(f"WARNING: Exploding geometry detected! Requested {total_size_index_buffer} keys. Clamping.")
+        #     tiles_touched[tiles_touched >= cam['grid_width']*cam['grid_height']] = 0
+
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
         max_mask = (tiles_touched == cam['grid_width']*cam['grid_height'])
         total_size_index_buffer = index_buffer_offset[-1]
