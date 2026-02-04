@@ -448,6 +448,68 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
     }
 }
 
+[AutoPyBindCUDA]
+[CUDAKernel]
+void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+                 TensorView<int32_t> tile_ranges,
+                 TensorView<int32_t> indices,
+                 TensorView<float> vertices,
+                 TensorView<float> tet_density,
+                 TensorView<float> output_img,
+                 TensorView<float> gt,
+                 TensorView<float> pixel_err,
+                 TensorView<float> ssim_err,
+                 TensorView<float> tet_err,
+                 TensorView<int32_t> tet_count,
+                 TensorView<int32_t> n_contributors,
+                 TensorCamera tcam)
+{
+    uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
+    uint32_t2 pix_coord = globalIdx.xy;
+
+    Camera cam = load_tensor_camera(tcam);
+    uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
+    
+    // --- CRITICAL FIX: Bounds check the TILE index before reading tile_ranges ---
+    // If this is missing, extra blocks launched by ceil_div will crash here.
+    if (tile_idx >= tile_ranges.size(0)) return;
+
+    uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
+    uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
+
+    bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
+    float this_pixel_err = 0;
+    float this_ssim_err = 0;
+    float3 this_gt = {0.f, 0.f, 0.f};
+
+    if (is_inside) {
+        this_pixel_err = pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
+        this_ssim_err = ssim_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
+        this_gt = {
+            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
+        };
+    }
+
+    kern_calc_tet_err(
+        sorted_gauss_idx,
+        indices,
+        vertices,
+        tet_density,
+        output_img,
+        tet_err,
+        tet_count,
+        n_contributors,
+        cam,
+        pix_coord,
+        tile_idx_start,
+        tile_idx_end,
+        this_pixel_err,
+        this_ssim_err,
+        this_gt);
+}
+
 void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   TensorView<int32_t> indices,
                   TensorView<float> vertices,
@@ -467,10 +529,11 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     float2 center_pix_coord = {pix_coord.x+0.5, pix_coord.y+0.5};
     float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 1.f);
     DistortionState5 curr_distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};
-    AlphaOut ao = {
-        curr_pixel_state, curr_distortion_state
-    };
+    AlphaOut ao = { curr_pixel_state, curr_distortion_state };
+    
     uint32_t block_size = cam.tile_height * cam.tile_width;
+    // In your previous code 'is_inside' wasn't passed to kern_, 
+    // but calculated locally. Assuming you re-add:
     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
     bool thread_active = is_inside;
 
@@ -478,44 +541,50 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
 
     Ray ray = get_ray(cam, center_pix_coord);
-    int exit_face;
 
-    float max_split_alpha = 0.f;
-    float max_grow_alpha = 0.f;
-
-    int32_t local_n_contrib = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
-        // Collectively fetch per-Gaussian data from global to shared
         AllMemoryBarrierWithGroupSync();
         int splat_pointer_offset = i * block_size + thread_rank;
-        if (tile_idx_start + splat_pointer_offset < tile_idx_end)
+        
+        // Initialize to Max UInt (Sentinel)
+        uint32_t coll_id = 0xFFFFFFFF; 
+        bool valid_read = (tile_idx_start + splat_pointer_offset < tile_idx_end) && 
+                          (tile_idx_start + splat_pointer_offset < sorted_gauss_idx.size(0));
+
+        if (valid_read)
         {
-            uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
-            if (coll_id >= indices.size(0)) {
-                coll_id = 0;
+            coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
+            if (indices.size(0) == 0 || coll_id >= indices.size(0)) {
+                coll_id = 0xFFFFFFFF; 
             }
-            collected_idx[thread_rank] = coll_id;
+        }
+
+        collected_idx[thread_rank] = coll_id;
+        
+        // Only load if valid. If invalid, shared memory for splat remains uninitialized
+        // which is fine because we check coll_id before using it below.
+        if (coll_id != 0xFFFFFFFF) {
             collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
         }
+
         AllMemoryBarrierWithGroupSync();
         if (thread_active) {
             for (int j = 0; j < min(block_size, splats_left_to_process); j++)
             {
-                local_n_contrib++;
-                SplatTetrahedra_interp g = collected_splats[j];
                 uint32_t g_idx = collected_idx[j];
-                CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
-                    //if (tetra_ctrl.rgba.a < 1/255.f) continue;
-                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
 
+                // Skip Sentinel or Out of Bounds
+                if (g_idx == 0xFFFFFFFF || g_idx >= tet_err.size(0)) continue;
+
+                SplatTetrahedra_interp g = collected_splats[j];
+                CtrlPt tetra_ctrl;
+
+                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     float trans = exp(ao.rgba.a);
                     float T = trans * tetra_ctrl.rgba.a;
-                    // float T = safe_exp(new_ao.rgba.a);
-                    // float3 diff = new_ao.rgba.rgb - gt_pixel;
-                    // float mismatch = (diff.x + diff.y + diff.z)/3;
                     float mismatch = pixel_err;
 
                     float old_val;
@@ -524,13 +593,12 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 0), T, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 1), T * mismatch, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 2), T * mismatch * mismatch, old_val);
-                    // tet_err.InterlockedAdd(uint2(g_idx, 3), 1, old_val);
-                    // tet_err.InterlockedAdd(uint2(g_idx, 4), T * abs(pixel_err), old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 5), T * ssim_err, old_val);
 
                     float w = T;
                     float3 p1 = tetra_ctrl.dist.x * ray.d + ray.o;
                     float3 p2 = tetra_ctrl.dist.y * ray.d + ray.o;
+                    
                     tet_err.InterlockedAdd(uint2(g_idx, 6), w * p1.x, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 7), w * p1.y, old_val);
                     tet_err.InterlockedAdd(uint2(g_idx, 8), w * p1.z, old_val);
@@ -545,13 +613,12 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                     tet_err.InterlockedAdd(uint2(g_idx, 15), w * centroid.z, old_val);
 
                     tet_count.InterlockedAdd(uint2(g_idx, 0), 1, old_ival);
-                    int T_int = (65535 * T);
+                    
+                    int T_int = int(65535 * T);
                     tet_count.InterlockedMax(uint2(g_idx, 1), T_int, old_ival);
 
                     ao = new_ao;
                     if (new_ao.rgba.a < -5.5) {
-                        // This Splat never registred so we subtract it before we break.
-                        // local_n_contrib--;
                         thread_active = false;
                         break;
                     }
@@ -560,62 +627,4 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         }
         splats_left_to_process -= block_size;
     }
-}
-
-[AutoPyBindCUDA]
-[CUDAKernel]
-void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
-                 TensorView<int32_t> tile_ranges,
-                 TensorView<int32_t> indices,
-                 TensorView<float> vertices,
-                 TensorView<float> tet_density,
-                 TensorView<float> output_img,
-                 TensorView<float> gt,
-                 TensorView<float> pixel_err,
-                 TensorView<float> ssim_err,
-                 TensorView<float> tet_err,
-                 TensorView<int32_t> tet_count,
-                 TensorView<int32_t> n_contributors,
-                 TensorCamera tcam)
-{
-    uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
-
-    uint32_t2 pix_coord = globalIdx.xy;
-
-    Camera cam = load_tensor_camera(tcam);
-    uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
-    uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
-    uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
-
-    bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
-    float this_pixel_err = 0;
-    float this_ssim_err = 0;
-    float3 this_gt = {0.f, 0.f, 0.f};
-    if (is_inside) {
-
-        this_pixel_err = pixel_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
-        this_ssim_err = ssim_err[uint2(uint32_t(pix_coord.y), uint32_t(pix_coord.x))];
-        this_gt = {
-            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
-            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
-            gt[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
-        };
-
-    }
-    kern_calc_tet_err(
-        sorted_gauss_idx,
-        indices,
-        vertices,
-        tet_density,
-        output_img,
-        tet_err,
-        tet_count,
-        n_contributors,
-        cam,
-        pix_coord,
-        tile_idx_start,
-        tile_idx_end,
-        this_pixel_err,
-        this_ssim_err,
-        this_gt);
 }

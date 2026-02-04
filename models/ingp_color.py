@@ -415,6 +415,32 @@ class Model(BaseModel):
         return shs, features
 
     @staticmethod
+    def init_rand_from_pcd(point_cloud, cameras, device, max_sh_deg,
+                      num_points=10000, **kwargs):
+        torch.manual_seed(2)
+
+        ccenters = torch.stack([c.camera_center.reshape(3) for c in cameras], dim=0).to(device)
+        center = ccenters.mean(dim=0)
+        scaling = torch.linalg.norm(ccenters - center.reshape(1, 3), dim=1, ord=torch.inf).max()
+        print(f"Scene scaling: {scaling}. Center: {center}")
+
+        vertices = torch.as_tensor(point_cloud.points).float()
+
+        # add sphere
+        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
+        new_radius = pcd_scaling.cpu().item()
+
+        vertices = sample_uniform_in_sphere(num_points, 3, base_radius=0, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
+
+        num_ext = 1000
+        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+        num_ext = ext_vertices.shape[0]
+
+        model = Model(vertices.cuda(), ext_vertices, center, scaling,
+                      max_sh_deg=max_sh_deg, **kwargs)
+        return model
+
+    @staticmethod
     def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
                       voxel_size=0.00, **kwargs):
         torch.manual_seed(2)
@@ -557,8 +583,9 @@ class Model(BaseModel):
         else:
             v = Del(verts.shape[0])
             indices_np, prev = v.compute(verts.detach().cpu().double())
-            indices_np = indices_np.numpy()
-            indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
+            indices_np = indices_np.clone().numpy()
+            valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
+            indices_np = indices_np[valid_mask.all(axis=1)]
             del prev
         
 

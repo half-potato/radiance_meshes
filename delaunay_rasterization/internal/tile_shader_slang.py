@@ -31,6 +31,7 @@ def vertex_and_tile_shader(indices,
         vertices,
         cam,
         render_grid)
+    torch.cuda.synchronize()
 
     with torch.no_grad():
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)

@@ -6,6 +6,9 @@ from utils import safe_math
 from typing import NamedTuple, List
 from delaunay_rasterization.internal.render_err import render_err
 from icecream import ic
+from utils.topo_utils import tet_volumes
+import termplotlib as tpl
+import numpy as np
 
 
 @torch.no_grad()
@@ -317,8 +320,17 @@ def apply_densification(
         # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
         #                 render_debug(within_var[:, None],
         #                              model, sample_cam, tile_size=args.tile_size))
-        imageio.imwrite(args.output_path / f"im{iteration}.png",
+        imageio.imwrite(args.output_path / f"im{iteration:07d}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+
+    vol = tet_volumes(model.vertices[model.indices])
+    # counts, bin_edges = np.histogram(vol.cpu().numpy(), bins=10, range=(0, 1e-5))
+    # fig = tpl.figure()
+    # fig.hist(counts, bin_edges, orientation="horizontal", force_ascii=False)
+    # fig.show()
+    mask_small = vol < args.min_tet_volume
+    within_var[mask_small] = 0
+    total_var[mask_small] = 0
 
     within_mask = (within_var > args.within_thresh)
     total_mask = (total_var > args.total_thresh)

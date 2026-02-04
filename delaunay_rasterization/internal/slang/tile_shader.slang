@@ -1,48 +1,14 @@
-// Copyright 2024 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 import utils;
 import intersect;
 
 uint32_t float2sortable_key(float value)
 {
-    // Step 1: reinterpret float bits as uint
     uint32_t bits = asuint(value);
-
-    // Step 2: sign-aware transform
-    // If sign bit set (negative), invert all bits;
-    // else flip only the sign bit.
-    if ((bits & 0x80000000) != 0)
-    {
-        // Negative: invert everything
-        bits = ~bits;  // bits ^ 0xFFFFFFFF
-    }
-    else
-    {
-        // Nonnegative: flip sign bit
+    if ((bits & 0x80000000) != 0) {
+        bits = ~bits;
+    } else {
         bits ^= 0x80000000;
     }
-
-    // Step 3 (optional): convert to big-endian byte order
-    // so that raw 4-byte lexicographic comparison is correct.
-    // If you do NOT need actual memory-based lex compares,
-    // you can skip the byte swap and just return 'bits'.
-    // bits = ( (bits << 24) & 0xFF000000 ) |
-    //        ( (bits <<  8) & 0x00FF0000 ) |
-    //        ( (bits >>  8) & 0x0000FF00 ) |
-    //        ( (bits >> 24) & 0x000000FF );
-
     return bits;
 }
 
@@ -67,12 +33,22 @@ void generate_keys(TensorView<float> xyz_vs,
         xyz_vs[uint2(globalIdx, 2)]
     };
 
-    // Find this Gaussian's offset in buffer for writing keys/values.
+    // --- FIX 1: Establish Hard Limits for this Thread ---
     int32_t offset;
-    if (globalIdx == 0)
+    int32_t limit; // The exclusive upper bound for this specific thread
+
+    if (globalIdx == 0) {
         offset = 0;
-    else
+        // The first thread writes up to the first offset
+        limit = index_buffer_offset[0];
+    } else {
         offset = index_buffer_offset[globalIdx - 1];
+        limit = index_buffer_offset[globalIdx];
+    }
+    
+    // Safety clamp against the global buffer size
+    int32_t buffer_size = int32_t(out_unsorted_keys.size(0));
+    if (limit > buffer_size) limit = buffer_size;
 
     int32_t rect_min_x = rect_tile_space[uint2(globalIdx, 0)];
     int32_t rect_min_y = rect_tile_space[uint2(globalIdx, 1)];
@@ -83,9 +59,14 @@ void generate_keys(TensorView<float> xyz_vs,
     {
         for (int32_t x = rect_min_x; x < rect_max_x; x++)
         {
+            // --- FIX 2: Check bounds before writing ---
+            // If the rectangle is larger than the allocated 'tiles_touched' count,
+            // we stop writing to prevent corrupting the next thread's data or crashing.
+            if (offset >= limit) 
+                return;
+
             uint64_t key = y * grid_width + x;
             key <<= 32;
-            // uint32_t fk = reinterpret<uint32_t>(abs(ndc_xyz.z));
             uint32_t fk = float2sortable_key(ndc_xyz.z);
             key = key | fk;
 
@@ -106,20 +87,30 @@ void compute_tile_ranges(TensorView<int64_t> sorted_keys,
     if (globalIdx >= sorted_keys.size(0))
         return;
 
-    // Read tile ID from key. Update start/end of tile range if at limit.
+    // Read tile ID from key. 
     uint32_t currtile = uint32_t(uint64_t(sorted_keys[globalIdx]) >> 32);
+    
+    // --- FIX 3: Safety check for tile ID ---
+    // If garbage keys were generated, this could be out of bounds
+    if (currtile >= out_tile_ranges.size(0)) return;
+
     if (globalIdx == 0)
+    {
         out_tile_ranges[uint2(currtile, 0)] = 0;
+    }
     else
     {
         uint32_t prevtile = uint32_t(uint64_t(sorted_keys[globalIdx - 1]) >> 32);
-        if (currtile != prevtile)
+        
+        // Safety check for prevtile
+        if (prevtile < out_tile_ranges.size(0) && currtile != prevtile)
         {
             out_tile_ranges[uint2(prevtile, 1)] = globalIdx;
             out_tile_ranges[uint2(currtile, 0)] = globalIdx;
         }
     }
+
     if (globalIdx == sorted_keys.size(0) - 1) {
-        out_tile_ranges[uint2(currtile, 1)] = sorted_keys.size(0);
+        out_tile_ranges[uint2(currtile, 1)] = int32_t(sorted_keys.size(0));
     }
 }

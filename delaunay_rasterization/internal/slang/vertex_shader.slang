@@ -35,7 +35,28 @@ void vertex_shader(TensorView<int32_t> indices,
 
     Camera cam = no_diff load_tensor_camera(tcam);
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
+    
+    // --- DEFENSE LAYER 1: Vertex Index Bounds ---
+    // Approximate triangulation can produce indices pointing to deleted or non-existent vertices.
+    // This prevents the "Illegal Memory Access" crash in load_tetrahedra.
+    uint32_t num_verts = vertices.size(0);
+    if (virtual_tet.x >= num_verts || virtual_tet.y >= num_verts || 
+        virtual_tet.z >= num_verts || virtual_tet.w >= num_verts) 
+    {
+        return;
+    }
+
     Tetrahedra tet = load_tetrahedra(vertices, virtual_tet);
+
+    // --- DEFENSE LAYER 2: NaN Geometry ---
+    // If vertices contain NaN, math downstream will explode.
+    // Checking one component per vertex is usually sufficient to catch garbage data.
+    if (isnan(tet.verts[0].x) || isnan(tet.verts[1].x) || 
+        isnan(tet.verts[2].x) || isnan(tet.verts[3].x)) 
+    {
+        return;
+    }
+
     if (is_planar(tet)) {
         return;
     }
@@ -48,6 +69,13 @@ void vertex_shader(TensorView<int32_t> indices,
     if (maxv.z <= 0.0) {
         return;
     }
+    
+    // --- DEFENSE LAYER 3: Finite Projection ---
+    // If a point is exactly on the camera plane or W=0, projection can produce Infinity/NaN.
+    // This prevents INT_MIN/INT_MAX in the rect calculation below.
+    if (!isfinite(minv.x) || !isfinite(minv.y) || !isfinite(maxv.x) || !isfinite(maxv.y)) {
+        return;
+    }
 
     rectangle rect_tile_space;
 
@@ -58,10 +86,11 @@ void vertex_shader(TensorView<int32_t> indices,
     double3 P = { double(cam.position.x), double(cam.position.y), double(cam.position.z) };
     double3 circumcenter;
     float sort_depth = float(power_of_circumsphere(A, B, C, D, P, circumcenter));
-    if (sort_depth < -1e19) return;
+    
+    // Catch bad sort depths (usually result of near-degenerate geometry)
+    if (sort_depth < -1e19 || isnan(sort_depth)) return;
 
     bool contains_ray_origin = point_in_tetrahedron(tet, cam.position) || sort_depth < 0;
-    // printf("contains: %i\n", contains_ray_origin);
 
     rect_tile_space.min_x = int32_t(floor(clip(minv.x / cam.tile_width, 0, cam.grid_width)));
     rect_tile_space.min_y = int32_t(floor(clip(minv.y / cam.tile_height, 0, cam.grid_height)));
@@ -70,7 +99,7 @@ void vertex_shader(TensorView<int32_t> indices,
 
     int32_t n_tiles = (rect_tile_space.max_x - rect_tile_space.min_x) * (rect_tile_space.max_y - rect_tile_space.min_y);
 
-    if (n_tiles == 0) {
+    if (n_tiles <= 0) {
         return;
     }
 
@@ -85,5 +114,4 @@ void vertex_shader(TensorView<int32_t> indices,
     out_circumcenter.storeOnce(uint2(g_idx, 0), (float)circumcenter.x);
     out_circumcenter.storeOnce(uint2(g_idx, 1), (float)circumcenter.y);
     out_circumcenter.storeOnce(uint2(g_idx, 2), (float)circumcenter.z);
-
 }

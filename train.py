@@ -82,7 +82,7 @@ args.additional_attr = 0
 args.g_init=1.0
 args.s_init=1e-4
 args.d_init=0.1
-args.c_init=0.8
+args.c_init=1e-2
 
 # Vertex Settings
 args.lr_delay = 0
@@ -114,6 +114,7 @@ args.within_thresh = 0.5
 args.total_thresh = 2.0
 args.clone_min_contrib = 0.003
 args.split_min_contrib = 0.01
+args.min_tet_volume = 1e-3
 
 args.lambda_ssim = 0.2
 args.min_t = 0.4

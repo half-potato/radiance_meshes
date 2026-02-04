@@ -6,6 +6,7 @@ from data.types import ProjectionType
 from icecream import ic
 import math
 from data.colmap_loader import rotmat2qvec
+import torch.nn.functional as F
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
@@ -55,13 +56,30 @@ class Camera(nn.Module):
             # self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
             self.gt_alpha_mask = torch.ones((1, self.image_height, self.image_width), device=self.data_device)
 
-        self.zfar = 100.0
-        self.znear = 0.01
+        self.zfar = 10.0
+        self.znear = 0.5
 
         self.trans = trans
         self.scale = scale
         self.update()
         self.data_device = self.world_view_transform.device
+
+    def set_size(self, h, w):
+        self.image_width = w
+        self.image_height = h
+
+        self.gt_alpha_mask = torch.ones(
+            (1, self.image_height, self.image_width), device=self.data_device
+        )
+
+    def resize(self, h, w):
+        self.original_image = F.interpolate(self.original_image[None], size=(h, w), mode='bilinear')[0]
+        self.set_size(h, w)
+
+    def resize_multiple(self, multiple):
+        pad_h = (multiple - (self.image_height % multiple)) % multiple
+        pad_w = (multiple - (self.image_width % multiple)) % multiple
+        self.resize(self.image_height + pad_h, self.image_width + pad_w)
 
     @property
     def fx(self):
