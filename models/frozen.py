@@ -46,6 +46,7 @@ class FrozenTetModel(BaseModel):
         sh: torch.Tensor,                    # (T, ((max_sh_deg+1)**2-1), 3)
         center: torch.Tensor,                # (1, 3)
         scene_scaling: torch.Tensor | float,
+        additional_attr=0,
         *,
         max_sh_deg: int = 2,
         chunk_size: int = 408_576,
@@ -79,6 +80,7 @@ class FrozenTetModel(BaseModel):
         self.frozen = False
         self.linear = False
         self.feature_dim = 7
+        self.additional_attr = additional_attr
 
     def sh_up(self):
         pass

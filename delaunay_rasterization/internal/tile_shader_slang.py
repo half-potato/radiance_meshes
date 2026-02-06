@@ -1,5 +1,5 @@
 import torch
-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
+from delaunay_rasterization.internal.slang.slang_modules import shader_manager
 import math
 from delaunay_rasterization.internal.sort_by_keys import sort_by_keys_cub
 from icecream import ic
@@ -34,16 +34,26 @@ def vertex_and_tile_shader(indices,
     torch.cuda.synchronize()
 
     with torch.no_grad():
-        # index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int64)
-        # 
-        # # Check if we have a runaway allocation (e.g. > 200 million keys is suspicious)
-        # total_size_index_buffer = index_buffer_offset[-1].item() if index_buffer_offset.numel() > 0 else 0
-        # 
-        # # Hard limit to prevent OOM/Stomps if geometry explodes
-        # MAX_KEYS = 500_000_000
-        # if total_size_index_buffer > MAX_KEYS:
-        #      print(f"WARNING: Exploding geometry detected! Requested {total_size_index_buffer} keys. Clamping.")
-        #     tiles_touched[tiles_touched >= cam['grid_width']*cam['grid_height']] = 0
+        min_x = rect_tile_space[..., 0]
+        min_y = rect_tile_space[..., 1]
+        max_x = rect_tile_space[..., 2]
+        max_y = rect_tile_space[..., 3]
+
+        # Use long to prevent overflow during multiplication if a rect is huge
+        tiles_touched = ((max_x - min_x).long() * (max_y - min_y).long()).int()
+
+        index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int64)
+
+        # Check if we have a runaway allocation (e.g. > 200 million keys is suspicious)
+        total_size_index_buffer = index_buffer_offset[-1].item() if index_buffer_offset.numel() > 0 else 0
+
+        # Hard limit to prevent OOM/Stomps if geometry explodes
+        MAX_KEYS = 500_000_000
+        if total_size_index_buffer > MAX_KEYS:
+            print(f"WARNING: Exploding geometry detected! Requested {total_size_index_buffer} keys. Clamping.")
+            bad_mask = tiles_touched >= cam['grid_width']*cam['grid_height']
+            tiles_touched[bad_mask] = 0
+            rect_tile_space[bad_mask] = 0
 
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
         max_mask = (tiles_touched == cam['grid_width']*cam['grid_height'])
@@ -55,7 +65,7 @@ def vertex_and_tile_shader(indices,
                                          device="cuda", 
                                          dtype=torch.int32)
 
-        slang_modules.tile_shader.generate_keys(xyz_vs=vs_tetra,
+        shader_manager.tile_shader.generate_keys(xyz_vs=vs_tetra,
                                                 rect_tile_space=rect_tile_space,
                                                 index_buffer_offset=index_buffer_offset,
                                                 out_unsorted_keys=unsorted_keys,
@@ -74,7 +84,7 @@ def vertex_and_tile_shader(indices,
                                   device="cuda",
                                   dtype=torch.int32)
         if total_size_index_buffer > 0:
-            slang_modules.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
+            shader_manager.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
                                                         out_tile_ranges=tile_ranges).launchRaw(
                     blockSize=(256, 1, 1),
                     gridSize=(ceil_div(total_size_index_buffer, 256).item(), 1, 1)
@@ -105,7 +115,7 @@ class VertexShader(torch.autograd.Function):
                                    device="cuda",
                                    dtype=torch.float)
         
-        slang_modules.vertex_shader.vertex_shader(indices=indices,
+        shader_manager.vertex_shader.vertex_shader(indices=indices,
                                                   vertices=vertices,
                                                   out_tiles_touched=tiles_touched,
                                                   out_rect_tile_space=rect_tile_space,
@@ -148,7 +158,7 @@ class VertexShader(torch.autograd.Function):
         grad_indices = torch.zeros_like(indices)
         grad_vertices = torch.zeros_like(vertices)
 
-        slang_modules.vertex_shader.vertex_shader.bwd(indices=indices,
+        shader_manager.vertex_shader.vertex_shader.bwd(indices=indices,
                                                       vertices=(vertices, grad_vertices),
                                                       tcam=tcam,
                                                       out_tiles_touched=tiles_touched,

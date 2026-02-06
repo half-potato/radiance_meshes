@@ -1,12 +1,12 @@
 import torch
 from delaunay_rasterization.internal.render_grid import RenderGrid
-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
 import math
 from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
 from utils.safe_math import safe_div
+from delaunay_rasterization.internal.slang.slang_modules import shader_manager
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
@@ -62,11 +62,11 @@ def render_constant(camera, indices, vertices, cell_values=None, tile_size=4, mi
     alpha = image_rgb.permute(2,0,1)[-2, ...]
     image = image_rgb.permute(2,0,1)[:-2, ...] * camera.gt_alpha_mask.to(device)
     weight_square = image_rgb.permute(2,0,1)[-1:, ...]
-    latents = (safe_div(image, weight_square) / 3.5).unsqueeze(0).clip(min=-7, max=7)
+    # latents = (safe_div(image, weight_square) / 3.5).unsqueeze(0).clip(min=-7, max=7)
     # latents = (image / 3.5).unsqueeze(0).clip(min=-7, max=7)
     
     render_pkg = {
-        'latents': latents,
+        # 'latents': latents,
         'render': image,
         'alpha': alpha,
         'mask': mask,
@@ -85,20 +85,13 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                 tcam, ray_jitter,
                 device="cuda"):
         output_img = torch.zeros((render_grid.image_height, 
-                                #   render_grid.image_width, (rgbs.shape[1]-1)//4+2), 
                                   render_grid.image_width, (rgbs.shape[1]-1)+2), 
                                  device=device)
         n_contributors = torch.zeros((render_grid.image_height, 
                                       render_grid.image_width, 1),
                                      dtype=torch.int32, device=device)
 
-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
-            'Alpha Blend Shader was not compiled for this tile'
-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-            f' {slang_modules.alpha_blend_shaders.keys()}'
-        )
-
-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+        alpha_blend_tile_shader = shader_manager.get_alphablend(render_grid.tile_height, render_grid.tile_width, 0)
         st = time.time()
         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
             sorted_gauss_idx=sorted_tetra_idx,
@@ -145,13 +138,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         vertices_grad = torch.zeros_like(vertices)
         rgbs_grad = torch.zeros_like(rgbs)
 
-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
-            'Alpha Blend Shader was not compiled for this tile'
-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-            f' {slang_modules.alpha_blend_shaders.keys()}'
-        )
-
-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
+        alpha_blend_tile_shader = shader_manager.get_alphablend(render_grid.tile_height, render_grid.tile_width, 0)
 
         st = time.time()
         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(

@@ -280,6 +280,7 @@ class Model(BaseModel):
             [math.pi/3, math.pi/3],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
+        self.additional_attr = additional_attr
 
         module = iNGPDW(sh_dim, additional_attr=additional_attr, **kwargs)
         self.compile = module.compile

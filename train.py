@@ -114,10 +114,16 @@ args.densify_start = 2000
 args.densify_end = 16000
 args.densify_interval = 500
 args.budget = 2_000_000
-args.within_thresh = 0.5
+# args.within_thresh = 0.5
+# args.total_thresh = 2.0
+# args.clone_min_contrib = 0.003
+# args.split_min_contrib = 0.01
+
+args.within_thresh = 0.5 / 2.7
 args.total_thresh = 2.0
-args.clone_min_contrib = 0.003
-args.split_min_contrib = 0.01
+args.clone_min_contrib = 5/255
+args.split_min_contrib = 10/255
+
 args.min_tet_volume = 1e-3
 
 args.lambda_ssim = 0.2

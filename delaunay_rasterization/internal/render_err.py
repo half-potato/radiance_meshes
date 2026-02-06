@@ -1,12 +1,12 @@
 import torch
 from delaunay_rasterization.internal.render_grid import RenderGrid
-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
 from data.camera import Camera
 from utils.ssim import ssim
 import torch.nn.functional as F
+from delaunay_rasterization.internal.slang.slang_modules import shader_manager
 
 # --- quick, fully-differentiable blur ---------------------------------------
 def gaussian_blur(img: torch.Tensor,
@@ -32,7 +32,7 @@ def gaussian_blur(img: torch.Tensor,
 
 def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
     device = model.device
-    indices = model.indices
+    indices = model.indices.clone()
     vertices = model.vertices
     torch.cuda.synchronize()
     st = time.time()
@@ -83,21 +83,14 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
 
     torch.cuda.synchronize()
-    mod = slang_modules.alpha_blend_shaders_interp
-    assert (render_grid.tile_height, render_grid.tile_width) in mod, (
-        'Alpha Blend Shader was not compiled for this tile'
-        f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-        f' {mod.keys()}'
-    )
-
-    shader = mod[(render_grid.tile_height, render_grid.tile_width)]
+    shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0)
     st = time.time()
     args = dict(
         sorted_gauss_idx=sorted_tetra_idx,
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
-        tet_density=cell_values,
+        cell_values=cell_values,
         output_img=output_img,
         n_contributors=n_contributors,
         tcam=tcam,

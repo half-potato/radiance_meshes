@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from data.camera import Camera
+from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant
 from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
@@ -12,6 +13,51 @@ import time
 from icecream import ic
 
 cmap = plt.get_cmap("jet")
+
+@torch.no_grad
+def render_debug(render_tensor, model, camera, density_multi=1, tile_size=4):
+    # 1. Fetch current model features.
+    # We need this to get the correct density and tensor layout (N, FeatureDim).
+    _, features = model.get_cell_values(camera)
+    
+    # 2. Clone the features to create our debug cell_values.
+    # Layout matches 'activate_output': [Density (0), RGB (1-3), Gradients (4-6), Attributes (7+)]
+    cell_values = features.clone()
+
+    # 3. Process the input render_tensor (the data you want to visualize).
+    if render_tensor.shape[1] == 1:
+        # For scalar fields: Normalize and apply Colormap
+        tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
+        normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
+        
+        # cmap returns RGBA numpy array, we need RGB tensor
+        rgb_values = torch.as_tensor(
+            cmap(normalized_tensor.reshape(-1).cpu().numpy())[:, :3]
+        ).float().to(features.device)
+        cell_values[:, 1:4] = rgb_values
+    else:
+        # For RGB/RGBA fields: Take the first 3 channels
+        cell_values[:, 0:4] = render_tensor
+
+    cell_values[:, 0] = cell_values[:, 0] * density_multi
+
+    # Set RGB (Indices 1-3): Overwrite with the debug colors
+
+    # Set Gradients (Indices 4-6): Zero them out as requested
+    if cell_values.shape[1] >= 7:
+        cell_values[:, 4:7] = 0.0
+
+    # 5. Delegate to the main 'render' function.
+    render_pkg = render(
+        camera, 
+        model, 
+        cell_values=cell_values, 
+        tile_size=tile_size
+    )
+
+    image = render_pkg['render'].cpu()[:3]
+    del render_pkg, render_tensor, cell_values, features
+    return image
 
 def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
            scene_scaling=1, clip_multi=0, ray_jitter=None,
@@ -62,7 +108,8 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         cell_values,
         render_grid,
         tcam,
-        ray_jitter)
+        ray_jitter,
+        model.additional_attr)
     alpha = image_rgb.permute(2,0,1)[3, ...]
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
@@ -72,6 +119,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
     rxyzd_img = torch.cat([rotated.reshape(xyzd_img[..., :3].shape), xyzd_img[..., 3:]], dim=-1)
     
     render_pkg = {
+        'aux': image_rgb.permute(2,0,1)[4:, ...] * camera.gt_alpha_mask.to(device),
         'render': image_rgb.permute(2,0,1)[:3, ...] * camera.gt_alpha_mask.to(device),
         'alpha': alpha,
         'distortion_loss': distortion_loss.mean(),

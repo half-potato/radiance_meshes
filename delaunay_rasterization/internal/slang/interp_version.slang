@@ -1,3 +1,5 @@
+static const uint AUX_DIM = PYTHON_AUX_DIM;
+
 import intersect;
 import utils;
 import safe_math;
@@ -8,6 +10,7 @@ struct CtrlPt: IDifferentiable {
     float2 dist;
     float density;
     float4 xyzd;
+    float aux[AUX_DIM]; // <--- Added
 };
 
 struct SplatTetrahedra_interp : IDifferentiable
@@ -17,6 +20,7 @@ struct SplatTetrahedra_interp : IDifferentiable
     float3 base_color;
     float3 grd;
     float density;
+    float aux[AUX_DIM]; // <--- Added
 };
 
 void print_verts(float4x3 verts) {
@@ -82,7 +86,19 @@ inline CtrlPt integrate_tetra_segment(
                     final_color.y,
                     final_color.z,
                     g.density * dt };
-    return { rgba, { enter, exit }, g.density, float4(rendered_norm, depth) };
+
+    CtrlPt result;
+    result.rgba = { final_color.x, final_color.y, final_color.z, g.density * dt };
+    result.dist = { enter, exit };
+    result.density = g.density;
+    result.xyzd = float4(rendered_norm, depth);
+
+    [ForceUnroll]
+    for (int i = 0; i < AUX_DIM; ++i) {
+        result.aux[i] = g.aux[i] * alpha;
+    }
+    
+    return result;
 }
 
 [Differentiable]
@@ -117,26 +133,33 @@ inline SplatTetrahedra_interp load_tet_alphablend_interp(
     int32_t        g_idx,
     DiffTensorView vertices,
     TensorView<int32_t> indices,
-    DiffTensorView tet_density)
+    DiffTensorView cell_values)
 {
     no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    float density = max(float(tet_density[g_idx, 0]), 0.f);
+    float density = max(float(cell_values[g_idx, 0]), 0.f);
     float3 base_color = {
-        float(tet_density[g_idx, 1]),
-        float(tet_density[g_idx, 2]),
-        float(tet_density[g_idx, 3]),
+        float(cell_values[g_idx, 1]),
+        float(cell_values[g_idx, 2]),
+        float(cell_values[g_idx, 3]),
     };
     float3 grd = {
-        float(tet_density[g_idx, 4]),
-        float(tet_density[g_idx, 5]),
-        float(tet_density[g_idx, 6]),
+        float(cell_values[g_idx, 4]),
+        float(cell_values[g_idx, 5]),
+        float(cell_values[g_idx, 6]),
     };
 
     SplatTetrahedra_interp result = {
         virtual_tet, tet, base_color, grd, density
     };
+    [ForceUnroll]
+
+    for (int i = 0; i < AUX_DIM; ++i) {
+        // 1 (density) + 3 (color) + 3 (grd) = 7
+        result.aux[i] = float(cell_values[g_idx, 7 + i]);
+    }
+
     return result;
 }
 
@@ -144,25 +167,29 @@ inline SplatTetrahedra_interp load_tet_alphablend_interp(
     int32_t        g_idx,
     TensorView<float> vertices,
     TensorView<int32_t> indices,
-    TensorView<float>  tet_density)
+    TensorView<float>  cell_values)
 {
     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
 
-    float density = max(float(tet_density[g_idx, 0]), 0.f);
+    float density = max(float(cell_values[g_idx, 0]), 0.f);
     SplatTetrahedra_interp result;
     result.vtet = virtual_tet;
     result.tet       = tet;
     result.density   = density;
     result.base_color = {
-        float(tet_density[g_idx, 1]),
-        float(tet_density[g_idx, 2]),
-        float(tet_density[g_idx, 3]),
+        float(cell_values[g_idx, 1]),
+        float(cell_values[g_idx, 2]),
+        float(cell_values[g_idx, 3]),
     };
     result.grd = {
-        float(tet_density[g_idx, 4]),
-        float(tet_density[g_idx, 5]),
-        float(tet_density[g_idx, 6]),
+        float(cell_values[g_idx, 4]),
+        float(cell_values[g_idx, 5]),
+        float(cell_values[g_idx, 6]),
     };
+    for (int i = 0; i < AUX_DIM; ++i) {
+        // 1 (density) + 3 (color) + 3 (grd) = 7
+        result.aux[i] = float(cell_values[g_idx, 7 + i]);
+    }
     return result;
 }

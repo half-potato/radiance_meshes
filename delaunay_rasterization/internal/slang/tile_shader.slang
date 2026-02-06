@@ -33,36 +33,35 @@ void generate_keys(TensorView<float> xyz_vs,
         xyz_vs[uint2(globalIdx, 2)]
     };
 
-    // --- FIX 1: Establish Hard Limits for this Thread ---
-    int32_t offset;
-    int32_t limit; // The exclusive upper bound for this specific thread
+    // 1. Calculate the allocated range for this tetrahedron
+    int32_t start_offset = (globalIdx == 0) ? 0 : index_buffer_offset[globalIdx - 1];
+    int32_t end_offset = index_buffer_offset[globalIdx];
+    int32_t allocated_count = end_offset - start_offset;
 
-    if (globalIdx == 0) {
-        offset = 0;
-        // The first thread writes up to the first offset
-        limit = index_buffer_offset[0];
-    } else {
-        offset = index_buffer_offset[globalIdx - 1];
-        limit = index_buffer_offset[globalIdx];
-    }
+    // 2. Safety: If 0 space was allocated (e.g. filtered in Python), DO NOT WRITE.
+    if (allocated_count <= 0) return;
+
+    // 3. Clamp writing pointer to buffer size
+    int32_t buffer_limit = int32_t(out_unsorted_keys.size(0));
+    if (start_offset >= buffer_limit) return;
     
-    // Safety clamp against the global buffer size
-    int32_t buffer_size = int32_t(out_unsorted_keys.size(0));
-    if (limit > buffer_size) limit = buffer_size;
+    // Hard clamp the end to the buffer size
+    if (end_offset > buffer_limit) end_offset = buffer_limit;
 
     int32_t rect_min_x = rect_tile_space[uint2(globalIdx, 0)];
     int32_t rect_min_y = rect_tile_space[uint2(globalIdx, 1)];
     int32_t rect_max_x = rect_tile_space[uint2(globalIdx, 2)];
     int32_t rect_max_y = rect_tile_space[uint2(globalIdx, 3)];
 
+    int32_t current_write_idx = start_offset;
+
     for (int32_t y = rect_min_y; y < rect_max_y; y++)
     {
         for (int32_t x = rect_min_x; x < rect_max_x; x++)
         {
-            // --- FIX 2: Check bounds before writing ---
-            // If the rectangle is larger than the allocated 'tiles_touched' count,
-            // we stop writing to prevent corrupting the next thread's data or crashing.
-            if (offset >= limit) 
+            // 4. CRITICAL: Stop writing if we exceed our OWN allocated slice.
+            // Even if the rect says "write 100", if allocated_count is 50, we stop at 50.
+            if (current_write_idx >= end_offset) 
                 return;
 
             uint64_t key = y * grid_width + x;
@@ -70,9 +69,10 @@ void generate_keys(TensorView<float> xyz_vs,
             uint32_t fk = float2sortable_key(ndc_xyz.z);
             key = key | fk;
 
-            out_unsorted_keys[offset] = key;
-            out_unsorted_gauss_idx[offset] = globalIdx;
-            offset++;
+            out_unsorted_keys[current_write_idx] = key;
+            out_unsorted_gauss_idx[current_write_idx] = globalIdx;
+            
+            current_write_idx++;
         }
     }
 }
