@@ -162,8 +162,9 @@ def collect_render_stats(
     # Main per-camera loop -----------------------------------------------------
     for cam in sampled_cameras:
         target = cam.original_image.cuda()
+        gt_mask = cam.gt_alpha_mask.cuda()
 
-        image_votes, extras = render_err( target, cam, model, tile_size=args.tile_size)
+        image_votes, extras = render_err( target, gt_mask, cam, model, tile_size=args.tile_size)
 
         tc = extras["tet_count"][..., 0]
         max_T = extras["tet_count"][..., 1].float() / 65535
@@ -272,14 +273,14 @@ def apply_densification(
     total_var[stats.peak_contrib < args.clone_min_contrib] = 0
     within_var[stats.peak_contrib < args.split_min_contrib] = 0
 
-    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=device)
-    indices = model.indices.long()
-    reduce_type = "sum"
-    mask_alive_i = mask_alive.int()
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=device)
+    # indices = model.indices.long()
+    # reduce_type = "sum"
+    # mask_alive_i = mask_alive.int()
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
 
     target_addition = int(min(target_addition, stats.tet_view_count.shape[0]))
     if target_addition < 0:
@@ -314,26 +315,26 @@ def apply_densification(
         clone_mask[selected_indices] = True
 
     if args.output_path is not None:
-        f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
-        color = torch.rand_like(f[:, :3])
-        # color = rgb + 0.5#torch.rand_like(f[:, :3])
-        f[:, :3] = color
-        f[:, 3] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
-                        T.ToPILImage()(
-                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
-        f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
-        f[:, 1:4] = color
-        f[:, 0] *= 2.0    # alpha
-        imageio.imwrite(args.output_path / f"densify{iteration}.png",
-                        T.ToPILImage()(
-                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
-        tv = render_debug(total_var[:, None], model, sample_cam, tile_size=args.tile_size)
-        imageio.imwrite(args.output_path / f"total_var{iteration}.png",
-                        T.ToPILImage()(tv))
-        imageio.imwrite(args.output_path / f"within_var{iteration}.png",
-                        T.ToPILImage()(render_debug(within_var[:, None],
-                                     model, sample_cam, tile_size=args.tile_size)))
+        # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
+        # color = torch.rand_like(f[:, :3])
+        # # color = rgb + 0.5#torch.rand_like(f[:, :3])
+        # f[:, :3] = color
+        # f[:, 3] *= 2.0    # alpha
+        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+        #                 T.ToPILImage()(
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
+        # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
+        # f[:, 1:4] = color
+        # f[:, 0] *= 2.0    # alpha
+        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
+        #                 T.ToPILImage()(
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
+        # tv = render_debug(total_var[:, None], model, sample_cam, tile_size=args.tile_size)
+        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+        #                 T.ToPILImage()(tv))
+        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+        #                 T.ToPILImage()(render_debug(within_var[:, None],
+        #                              model, sample_cam, tile_size=args.tile_size)))
         imageio.imwrite(args.output_path / f"im{iteration:07d}.png",
                         cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 

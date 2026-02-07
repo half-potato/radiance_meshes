@@ -30,7 +30,7 @@ def gaussian_blur(img: torch.Tensor,
     return F.conv2d(img.unsqueeze(0), kernel, padding=pad,
                     groups=img.shape[0]).squeeze(0)
 
-def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
+def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
     device = model.device
     indices = model.indices.clone()
     vertices = model.vertices
@@ -116,12 +116,11 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
     pixel_err = (l1_err).contiguous()
 
-    mask = camera.gt_alpha_mask.cuda()
-    gt_img = (mask*gt_image).permute(1, 2, 0)
+    gt_img = (gt_mask*gt_image).permute(1, 2, 0)
 
-    pixel_err *= mask[0]
-    ssim_err *= mask[0]
-    render_img *= mask
+    pixel_err *= gt_mask[0]
+    ssim_err *= gt_mask[0]
+    render_img *= gt_mask
     
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
