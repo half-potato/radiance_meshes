@@ -69,5 +69,8 @@ python hyperparam.py  --queue_csv scripts/run_full.csv --output_csv results/run_
 ```
 This is a general purpose script for running and collecting results across different parameters.
 
+# Other Use
+For training various extensions, the parameter `additional_attr` can be used. This will then get rendered out to the `'aux'` channel. Right now, the alpha channel is not trained using the aux channel.
+
 # Licensing
 The `data/colmap_loader.py` contains a minor amount of 3DGS code. Should be trivial to replace.

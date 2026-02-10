@@ -159,7 +159,7 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
     // 2. Accumulate Aux (Standard Alpha Blending)
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        res.aux[i] = prev.aux[i] + T * ctrl.aux[i];
+        res.aux[i] = prev.aux[i] + ctrl.aux[i] * detach(T);
     }
 
     return res;

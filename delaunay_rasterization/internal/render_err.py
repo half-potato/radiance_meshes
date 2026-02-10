@@ -66,7 +66,6 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
 
     # torch.cuda.synchronize()
     # st = time.time()
-    tet_vertices = vertices[indices]
     distortion_img = torch.zeros((render_grid.image_height, 
                                 render_grid.image_width, 4), 
                                 device=device)

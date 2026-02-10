@@ -196,17 +196,16 @@ class iNGPDW(nn.Module):
         last = self.network[-1]
         with torch.no_grad():
             # last.weight[4:, :].zero_()
-            nn.init.uniform_(last.weight.data, a=-1, b=1)
+            # nn.init.uniform_(last.weight.data, a=-1e-1, b=1e-1)
             last.bias[4:].zero_()
             for network, eps in zip(nets, vals):
                 for layer in network[:-1]:
                     if hasattr(layer, 'weight'):
                         nn.init.xavier_uniform_(layer.weight.data, nn.init.calculate_gain('relu'))
                 last = network[-1]
-                with torch.no_grad():
-                    nn.init.uniform_(last.weight.data, a=-eps, b=eps)
-                    # nn.init.xavier_uniform_(m.weight, gain)
-                    last.bias.zero_()
+                nn.init.uniform_(last.weight.data, a=-eps, b=eps)
+                # nn.init.xavier_uniform_(m.weight, gain)
+                last.bias.zero_()
 
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):
         output = self.encoding(x)
@@ -520,8 +519,9 @@ class Model(BaseModel):
         #     ext_vertices = ext_vertices[inds]
         # else:
         #     num_ext = ext_vertices.shape[0]
-        # vertices = torch.cat([vertices, ext_vertices], dim=0)
-        # ext_vertices = torch.empty((0, 3))
+
+        vertices = torch.cat([vertices, ext_vertices], dim=0)
+        ext_vertices = torch.empty((0, 3))
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,
                       max_sh_deg=max_sh_deg, **kwargs)

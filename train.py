@@ -68,8 +68,8 @@ args.max_norm = 1
 args.use_tcnn = False
 args.encoding_lr = 3e-3
 args.final_encoding_lr = 3e-4
-args.network_lr = 1e-3
-args.final_network_lr = 1e-4
+args.network_lr = 3e-3
+args.final_network_lr = 3e-4
 args.hidden_dim = 64
 args.scale_multi = 0.35 # chosen such that 96% of the distribution is within the sphere 
 args.log2_hashmap_size = 23
@@ -104,6 +104,7 @@ args.final_freeze_lr = 1e-4
 args.lambda_dist = 0.0
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
+args.lambda_opacity = 1e-3
 
 # Clone Settings
 args.num_samples = 200
@@ -119,12 +120,10 @@ args.budget = 2_000_000
 # args.clone_min_contrib = 0.003
 # args.split_min_contrib = 0.01
 
-args.within_thresh = 0.5 / 2.7
+args.within_thresh = 0.3 / 2.7
 args.total_thresh = 2.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
-
-args.min_tet_volume = 1e-3
 
 args.lambda_ssim = 0.2
 args.min_t = 0.4
@@ -247,7 +246,8 @@ for iteration in progress_bar:
     # norm_loss = calculate_norm_loss(render_pkg['xyzd'], camera.fx, camera.fy)
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
-           reg
+           reg + \
+           args.lambda_opacity * (1-render_pkg['alpha']).mean()
         #    args.lambda_sh * render_pkg['sh_reg']
         #    args.lambda_dist * dl_loss + \
         #    args.lambda_norm * norm_loss + \
@@ -294,10 +294,10 @@ for iteration in progress_bar:
             # vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
             vis_normal = (render_pkg['xyzd'][..., :3] * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             vis_pred_normal = (pred_normal * 127 + 128).clamp(0, 255).byte().cpu().numpy()
-            # imageio.imwrite(args.output_path / f"normal{iteration}.png",
-            #                 vis_normal)
             imageio.imwrite(args.output_path / f"pred_normal{iteration}.png",
                             vis_pred_normal)
+            # imageio.imwrite(args.output_path / f"normal{iteration}.png",
+            #                 vis_normal)
             # imageio.imwrite(args.output_path / f"depth{iteration}.png",
             #                 vis_depth)
             video_writer.append_data(pad_image2even(sample_image))

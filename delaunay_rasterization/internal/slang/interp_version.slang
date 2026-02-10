@@ -95,7 +95,7 @@ inline CtrlPt integrate_tetra_segment(
 
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        result.aux[i] = g.aux[i] * alpha;
+        result.aux[i] = g.aux[i] * detach(alpha);
     }
     
     return result;
@@ -153,8 +153,8 @@ inline SplatTetrahedra_interp load_tet_alphablend_interp(
     SplatTetrahedra_interp result = {
         virtual_tet, tet, base_color, grd, density
     };
-    [ForceUnroll]
 
+    [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
         // 1 (density) + 3 (color) + 3 (grd) = 7
         result.aux[i] = float(cell_values[g_idx, 7 + i]);

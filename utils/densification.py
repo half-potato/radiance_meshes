@@ -363,5 +363,6 @@ def apply_densification(
 
     print(
         f"#Grow: {total_mask.sum():4d} #Split: {within_mask.sum():4d} | "
+        f"#Alive: {mask_alive.sum():4d} | "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} "
     )
