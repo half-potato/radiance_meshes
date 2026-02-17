@@ -70,10 +70,10 @@ inline CtrlPt integrate_tetra_segment(
 
     float3 v_enter = enter * ray.d + ray.o - g.tet.verts[0];
     float3 v_exit = exit * ray.d + ray.o - g.tet.verts[0];
-    // float3 c_enter = max(dot(g.grd, v_enter) + g.base_color, 0.f);
-    // float3 c_exit = max(dot(g.grd, v_exit) + g.base_color, 0.f);
-    float3 c_enter = dot(g.grd, v_enter) + g.base_color;
-    float3 c_exit = dot(g.grd, v_exit) + g.base_color;
+    float3 c_enter = max(dot(g.grd, v_enter) + g.base_color, 0.f);
+    float3 c_exit = max(dot(g.grd, v_exit) + g.base_color, 0.f);
+    // float3 c_enter = dot(g.grd, v_enter) + g.base_color;
+    // float3 c_exit = dot(g.grd, v_exit) + g.base_color;
 
     // float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
     float alpha = max(-safe_expm1(-g.density * dt), 0.f);

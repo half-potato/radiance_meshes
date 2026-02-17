@@ -208,7 +208,7 @@ class iNGPDW(nn.Module):
                 last.bias.zero_()
 
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):
-        output = self.encoding(x)
+        output = self.encoding(x.detach())
         output = output.reshape(-1, self.dim, self.L)
         if not self.ablate_downweighing:
             cr = cr.detach() * self.scale_multi

@@ -16,11 +16,9 @@ import time
 from tqdm import tqdm
 import numpy as np
 from utils import cam_util
-from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
-# from models.vertex_color import Model, TetOptimizer
-from models.ingp_color import Model, TetOptimizer
-# from models.frozen import FrozenTetModel as Model
-# from models.frozen import FrozenTetOptimizer as TetOptimizer
+from utils.train_util import pad_image2even, pad_hw2even, SimpleSampler
+from delaunay_rasterization import render_flux as render
+from models.flux_model import Model, TetOptimizer
 from models.frozen import freeze_model
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
@@ -83,10 +81,10 @@ args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 args.additional_attr = 0
 
-args.g_init=1e-5
-args.s_init=1e-1
+args.g_init=1e-0
+args.s_init=1e-4
 args.d_init=0.1
-args.c_init=1e-1
+args.c_init=1e-2
 
 # Vertex Settings
 args.lr_delay = 0
@@ -104,7 +102,7 @@ args.final_freeze_lr = 1e-4
 args.lambda_dist = 0.0
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
-args.lambda_opacity = 0.0
+args.lambda_opacity = 1e-3
 
 # Clone Settings
 args.num_samples = 200
@@ -200,7 +198,7 @@ video_writer = imageio.get_writer(str(args.output_path / "training.mp4"), fps=10
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
 for iteration in progress_bar:
-    do_delaunay = iteration % args.delaunay_interval == 0 and iteration < args.freeze_start
+    do_delaunay = iteration % args.delaunay_interval == 0 and 0 < iteration < args.freeze_start
     do_freeze = iteration == args.freeze_start
     do_cloning = iteration in dschedule
     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
@@ -211,18 +209,6 @@ for iteration in progress_bar:
         tet_optim.update_triangulation(
             density_threshold=args.density_threshold if iteration > args.threshold_start else 0,
             alpha_threshold=args.alpha_threshold if iteration > args.threshold_start else 0, high_precision=do_freeze)
-        if do_freeze:
-            del tet_optim
-            # model.eval()
-            # mask = determine_cull_mask(train_cameras, model, args, device)
-            n_tets = model.indices.shape[0]
-            mask = torch.ones((n_tets), device=device, dtype=bool)
-            # model.train()
-            print(f"Kept {mask.sum()} tets")
-            model, tet_optim = freeze_model(model, mask, args)
-            # model, tet_optim = freeze_model(model, **args.as_dict())
-            gc.collect()
-            torch.cuda.empty_cache()
 
     if len(inds) == 0:
         inds = list(range(len(train_cameras)))
@@ -272,7 +258,7 @@ for iteration in progress_bar:
     if do_sh_up:
         model.sh_up()
 
-    if iteration % 10 == 0:
+    if iteration % 1 == 0:
         with torch.no_grad():
             render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
             sample_image = render_pkg['render']
