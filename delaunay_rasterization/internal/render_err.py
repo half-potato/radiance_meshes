@@ -1,12 +1,12 @@
 import torch
 from delaunay_rasterization.internal.render_grid import RenderGrid
-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
 from data.camera import Camera
 from utils.ssim import ssim
 import torch.nn.functional as F
+from delaunay_rasterization.internal.slang.slang_modules import shader_manager
 
 # --- quick, fully-differentiable blur ---------------------------------------
 def gaussian_blur(img: torch.Tensor,
@@ -30,9 +30,9 @@ def gaussian_blur(img: torch.Tensor,
     return F.conv2d(img.unsqueeze(0), kernel, padding=pad,
                     groups=img.shape[0]).squeeze(0)
 
-def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
+def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
     device = model.device
-    indices = model.indices
+    indices = model.indices.clone()
     vertices = model.vertices
     torch.cuda.synchronize()
     st = time.time()
@@ -66,7 +66,6 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
 
     # torch.cuda.synchronize()
     # st = time.time()
-    tet_vertices = vertices[indices]
     distortion_img = torch.zeros((render_grid.image_height, 
                                 render_grid.image_width, 4), 
                                 device=device)
@@ -83,21 +82,14 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
 
     torch.cuda.synchronize()
-    mod = slang_modules.alpha_blend_shaders_interp
-    assert (render_grid.tile_height, render_grid.tile_width) in mod, (
-        'Alpha Blend Shader was not compiled for this tile'
-        f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
-        f' {mod.keys()}'
-    )
-
-    shader = mod[(render_grid.tile_height, render_grid.tile_width)]
+    shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0)
     st = time.time()
     args = dict(
         sorted_gauss_idx=sorted_tetra_idx,
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
-        tet_density=cell_values,
+        cell_values=cell_values,
         output_img=output_img,
         n_contributors=n_contributors,
         tcam=tcam,
@@ -123,12 +115,11 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     ssim_err = (1-ssim(render_img, gt_image).mean(dim=0)).clip(min=0, max=1)
     pixel_err = (l1_err).contiguous()
 
-    mask = camera.gt_alpha_mask.cuda()
-    gt_img = (mask*gt_image).permute(1, 2, 0)
+    gt_img = (gt_mask*gt_image).permute(1, 2, 0)
 
-    pixel_err *= mask[0]
-    ssim_err *= mask[0]
-    render_img *= mask
+    pixel_err *= gt_mask[0]
+    ssim_err *= gt_mask[0]
+    render_img *= gt_mask
     
     assert(pixel_err.shape[0] == render_grid.image_height)
     assert(pixel_err.shape[1] == render_grid.image_width)
@@ -137,8 +128,8 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
     assert(gt_img.shape[0] == render_grid.image_height)
     assert(gt_img.shape[1] == render_grid.image_width)
 
-    tet_err = torch.zeros((tet_vertices.shape[0], 16), dtype=torch.float, device=device)
-    tet_count = torch.zeros((tet_vertices.shape[0], 2), dtype=torch.int32, device=device)
+    tet_err = torch.zeros((indices.shape[0], 16), dtype=torch.float, device=device)
+    tet_count = torch.zeros((indices.shape[0], 2), dtype=torch.int32, device=device)
 
     shader.calc_tet_err(
         **args,

@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from utils.safe_math import safe_div
+from icecream import ic
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))

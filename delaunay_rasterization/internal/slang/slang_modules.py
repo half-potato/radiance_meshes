@@ -1,32 +1,44 @@
-  # Copyright 2024 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import slangtorch
 import os
 
+class ShaderManager:
+    def __init__(self, shaders_dir):
+        self.shaders_dir = shaders_dir
+        self._cache = {}
+        
+        # Load static shaders immediately or lazily as preferred
+        # Since these don't depend on defines, we can load them once to fail fast on errors
+        self.vertex_shader = slangtorch.loadModule(os.path.join(shaders_dir, "vertex_shader.slang"))
+        self.tile_shader = slangtorch.loadModule(os.path.join(shaders_dir, "tile_shader.slang"))
+
+    def get_alphablend(self, tile_height, tile_width, aux_dim):
+        key = (tile_height, tile_width, aux_dim, "alphablend")
+        if key not in self._cache:
+            defines = {
+                "PYTHON_TILE_HEIGHT": tile_height,
+                "PYTHON_TILE_WIDTH": tile_width,
+                "PYTHON_AUX_DIM": aux_dim
+            }
+            self._cache[key] = slangtorch.loadModule(
+                os.path.join(self.shaders_dir, "alphablend_shader.slang"),
+                defines=defines
+            )
+        return self._cache[key]
+
+    def get_interp(self, tile_height, tile_width, aux_dim):
+        key = (tile_height, tile_width, aux_dim, "interp")
+        if key not in self._cache:
+            defines = {
+                "PYTHON_TILE_HEIGHT": tile_height,
+                "PYTHON_TILE_WIDTH": tile_width,
+                "PYTHON_AUX_DIM": aux_dim
+            }
+            self._cache[key] = slangtorch.loadModule(
+                os.path.join(self.shaders_dir, "alphablend_shader_interp.slang"),
+                defines=defines
+            )
+        return self._cache[key]
+
+# Usage instance
 shaders_path = os.path.dirname(__file__)
-
-TILE_SIZES_HW = [(4,4)]#, (8,8), (16,16)]
-
-vertex_shader = slangtorch.loadModule(os.path.join(shaders_path, "vertex_shader.slang"))
-tile_shader = slangtorch.loadModule(os.path.join(shaders_path, "tile_shader.slang"))
-alpha_blend_shaders_interp = {}
-for tile_height, tile_width in TILE_SIZES_HW:
-  alpha_blend_shaders_interp[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader_interp.slang"), 
-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
-
-alpha_blend_shaders = {}
-for tile_height, tile_width in TILE_SIZES_HW:
-  alpha_blend_shaders[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader.slang"), 
-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
+shader_manager = ShaderManager(shaders_path)

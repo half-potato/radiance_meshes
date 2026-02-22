@@ -1,0 +1,1271 @@
+diff --git a/delaunay_rasterization/internal/alphablend_tiled_slang.py b/delaunay_rasterization/internal/alphablend_tiled_slang.py
+index cc49b49..ea5e45c 100644
+--- a/delaunay_rasterization/internal/alphablend_tiled_slang.py
++++ b/delaunay_rasterization/internal/alphablend_tiled_slang.py
+@@ -1,12 +1,12 @@
+ import torch
+ from delaunay_rasterization.internal.render_grid import RenderGrid
+-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
+ from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
+ from icecream import ic
+ import time
+ import math
+ from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
+ from utils.safe_math import safe_div
++from delaunay_rasterization.internal.slang.slang_modules import shader_manager
+ 
+ def fov2focal(fov, pixels):
+     return pixels / (2 * math.tan(fov / 2))
+@@ -62,11 +62,11 @@ def render_constant(camera, indices, vertices, cell_values=None, tile_size=4, mi
+     alpha = image_rgb.permute(2,0,1)[-2, ...]
+     image = image_rgb.permute(2,0,1)[:-2, ...] * camera.gt_alpha_mask.to(device)
+     weight_square = image_rgb.permute(2,0,1)[-1:, ...]
+-    latents = (safe_div(image, weight_square) / 3.5).unsqueeze(0).clip(min=-7, max=7)
++    # latents = (safe_div(image, weight_square) / 3.5).unsqueeze(0).clip(min=-7, max=7)
+     # latents = (image / 3.5).unsqueeze(0).clip(min=-7, max=7)
+     
+     render_pkg = {
+-        'latents': latents,
++        # 'latents': latents,
+         'render': image,
+         'alpha': alpha,
+         'mask': mask,
+@@ -85,20 +85,13 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+                 tcam, ray_jitter,
+                 device="cuda"):
+         output_img = torch.zeros((render_grid.image_height, 
+-                                #   render_grid.image_width, (rgbs.shape[1]-1)//4+2), 
+                                   render_grid.image_width, (rgbs.shape[1]-1)+2), 
+                                  device=device)
+         n_contributors = torch.zeros((render_grid.image_height, 
+                                       render_grid.image_width, 1),
+                                      dtype=torch.int32, device=device)
+ 
+-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
+-            'Alpha Blend Shader was not compiled for this tile'
+-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
+-            f' {slang_modules.alpha_blend_shaders.keys()}'
+-        )
+-
+-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
++        alpha_blend_tile_shader = shader_manager.get_alphablend(render_grid.tile_height, render_grid.tile_width, 0)
+         st = time.time()
+         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
+             sorted_gauss_idx=sorted_tetra_idx,
+@@ -145,13 +138,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+         vertices_grad = torch.zeros_like(vertices)
+         rgbs_grad = torch.zeros_like(rgbs)
+ 
+-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders, (
+-            'Alpha Blend Shader was not compiled for this tile'
+-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
+-            f' {slang_modules.alpha_blend_shaders.keys()}'
+-        )
+-
+-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders[(render_grid.tile_height, render_grid.tile_width)]
++        alpha_blend_tile_shader = shader_manager.get_alphablend(render_grid.tile_height, render_grid.tile_width, 0)
+ 
+         st = time.time()
+         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(
+diff --git a/delaunay_rasterization/internal/alphablend_tiled_slang_interp.py b/delaunay_rasterization/internal/alphablend_tiled_slang_interp.py
+index 91a0d8f..2a72c36 100644
+--- a/delaunay_rasterization/internal/alphablend_tiled_slang_interp.py
++++ b/delaunay_rasterization/internal/alphablend_tiled_slang_interp.py
+@@ -1,6 +1,6 @@
+ import torch
+ from delaunay_rasterization.internal.render_grid import RenderGrid
+-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
++from delaunay_rasterization.internal.slang.slang_modules import shader_manager
+ from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
+ from icecream import ic
+ import time
+@@ -10,13 +10,14 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, 
+                 sorted_tetra_idx, tile_ranges,
+-                indices, vertices, tet_density, render_grid,
+-                tcam, ray_jitter, device="cuda") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++                indices, vertices, cell_values, render_grid,
++                tcam, ray_jitter, aux_dim, device="cuda"
++                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+         distortion_img = torch.zeros((render_grid.image_height, 
+                                   render_grid.image_width, 5), 
+                                  device=device)
+         output_img = torch.zeros((render_grid.image_height, 
+-                                  render_grid.image_width, 4), 
++                                  render_grid.image_width, 4 + aux_dim), 
+                                  device=device)
+         xyzd_img = torch.zeros((render_grid.image_height, 
+                                 render_grid.image_width, 4), 
+@@ -26,25 +27,20 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+                                      dtype=torch.int32, device=device)
+ 
+         tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
+-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
+-            'Alpha Blend Shader was not compiled for this tile'
+-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
+-            f' {slang_modules.alpha_blend_shaders_interp.keys()}'
+-        )
+ 
+         assert(len(ray_jitter.shape) == 3)
+         assert(ray_jitter.shape[0] == render_grid.image_height)
+         assert(ray_jitter.shape[1] == render_grid.image_width)
+         assert(ray_jitter.shape[2] == 2)
+ 
+-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
++        alpha_blend_tile_shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, aux_dim)
+         st = time.time()
+         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
+             sorted_gauss_idx=sorted_tetra_idx,
+             tile_ranges=tile_ranges,
+             indices=indices,
+             vertices=vertices,
+-            tet_density=tet_density,
++            cell_values=cell_values,
+             output_img=output_img,
+             xyzd_img=xyzd_img,
+             distortion_img=distortion_img,
+@@ -62,7 +58,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+ 
+         tensors = [
+             sorted_tetra_idx, tile_ranges,
+-            indices, vertices, tet_density, 
++            indices, vertices, cell_values, 
+             output_img, xyzd_img, distortion_img, n_contributors,
+             ray_jitter
+         ]
+@@ -70,6 +66,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+         ctx.save_for_backward(*tensors, *tensor_data)
+         ctx.non_tensor_data = non_tensor_data
+         ctx.len_tensors = len(tensors)
++        ctx.aux_dim = aux_dim
+ 
+         ctx.render_grid = render_grid
+ 
+@@ -78,22 +75,16 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img, grad_vert_alive):
+         (sorted_tetra_idx, tile_ranges, 
+-         indices, vertices, tet_density,
++         indices, vertices, cell_values,
+          output_img, xyzd_img, distortion_img, n_contributors,
+             ray_jitter) = ctx.saved_tensors[:ctx.len_tensors]
+         tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
+         render_grid = ctx.render_grid
+ 
+         vertices_grad = torch.zeros_like(vertices)
+-        tet_density_grad = torch.zeros_like(tet_density)
+-
+-        assert (render_grid.tile_height, render_grid.tile_width) in slang_modules.alpha_blend_shaders_interp, (
+-            'Alpha Blend Shader was not compiled for this tile'
+-            f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
+-            f' {slang_modules.alpha_blend_shaders_interp.keys()}'
+-        )
++        cell_values_grad = torch.zeros_like(cell_values)
+ 
+-        alpha_blend_tile_shader = slang_modules.alpha_blend_shaders_interp[(render_grid.tile_height, render_grid.tile_width)]
++        alpha_blend_tile_shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, ctx.aux_dim)
+ 
+         tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=vertices.device)
+         st = time.time()
+@@ -103,13 +94,14 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+             indices=indices,
+             vertices=(vertices, vertices_grad),
+             tcam=tcam,
+-            tet_density=(tet_density, tet_density_grad),
++            cell_values=(cell_values, cell_values_grad),
+             output_img=(output_img, grad_output_img),
+             xyzd_img=(xyzd_img, grad_xyzd_img),
+             distortion_img=(distortion_img, grad_distortion_img),
+             n_contributors=n_contributors,
+             tet_alive=tet_alive,
+-            ray_jitter=ray_jitter)
++            ray_jitter=ray_jitter,
++        )
+         
+         kernel_with_args.launchRaw(
+             blockSize=(render_grid.tile_width, 
+@@ -118,5 +110,5 @@ class AlphaBlendTiledRender(torch.autograd.Function):
+                       render_grid.grid_height, 1)
+         )
+ 
+-        return (None, None, None, vertices_grad, tet_density_grad, 
+-                None, None, None)
++        return (None, None, None, vertices_grad, cell_values_grad, 
++                None, None, None, None)
+diff --git a/delaunay_rasterization/internal/render_err.py b/delaunay_rasterization/internal/render_err.py
+index d2dab92..6f285b2 100644
+--- a/delaunay_rasterization/internal/render_err.py
++++ b/delaunay_rasterization/internal/render_err.py
+@@ -1,12 +1,12 @@
+ import torch
+ from delaunay_rasterization.internal.render_grid import RenderGrid
+-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
+ from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
+ from icecream import ic
+ import time
+ from data.camera import Camera
+ from utils.ssim import ssim
+ import torch.nn.functional as F
++from delaunay_rasterization.internal.slang.slang_modules import shader_manager
+ 
+ # --- quick, fully-differentiable blur ---------------------------------------
+ def gaussian_blur(img: torch.Tensor,
+@@ -32,7 +32,7 @@ def gaussian_blur(img: torch.Tensor,
+ 
+ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
+     device = model.device
+-    indices = model.indices
++    indices = model.indices.clone()
+     vertices = model.vertices
+     torch.cuda.synchronize()
+     st = time.time()
+@@ -83,21 +83,14 @@ def render_err(gt_image, camera: Camera, model, tile_size=16, min_t=0.1, **kwarg
+     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
+ 
+     torch.cuda.synchronize()
+-    mod = slang_modules.alpha_blend_shaders_interp
+-    assert (render_grid.tile_height, render_grid.tile_width) in mod, (
+-        'Alpha Blend Shader was not compiled for this tile'
+-        f' {render_grid.tile_height}x{render_grid.tile_width} configuration, available configurations:'
+-        f' {mod.keys()}'
+-    )
+-
+-    shader = mod[(render_grid.tile_height, render_grid.tile_width)]
++    shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, model.additional_attr)
+     st = time.time()
+     args = dict(
+         sorted_gauss_idx=sorted_tetra_idx,
+         tile_ranges=tile_ranges,
+         indices=indices,
+         vertices=vertices,
+-        tet_density=cell_values,
++        cell_values=cell_values,
+         output_img=output_img,
+         n_contributors=n_contributors,
+         tcam=tcam,
+diff --git a/delaunay_rasterization/internal/slang/alphablend_shader_interp.slang b/delaunay_rasterization/internal/slang/alphablend_shader_interp.slang
+index f06da8d..15e6751 100644
+--- a/delaunay_rasterization/internal/slang/alphablend_shader_interp.slang
++++ b/delaunay_rasterization/internal/slang/alphablend_shader_interp.slang
+@@ -21,13 +21,13 @@ struct DistortionState5 : IDifferentiable {
+ 
+ [Differentiable]
+ float tukey_power_ladder(float x, float p) {
+-  if (p == 1) {
+-    return x;
+-  }
+-  let xp = abs(x);
+-  let xs = xp / max(TINY_VAL, abs(p - 1));
+-  let y = sign(x) * abs(p - 1) / p * (pow(xs + 1, p) - 1);
+-  return y;
++    if (p == 1) {
++        return x;
++    }
++    let xp = abs(x);
++    let xs = xp / max(TINY_VAL, abs(p - 1));
++    let y = sign(x) * abs(p - 1) / p * (pow(xs + 1, p) - 1);
++    return y;
+ }
+ 
+ [Differentiable]
+@@ -105,7 +105,7 @@ float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
+     float transmittance_t_nm1 = safe_exp(pixel_state_t_nm1.a);
+     float3 color_t_n = pixel_state_t_nm1.rgb + gauss_rgba_t_n.rgb * transmittance_t_nm1;
+     float log_transmittance_t_n = pixel_state_t_nm1.a - gauss_rgba_t_n.a;
+-    
++
+     return float4(color_t_n, log_transmittance_t_n);
+ }
+ 
+@@ -130,51 +130,82 @@ struct AlphaOut: IDifferentiable {
+     float4 rgba;
+     DistortionState5 distortion_state;
+     float4 xyzd;
++    float aux[AUX_DIM];
+ };
+ 
++// Helper to create a zeroed struct
++AlphaOut get_empty_alpha_out() {
++    AlphaOut ao;
++    ao.rgba = float4(0.f);
++    ao.distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};
++    ao.xyzd = float4(0.f);
++    
++    [ForceUnroll]
++    for (int i = 0; i < AUX_DIM; ++i) {
++        ao.aux[i] = 0.f;
++    }
++    return ao;
++}
++
+ [Differentiable]
+ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
+     float T = safe_exp(prev.rgba.a);
+-    return {
+-        update_pixel_state(prev.rgba, ctrl.rgba),
+-        update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist),
+-        update_xyzd_state(prev.xyzd, ctrl.xyzd, T)
+-    };
++
++    AlphaOut res;
++    res.rgba = update_pixel_state(prev.rgba, ctrl.rgba);
++    res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist);
++    res.xyzd = update_xyzd_state(prev.xyzd, ctrl.xyzd, T);
++
++    // 2. Accumulate Aux (Standard Alpha Blending)
++    [ForceUnroll]
++    for (int i = 0; i < AUX_DIM; ++i) {
++        res.aux[i] = prev.aux[i] + T * ctrl.aux[i];
++    }
++
++    return res;
+ }
+ 
+ AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
+     float4 pix_state = undo_pixel_state(curr.rgba, ctrl.rgba);
+     float T = safe_exp(pix_state.a);
+-    return {
+-        pix_state,
+-        undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist),
+-        undo_xyzd_state(curr.xyzd, ctrl.xyzd, T)
+-    };
++
++    AlphaOut res;
++    res.rgba = pix_state;
++    res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist);
++    res.xyzd = undo_xyzd_state(curr.xyzd, ctrl.xyzd, T);
++
++    // 3. Undo Aux
++    [ForceUnroll]
++    for (int i = 0; i < AUX_DIM; ++i) {
++        res.aux[i] = curr.aux[i] - T * ctrl.aux[i];
++    }
++
++    return res;
+ }
+ 
+ [BackwardDerivative(bwd_alpha_blend)]
+ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+-                   TensorView<int32_t> indices,
+-                   DiffTensorView vertices,
+-                   DiffTensorView tet_density,
+-                   DiffTensorView final_pixel_state,
+-                   DiffTensorView final_distortion_state,
+-                   DiffTensorView final_xyzd_state,
+-                   TensorView<int32_t> n_contributors,
+-                   TensorView<bool> tet_alive,
+-                   no_diff Camera cam,
+-                   no_diff float ray_jitter_x,
+-                   no_diff float ray_jitter_y,
+-                   uint32_t2 pix_coord,
+-                   uint32_t tile_idx_start,
+-                   uint32_t tile_idx_end)
++                     TensorView<int32_t> indices,
++                     DiffTensorView vertices,
++                     DiffTensorView cell_values,
++                     DiffTensorView final_pixel_state,
++                     DiffTensorView final_distortion_state,
++                     DiffTensorView final_xyzd_state,
++                     TensorView<int32_t> n_contributors,
++                     TensorView<bool> tet_alive,
++                     no_diff Camera cam,
++                     no_diff float ray_jitter_x,
++                     no_diff float ray_jitter_y,
++                     uint32_t2 pix_coord,
++                     uint32_t tile_idx_start,
++                     uint32_t tile_idx_end)
+ {
+     float2 center_pix_coord = {pix_coord.x+ray_jitter_x, pix_coord.y+ray_jitter_y};
+-    float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 0.f);
+-    DistortionState5 curr_distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};
+-    AlphaOut ao = {
+-        curr_pixel_state, curr_distortion_state, float4(0.f, 0.f, 0.f, 0.f)
+-    };
++    AlphaOut ao = get_empty_alpha_out();
++    [ForceUnroll]
++    for(int k=0; k<AUX_DIM; ++k) {
++        ao.aux[k] = 0.0f;
++    }
+     uint32_t block_size = cam.tile_height * cam.tile_width;
+     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
+     bool thread_active = is_inside;
+@@ -195,7 +226,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
+             bool valid = coll_id < indices.size(0);
+             collected_idx[thread_rank] = valid ? coll_id : 0;
+-            SplatTetrahedra_interp g = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_density);
++            SplatTetrahedra_interp g = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, cell_values);
+             if (!valid) g.density = 0;
+             collected_splats[thread_rank] = g;
+         }
+@@ -229,7 +260,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+                      TensorView<int32_t> indices,
+                      DiffTensorView vertices,
+-                     DiffTensorView tet_density,
++                     DiffTensorView cell_values,
+                      DiffTensorView final_pixel_state,
+                      DiffTensorView final_distortion_state,
+                      DiffTensorView final_xyzd_state,
+@@ -251,27 +282,31 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+     int splats_left_to_process = tile_idx_end - tile_idx_start;
+     int64_t current_splat_offset = tile_idx_end - tile_idx_start;
+ 
+-    float4 current_pixel_state;
+-    DistortionState5 curr_distortion_state;
+-    float4 current_xyzd_state;
+     int32_t n_contrib_fwd;
++    AlphaOut ao = get_empty_alpha_out();
++
+     if (is_inside) {
+-        curr_distortion_state = {final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+-                                 final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+-                                 final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
+-                                 final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)],
+-                                 final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4)]};
+-        current_pixel_state = float4(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
+-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]);
+-        current_xyzd_state = float4(final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+-                                     final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+-                                     final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
+-                                     final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]);
++        ao.distortion_state = {final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
++            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
++            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
++            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)],
++            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4)]};
++        ao.rgba = float4(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
++                         final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
++                         final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
++                         final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]);
++
++        [ForceUnroll]
++        for (int i = 0; i < AUX_DIM; ++i) {
++            ao.aux[i] = final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4 + i)];
++        }
++
++        ao.xyzd = float4(final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
++                         final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
++                         final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
++                         final_xyzd_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]);
+         n_contrib_fwd = n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)];
+     }
+-    AlphaOut ao = {current_pixel_state, curr_distortion_state, current_xyzd_state};
+ 
+     Ray ray = get_ray(cam, center_pix_coord);
+     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
+@@ -284,7 +319,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_end - progress - 1]);
+             bool valid = coll_id < indices.size(0);
+             collected_idx[thread_rank] = valid ? coll_id : 0;
+-            SplatTetrahedra_interp splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_density);
++            SplatTetrahedra_interp splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, cell_values);
+             if (!valid) splat.density = 0;
+             collected_splats[thread_rank] = splat;
+         }
+@@ -316,7 +351,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+                         dp_tetra_ctrl.d.density,
+                     };
+                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
+-                    bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_density, dp_g.d);
++                    bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, cell_values, dp_g.d);
+                 }
+             }
+         }
+@@ -331,7 +366,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
+                  TensorView<int32_t> tile_ranges,
+                  TensorView<int32_t> indices,
+                  DiffTensorView vertices,
+-                 DiffTensorView tet_density,
++                 DiffTensorView cell_values,
+                  DiffTensorView output_img,
+                  DiffTensorView xyzd_img,
+                  DiffTensorView distortion_img,
+@@ -365,7 +400,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
+         sorted_gauss_idx,
+         indices,
+         vertices,
+-        tet_density,
++        cell_values,
+         output_img,
+         distortion_img,
+         xyzd_img,
+@@ -377,46 +412,52 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
+         pix_coord,
+         tile_idx_start,
+         tile_idx_end);
+-                                    
++
+     if (is_inside) {
+-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.rgba.r);
+-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.rgba.g);
+-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.rgba.b);
+-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.rgba.a);
+-      xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.xyzd.x);
+-      xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.xyzd.y);
+-      xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.xyzd.z);
+-      xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.xyzd.a);
+-      distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.distortion_state.x);
+-      distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.distortion_state.y);
+-      distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.distortion_state.z);
+-      distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.distortion_state.w);
+-      distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), pixel_states.distortion_state.v);
++        output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.rgba.r);
++        output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.rgba.g);
++        output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.rgba.b);
++        output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.rgba.a);
++        [ForceUnroll]
++        for (int i = 0; i < AUX_DIM; ++i) {
++            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4 + i), pixel_states.aux[i]);
++        }
++
++        xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.xyzd.x);
++        xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.xyzd.y);
++        xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.xyzd.z);
++        xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.xyzd.a);
++
++        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.distortion_state.x);
++        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.distortion_state.y);
++        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.distortion_state.z);
++        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.distortion_state.w);
++        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), pixel_states.distortion_state.v);
+     }
+ }
+ 
+ [AutoPyBindCUDA]
+ [CUDAKernel]
+ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+-                 TensorView<int32_t> tile_ranges,
+-                 TensorView<int32_t> indices,
+-                 TensorView<float> vertices,
+-                 TensorView<float> tet_density,
+-                 TensorView<float> output_img,
+-                 TensorView<float> gt,
+-                 TensorView<float> pixel_err,
+-                 TensorView<float> ssim_err,
+-                 TensorView<float> tet_err,
+-                 TensorView<int32_t> tet_count,
+-                 TensorView<int32_t> n_contributors,
+-                 TensorCamera tcam)
++                  TensorView<int32_t> tile_ranges,
++                  TensorView<int32_t> indices,
++                  TensorView<float> vertices,
++                  TensorView<float> cell_values,
++                  TensorView<float> output_img,
++                  TensorView<float> gt,
++                  TensorView<float> pixel_err,
++                  TensorView<float> ssim_err,
++                  TensorView<float> tet_err,
++                  TensorView<int32_t> tet_count,
++                  TensorView<int32_t> n_contributors,
++                  TensorCamera tcam)
+ {
+     uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
+     uint32_t2 pix_coord = globalIdx.xy;
+ 
+     Camera cam = load_tensor_camera(tcam);
+     uint32_t tile_idx = cudaBlockIdx().y * cam.grid_width + cudaBlockIdx().x;
+-    
++
+     // --- CRITICAL FIX: Bounds check tile_idx ---
+     // Without this, extra threads read unmapped memory from tile_ranges,
+     // get garbage start/end indices, and crash the GPU reading sorted_gauss_idx.
+@@ -444,7 +485,7 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+         sorted_gauss_idx,
+         indices,
+         vertices,
+-        tet_density,
++        cell_values,
+         output_img,
+         tet_err,
+         tet_count,
+@@ -459,26 +500,25 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+ }
+ 
+ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+-                  TensorView<int32_t> indices,
+-                  TensorView<float> vertices,
+-                  TensorView<float> tet_density,
+-                  TensorView<float> final_pixel_state,
+-                  TensorView<float> tet_err,
+-                  TensorView<int32_t> tet_count,
+-                  TensorView<int32_t> n_contributors,
+-                  Camera cam,
+-                  uint32_t2 pix_coord,
+-                  uint32_t tile_idx_start,
+-                  uint32_t tile_idx_end,
+-                  float pixel_err,
+-                  float ssim_err,
+-                  float3 gt_pixel)
++                       TensorView<int32_t> indices,
++                       TensorView<float> vertices,
++                       TensorView<float> cell_values,
++                       TensorView<float> final_pixel_state,
++                       TensorView<float> tet_err,
++                       TensorView<int32_t> tet_count,
++                       TensorView<int32_t> n_contributors,
++                       Camera cam,
++                       uint32_t2 pix_coord,
++                       uint32_t tile_idx_start,
++                       uint32_t tile_idx_end,
++                       float pixel_err,
++                       float ssim_err,
++                       float3 gt_pixel)
+ {
+     float2 center_pix_coord = {pix_coord.x+0.5, pix_coord.y+0.5};
+-    float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 1.f);
+-    DistortionState5 curr_distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};
+-    AlphaOut ao = { curr_pixel_state, curr_distortion_state };
+-    
++    AlphaOut ao = get_empty_alpha_out();
++    ao.rgba = {0.f, 0.f, 0.f, 1.f};
++
+     uint32_t block_size = cam.tile_height * cam.tile_width;
+     bool is_inside = (pix_coord.x < cam.W && pix_coord.y < cam.H);
+     bool thread_active = is_inside;
+@@ -489,16 +529,16 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+     Ray ray = get_ray(cam, center_pix_coord);
+ 
+     int splats_left_to_process = tile_idx_end - tile_idx_start;
+-    
++
+     for (int i = 0; i < shared_memory_rounds; i++)
+     {
+         AllMemoryBarrierWithGroupSync();
+         int splat_pointer_offset = i * block_size + thread_rank;
+-        
++
+         // Use Sentinel for invalid reads
+         uint32_t coll_id = 0xFFFFFFFF; 
+         bool valid_read = (tile_idx_start + splat_pointer_offset < tile_idx_end) && 
+-                          (tile_idx_start + splat_pointer_offset < sorted_gauss_idx.size(0));
++            (tile_idx_start + splat_pointer_offset < sorted_gauss_idx.size(0));
+ 
+         if (valid_read)
+         {
+@@ -509,10 +549,10 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+         }
+ 
+         collected_idx[thread_rank] = coll_id;
+-        
++
+         // Only load if valid ID
+         if (coll_id != 0xFFFFFFFF) {
+-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_density);
++            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, cell_values);
+         }
+ 
+         AllMemoryBarrierWithGroupSync();
+@@ -545,7 +585,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+                     float w = T;
+                     float3 p1 = tetra_ctrl.dist.x * ray.d + ray.o;
+                     float3 p2 = tetra_ctrl.dist.y * ray.d + ray.o;
+-                    
++
+                     tet_err.InterlockedAdd(uint2(g_idx, 6), w * p1.x, old_val);
+                     tet_err.InterlockedAdd(uint2(g_idx, 7), w * p1.y, old_val);
+                     tet_err.InterlockedAdd(uint2(g_idx, 8), w * p1.z, old_val);
+@@ -560,7 +600,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
+                     tet_err.InterlockedAdd(uint2(g_idx, 15), w * centroid.z, old_val);
+ 
+                     tet_count.InterlockedAdd(uint2(g_idx, 0), 1, old_ival);
+-                    
++
+                     int T_int = int(65535 * T);
+                     tet_count.InterlockedMax(uint2(g_idx, 1), T_int, old_ival);
+ 
+diff --git a/delaunay_rasterization/internal/slang/interp_version.slang b/delaunay_rasterization/internal/slang/interp_version.slang
+index 2335a25..9b9a514 100644
+--- a/delaunay_rasterization/internal/slang/interp_version.slang
++++ b/delaunay_rasterization/internal/slang/interp_version.slang
+@@ -1,3 +1,5 @@
++static const uint AUX_DIM = PYTHON_AUX_DIM;
++
+ import intersect;
+ import utils;
+ import safe_math;
+@@ -8,6 +10,7 @@ struct CtrlPt: IDifferentiable {
+     float2 dist;
+     float density;
+     float4 xyzd;
++    float aux[AUX_DIM]; // <--- Added
+ };
+ 
+ struct SplatTetrahedra_interp : IDifferentiable
+@@ -17,6 +20,7 @@ struct SplatTetrahedra_interp : IDifferentiable
+     float3 base_color;
+     float3 grd;
+     float density;
++    float aux[AUX_DIM]; // <--- Added
+ };
+ 
+ void print_verts(float4x3 verts) {
+@@ -82,7 +86,19 @@ inline CtrlPt integrate_tetra_segment(
+                     final_color.y,
+                     final_color.z,
+                     g.density * dt };
+-    return { rgba, { enter, exit }, g.density, float4(rendered_norm, depth) };
++
++    CtrlPt result;
++    result.rgba = { final_color.x, final_color.y, final_color.z, g.density * dt };
++    result.dist = { enter, exit };
++    result.density = g.density;
++    result.xyzd = float4(rendered_norm, depth);
++
++    [ForceUnroll]
++    for (int i = 0; i < AUX_DIM; ++i) {
++        result.aux[i] = g.aux[i] * alpha;
++    }
++    
++    return result;
+ }
+ 
+ [Differentiable]
+@@ -117,26 +133,33 @@ inline SplatTetrahedra_interp load_tet_alphablend_interp(
+     int32_t        g_idx,
+     DiffTensorView vertices,
+     TensorView<int32_t> indices,
+-    DiffTensorView tet_density)
++    DiffTensorView cell_values)
+ {
+     no_diff uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
+     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
+ 
+-    float density = max(float(tet_density[g_idx, 0]), 0.f);
++    float density = max(float(cell_values[g_idx, 0]), 0.f);
+     float3 base_color = {
+-        float(tet_density[g_idx, 1]),
+-        float(tet_density[g_idx, 2]),
+-        float(tet_density[g_idx, 3]),
++        float(cell_values[g_idx, 1]),
++        float(cell_values[g_idx, 2]),
++        float(cell_values[g_idx, 3]),
+     };
+     float3 grd = {
+-        float(tet_density[g_idx, 4]),
+-        float(tet_density[g_idx, 5]),
+-        float(tet_density[g_idx, 6]),
++        float(cell_values[g_idx, 4]),
++        float(cell_values[g_idx, 5]),
++        float(cell_values[g_idx, 6]),
+     };
+ 
+     SplatTetrahedra_interp result = {
+         virtual_tet, tet, base_color, grd, density
+     };
++    [ForceUnroll]
++
++    for (int i = 0; i < AUX_DIM; ++i) {
++        // 1 (density) + 3 (color) + 3 (grd) = 7
++        result.aux[i] = float(cell_values[g_idx, 7 + i]);
++    }
++
+     return result;
+ }
+ 
+@@ -144,25 +167,29 @@ inline SplatTetrahedra_interp load_tet_alphablend_interp(
+     int32_t        g_idx,
+     TensorView<float> vertices,
+     TensorView<int32_t> indices,
+-    TensorView<float>  tet_density)
++    TensorView<float>  cell_values)
+ {
+     uint4 virtual_tet = load_virtual_tetrahedra(g_idx, indices);
+     Tetrahedra tet    = load_tetrahedra(vertices, virtual_tet);
+ 
+-    float density = max(float(tet_density[g_idx, 0]), 0.f);
++    float density = max(float(cell_values[g_idx, 0]), 0.f);
+     SplatTetrahedra_interp result;
+     result.vtet = virtual_tet;
+     result.tet       = tet;
+     result.density   = density;
+     result.base_color = {
+-        float(tet_density[g_idx, 1]),
+-        float(tet_density[g_idx, 2]),
+-        float(tet_density[g_idx, 3]),
++        float(cell_values[g_idx, 1]),
++        float(cell_values[g_idx, 2]),
++        float(cell_values[g_idx, 3]),
+     };
+     result.grd = {
+-        float(tet_density[g_idx, 4]),
+-        float(tet_density[g_idx, 5]),
+-        float(tet_density[g_idx, 6]),
++        float(cell_values[g_idx, 4]),
++        float(cell_values[g_idx, 5]),
++        float(cell_values[g_idx, 6]),
+     };
++    for (int i = 0; i < AUX_DIM; ++i) {
++        // 1 (density) + 3 (color) + 3 (grd) = 7
++        result.aux[i] = float(cell_values[g_idx, 7 + i]);
++    }
+     return result;
+ }
+diff --git a/delaunay_rasterization/internal/slang/slang_modules.py b/delaunay_rasterization/internal/slang/slang_modules.py
+index 5b1fab5..a6668a0 100644
+--- a/delaunay_rasterization/internal/slang/slang_modules.py
++++ b/delaunay_rasterization/internal/slang/slang_modules.py
+@@ -1,32 +1,44 @@
+-  # Copyright 2024 Google LLC
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#     https://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+ import slangtorch
+ import os
+ 
+-shaders_path = os.path.dirname(__file__)
++class ShaderManager:
++    def __init__(self, shaders_dir):
++        self.shaders_dir = shaders_dir
++        self._cache = {}
++        
++        # Load static shaders immediately or lazily as preferred
++        # Since these don't depend on defines, we can load them once to fail fast on errors
++        self.vertex_shader = slangtorch.loadModule(os.path.join(shaders_dir, "vertex_shader.slang"))
++        self.tile_shader = slangtorch.loadModule(os.path.join(shaders_dir, "tile_shader.slang"))
+ 
+-TILE_SIZES_HW = [(4,4)]#, (8,8), (16,16)]
++    def get_alphablend(self, tile_height, tile_width, aux_dim):
++        key = (tile_height, tile_width, aux_dim, "alphablend")
++        if key not in self._cache:
++            defines = {
++                "PYTHON_TILE_HEIGHT": tile_height,
++                "PYTHON_TILE_WIDTH": tile_width,
++                "PYTHON_AUX_DIM": aux_dim
++            }
++            self._cache[key] = slangtorch.loadModule(
++                os.path.join(self.shaders_dir, "alphablend_shader.slang"),
++                defines=defines
++            )
++        return self._cache[key]
+ 
+-vertex_shader = slangtorch.loadModule(os.path.join(shaders_path, "vertex_shader.slang"))
+-tile_shader = slangtorch.loadModule(os.path.join(shaders_path, "tile_shader.slang"))
+-alpha_blend_shaders_interp = {}
+-for tile_height, tile_width in TILE_SIZES_HW:
+-  alpha_blend_shaders_interp[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader_interp.slang"), 
+-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
++    def get_interp(self, tile_height, tile_width, aux_dim):
++        key = (tile_height, tile_width, aux_dim, "interp")
++        if key not in self._cache:
++            defines = {
++                "PYTHON_TILE_HEIGHT": tile_height,
++                "PYTHON_TILE_WIDTH": tile_width,
++                "PYTHON_AUX_DIM": aux_dim
++            }
++            self._cache[key] = slangtorch.loadModule(
++                os.path.join(self.shaders_dir, "alphablend_shader_interp.slang"),
++                defines=defines
++            )
++        return self._cache[key]
+ 
+-alpha_blend_shaders = {}
+-for tile_height, tile_width in TILE_SIZES_HW:
+-  alpha_blend_shaders[(tile_height, tile_width)] = slangtorch.loadModule(os.path.join(shaders_path, "alphablend_shader.slang"), 
+-                                                                         defines={"PYTHON_TILE_HEIGHT": tile_height, "PYTHON_TILE_WIDTH": tile_width})
+\ No newline at end of file
++# Usage instance
++shaders_path = os.path.dirname(__file__)
++shader_manager = ShaderManager(shaders_path)
+diff --git a/delaunay_rasterization/internal/slang/tile_shader.slang b/delaunay_rasterization/internal/slang/tile_shader.slang
+index 408fcee..e24d6b0 100644
+--- a/delaunay_rasterization/internal/slang/tile_shader.slang
++++ b/delaunay_rasterization/internal/slang/tile_shader.slang
+@@ -33,36 +33,35 @@ void generate_keys(TensorView<float> xyz_vs,
+         xyz_vs[uint2(globalIdx, 2)]
+     };
+ 
+-    // --- FIX 1: Establish Hard Limits for this Thread ---
+-    int32_t offset;
+-    int32_t limit; // The exclusive upper bound for this specific thread
+-
+-    if (globalIdx == 0) {
+-        offset = 0;
+-        // The first thread writes up to the first offset
+-        limit = index_buffer_offset[0];
+-    } else {
+-        offset = index_buffer_offset[globalIdx - 1];
+-        limit = index_buffer_offset[globalIdx];
+-    }
++    // 1. Calculate the allocated range for this tetrahedron
++    int32_t start_offset = (globalIdx == 0) ? 0 : index_buffer_offset[globalIdx - 1];
++    int32_t end_offset = index_buffer_offset[globalIdx];
++    int32_t allocated_count = end_offset - start_offset;
++
++    // 2. Safety: If 0 space was allocated (e.g. filtered in Python), DO NOT WRITE.
++    if (allocated_count <= 0) return;
++
++    // 3. Clamp writing pointer to buffer size
++    int32_t buffer_limit = int32_t(out_unsorted_keys.size(0));
++    if (start_offset >= buffer_limit) return;
+     
+-    // Safety clamp against the global buffer size
+-    int32_t buffer_size = int32_t(out_unsorted_keys.size(0));
+-    if (limit > buffer_size) limit = buffer_size;
++    // Hard clamp the end to the buffer size
++    if (end_offset > buffer_limit) end_offset = buffer_limit;
+ 
+     int32_t rect_min_x = rect_tile_space[uint2(globalIdx, 0)];
+     int32_t rect_min_y = rect_tile_space[uint2(globalIdx, 1)];
+     int32_t rect_max_x = rect_tile_space[uint2(globalIdx, 2)];
+     int32_t rect_max_y = rect_tile_space[uint2(globalIdx, 3)];
+ 
++    int32_t current_write_idx = start_offset;
++
+     for (int32_t y = rect_min_y; y < rect_max_y; y++)
+     {
+         for (int32_t x = rect_min_x; x < rect_max_x; x++)
+         {
+-            // --- FIX 2: Check bounds before writing ---
+-            // If the rectangle is larger than the allocated 'tiles_touched' count,
+-            // we stop writing to prevent corrupting the next thread's data or crashing.
+-            if (offset >= limit) 
++            // 4. CRITICAL: Stop writing if we exceed our OWN allocated slice.
++            // Even if the rect says "write 100", if allocated_count is 50, we stop at 50.
++            if (current_write_idx >= end_offset) 
+                 return;
+ 
+             uint64_t key = y * grid_width + x;
+@@ -70,9 +69,10 @@ void generate_keys(TensorView<float> xyz_vs,
+             uint32_t fk = float2sortable_key(ndc_xyz.z);
+             key = key | fk;
+ 
+-            out_unsorted_keys[offset] = key;
+-            out_unsorted_gauss_idx[offset] = globalIdx;
+-            offset++;
++            out_unsorted_keys[current_write_idx] = key;
++            out_unsorted_gauss_idx[current_write_idx] = globalIdx;
++            
++            current_write_idx++;
+         }
+     }
+ }
+diff --git a/delaunay_rasterization/internal/tile_shader_slang.py b/delaunay_rasterization/internal/tile_shader_slang.py
+index 6706fde..cabda09 100644
+--- a/delaunay_rasterization/internal/tile_shader_slang.py
++++ b/delaunay_rasterization/internal/tile_shader_slang.py
+@@ -1,5 +1,5 @@
+ import torch
+-import delaunay_rasterization.internal.slang.slang_modules as slang_modules
++from delaunay_rasterization.internal.slang.slang_modules import shader_manager
+ import math
+ from delaunay_rasterization.internal.sort_by_keys import sort_by_keys_cub
+ from icecream import ic
+@@ -34,16 +34,26 @@ def vertex_and_tile_shader(indices,
+     torch.cuda.synchronize()
+ 
+     with torch.no_grad():
+-        # index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int64)
+-        # 
+-        # # Check if we have a runaway allocation (e.g. > 200 million keys is suspicious)
+-        # total_size_index_buffer = index_buffer_offset[-1].item() if index_buffer_offset.numel() > 0 else 0
+-        # 
+-        # # Hard limit to prevent OOM/Stomps if geometry explodes
+-        # MAX_KEYS = 500_000_000
+-        # if total_size_index_buffer > MAX_KEYS:
+-        #      print(f"WARNING: Exploding geometry detected! Requested {total_size_index_buffer} keys. Clamping.")
+-        #     tiles_touched[tiles_touched >= cam['grid_width']*cam['grid_height']] = 0
++        min_x = rect_tile_space[..., 0]
++        min_y = rect_tile_space[..., 1]
++        max_x = rect_tile_space[..., 2]
++        max_y = rect_tile_space[..., 3]
++
++        # Use long to prevent overflow during multiplication if a rect is huge
++        tiles_touched = ((max_x - min_x).long() * (max_y - min_y).long()).int()
++
++        index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=torch.int64)
++
++        # Check if we have a runaway allocation (e.g. > 200 million keys is suspicious)
++        total_size_index_buffer = index_buffer_offset[-1].item() if index_buffer_offset.numel() > 0 else 0
++
++        # Hard limit to prevent OOM/Stomps if geometry explodes
++        MAX_KEYS = 500_000_000
++        if total_size_index_buffer > MAX_KEYS:
++            print(f"WARNING: Exploding geometry detected! Requested {total_size_index_buffer} keys. Clamping.")
++            bad_mask = tiles_touched >= cam['grid_width']*cam['grid_height']
++            tiles_touched[bad_mask] = 0
++            rect_tile_space[bad_mask] = 0
+ 
+         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
+         max_mask = (tiles_touched == cam['grid_width']*cam['grid_height'])
+@@ -55,7 +65,7 @@ def vertex_and_tile_shader(indices,
+                                          device="cuda", 
+                                          dtype=torch.int32)
+ 
+-        slang_modules.tile_shader.generate_keys(xyz_vs=vs_tetra,
++        shader_manager.tile_shader.generate_keys(xyz_vs=vs_tetra,
+                                                 rect_tile_space=rect_tile_space,
+                                                 index_buffer_offset=index_buffer_offset,
+                                                 out_unsorted_keys=unsorted_keys,
+@@ -74,7 +84,7 @@ def vertex_and_tile_shader(indices,
+                                   device="cuda",
+                                   dtype=torch.int32)
+         if total_size_index_buffer > 0:
+-            slang_modules.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
++            shader_manager.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
+                                                         out_tile_ranges=tile_ranges).launchRaw(
+                     blockSize=(256, 1, 1),
+                     gridSize=(ceil_div(total_size_index_buffer, 256).item(), 1, 1)
+@@ -105,7 +115,7 @@ class VertexShader(torch.autograd.Function):
+                                    device="cuda",
+                                    dtype=torch.float)
+         
+-        slang_modules.vertex_shader.vertex_shader(indices=indices,
++        shader_manager.vertex_shader.vertex_shader(indices=indices,
+                                                   vertices=vertices,
+                                                   out_tiles_touched=tiles_touched,
+                                                   out_rect_tile_space=rect_tile_space,
+@@ -148,7 +158,7 @@ class VertexShader(torch.autograd.Function):
+         grad_indices = torch.zeros_like(indices)
+         grad_vertices = torch.zeros_like(vertices)
+ 
+-        slang_modules.vertex_shader.vertex_shader.bwd(indices=indices,
++        shader_manager.vertex_shader.vertex_shader.bwd(indices=indices,
+                                                       vertices=(vertices, grad_vertices),
+                                                       tcam=tcam,
+                                                       out_tiles_touched=tiles_touched,
+diff --git a/models/frozen.py b/models/frozen.py
+index ef7a6a2..33658ea 100644
+--- a/models/frozen.py
++++ b/models/frozen.py
+@@ -46,6 +46,7 @@ class FrozenTetModel(BaseModel):
+         sh: torch.Tensor,                    # (T, ((max_sh_deg+1)**2-1), 3)
+         center: torch.Tensor,                # (1, 3)
+         scene_scaling: torch.Tensor | float,
++        additional_attr=0,
+         *,
+         max_sh_deg: int = 2,
+         chunk_size: int = 408_576,
+@@ -79,6 +80,7 @@ class FrozenTetModel(BaseModel):
+         self.frozen = False
+         self.linear = False
+         self.feature_dim = 7
++        self.additional_attr = additional_attr
+ 
+     def sh_up(self):
+         pass
+diff --git a/models/ingp_color.py b/models/ingp_color.py
+index 63c5b49..e45f5b9 100644
+--- a/models/ingp_color.py
++++ b/models/ingp_color.py
+@@ -280,6 +280,7 @@ class Model(BaseModel):
+             [math.pi/3, math.pi/3],
+         ], device=self.device)
+         sh_dim = ((1+max_sh_deg)**2-1)*3
++        self.additional_attr = additional_attr
+ 
+         module = iNGPDW(sh_dim, additional_attr=additional_attr, **kwargs)
+         self.compile = module.compile
+diff --git a/train.py b/train.py
+index 61a991f..673b296 100644
+--- a/train.py
++++ b/train.py
+@@ -118,6 +118,12 @@ args.within_thresh = 0.5
+ args.total_thresh = 2.0
+ args.clone_min_contrib = 0.003
+ args.split_min_contrib = 0.01
++
++# args.within_thresh = 0.5 / 2.7
++# args.total_thresh = 2.0 / 2.7
++# args.clone_min_contrib = 0.003 / 2.7
++# args.split_min_contrib = 0.01 / 2.7
++
+ args.min_tet_volume = 1e-3
+ 
+ args.lambda_ssim = 0.2
+diff --git a/utils/densification.py b/utils/densification.py
+index a759f6f..7511efe 100644
+--- a/utils/densification.py
++++ b/utils/densification.py
+@@ -1,5 +1,6 @@
+ import gc
+ import cv2
++from numpy.random import random
+ import torch
+ import imageio
+ from utils import safe_math
+@@ -9,7 +10,8 @@ from icecream import ic
+ from utils.topo_utils import tet_volumes
+ import termplotlib as tpl
+ import numpy as np
+-
++from utils.train_util import render_debug
++import torchvision.transforms as T
+ 
+ @torch.no_grad()
+ def determine_cull_mask(
+@@ -261,7 +263,7 @@ def apply_densification(
+     total_var_std[s0_t < 1] = 0
+ 
+     N_b = stats.tet_view_count # Num views
+-    within_var = (stats.top_ssim).sum(dim=1)
++    within_var = stats.top_ssim.sum(dim=1)
+     total_var = s0_t * total_var_std
+     total_var[(N_b < 2) | (s0_t < 1)] = 0
+ 
+@@ -300,29 +302,6 @@ def apply_densification(
+     
+     # clone_mask = within_mask | total_mask
+ 
+-    if args.output_path is not None:
+-
+-        # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
+-        # color = torch.rand_like(f[:, :3])
+-        # # color = rgb + 0.5#torch.rand_like(f[:, :3])
+-        # f[:, :3] = color
+-        # f[:, 3] *= 2.0    # alpha
+-        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+-        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
+-        # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
+-        # f[:, :3] = color
+-        # f[:, 3] *= 2.0    # alpha
+-        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
+-        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
+-        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+-        #                 render_debug(total_var[:, None],
+-        #                              model, sample_cam, tile_size=args.tile_size))
+-        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+-        #                 render_debug(within_var[:, None],
+-        #                              model, sample_cam, tile_size=args.tile_size))
+-        imageio.imwrite(args.output_path / f"im{iteration:07d}.png",
+-                        cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+-
+     vol = tet_volumes(model.vertices[model.indices])
+     # counts, bin_edges = np.histogram(vol.cpu().numpy(), bins=10, range=(0, 1e-5))
+     # fig = tpl.figure()
+@@ -343,6 +322,30 @@ def apply_densification(
+         clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
+         clone_mask[selected_indices] = True
+ 
++    if args.output_path is not None:
++        f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
++        color = torch.rand_like(f[:, :3])
++        # color = rgb + 0.5#torch.rand_like(f[:, :3])
++        f[:, :3] = color
++        f[:, 3] *= 2.0    # alpha
++        imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
++                        T.ToPILImage()(
++                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
++        f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
++        f[:, 1:4] = color
++        f[:, 0] *= 2.0    # alpha
++        imageio.imwrite(args.output_path / f"densify{iteration}.png",
++                        T.ToPILImage()(
++                        render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
++        tv = render_debug(total_var[:, None], model, sample_cam, tile_size=args.tile_size)
++        imageio.imwrite(args.output_path / f"total_var{iteration}.png",
++                        T.ToPILImage()(tv))
++        imageio.imwrite(args.output_path / f"within_var{iteration}.png",
++                        T.ToPILImage()(render_debug(within_var[:, None],
++                                     model, sample_cam, tile_size=args.tile_size)))
++        imageio.imwrite(args.output_path / f"im{iteration:07d}.png",
++                        cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
++
+     clone_indices = model.indices[clone_mask]
+     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
+     # grow_point = safe_math.safe_div(
+@@ -355,7 +358,8 @@ def apply_densification(
+     barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
+     barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
+     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
+-    # split_point[bad] = random_locations[bad]    # fall back
++    split_point[bad] = random_locations[bad]    # fall back
++    split_points = random_locations
+ 
+     tet_optim.split(split_point, **args.as_dict())
+     # keep_verts = keep_verts > 0
+diff --git a/utils/train_util.py b/utils/train_util.py
+index 828f488..8a17b2c 100644
+--- a/utils/train_util.py
++++ b/utils/train_util.py
+@@ -4,6 +4,7 @@ import torch
+ import numpy as np
+ import matplotlib.pyplot as plt
+ from data.camera import Camera
++from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant
+ from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
+ from delaunay_rasterization.internal.render_grid import RenderGrid
+ from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
+@@ -13,6 +14,51 @@ from icecream import ic
+ 
+ cmap = plt.get_cmap("jet")
+ 
++@torch.no_grad
++def render_debug(render_tensor, model, camera, density_multi=1, tile_size=4):
++    # 1. Fetch current model features.
++    # We need this to get the correct density and tensor layout (N, FeatureDim).
++    _, features = model.get_cell_values(camera)
++    
++    # 2. Clone the features to create our debug cell_values.
++    # Layout matches 'activate_output': [Density (0), RGB (1-3), Gradients (4-6), Attributes (7+)]
++    cell_values = features.clone()
++
++    # 3. Process the input render_tensor (the data you want to visualize).
++    if render_tensor.shape[1] == 1:
++        # For scalar fields: Normalize and apply Colormap
++        tensor_min, tensor_max = render_tensor.min(), torch.quantile(render_tensor, 0.99)
++        normalized_tensor = ((render_tensor - tensor_min) / (tensor_max - tensor_min)).clip(0, 1)
++        
++        # cmap returns RGBA numpy array, we need RGB tensor
++        rgb_values = torch.as_tensor(
++            cmap(normalized_tensor.reshape(-1).cpu().numpy())[:, :3]
++        ).float().to(features.device)
++        cell_values[:, 1:4] = rgb_values
++    else:
++        # For RGB/RGBA fields: Take the first 3 channels
++        cell_values[:, 0:4] = render_tensor
++
++    cell_values[:, 0] = cell_values[:, 0] * density_multi
++
++    # Set RGB (Indices 1-3): Overwrite with the debug colors
++
++    # Set Gradients (Indices 4-6): Zero them out as requested
++    if cell_values.shape[1] >= 7:
++        cell_values[:, 4:7] = 0.0
++
++    # 5. Delegate to the main 'render' function.
++    render_pkg = render(
++        camera, 
++        model, 
++        cell_values=cell_values, 
++        tile_size=tile_size
++    )
++
++    image = render_pkg['render'].cpu()[:3]
++    del render_pkg, render_tensor, cell_values, features
++    return image
++
+ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
+            scene_scaling=1, clip_multi=0, ray_jitter=None,
+            **kwargs):
+@@ -62,7 +108,8 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
+         cell_values,
+         render_grid,
+         tcam,
+-        ray_jitter)
++        ray_jitter,
++        model.additional_attr)
+     alpha = image_rgb.permute(2,0,1)[3, ...]
+     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
+     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
+@@ -72,6 +119,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
+     rxyzd_img = torch.cat([rotated.reshape(xyzd_img[..., :3].shape), xyzd_img[..., 3:]], dim=-1)
+     
+     render_pkg = {
++        'aux': image_rgb.permute(2,0,1)[4:, ...] * camera.gt_alpha_mask.to(device),
+         'render': image_rgb.permute(2,0,1)[:3, ...] * camera.gt_alpha_mask.to(device),
+         'alpha': alpha,
+         'distortion_loss': distortion_loss.mean(),

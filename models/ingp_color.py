@@ -196,20 +196,19 @@ class iNGPDW(nn.Module):
         last = self.network[-1]
         with torch.no_grad():
             # last.weight[4:, :].zero_()
-            nn.init.uniform_(last.weight.data, a=-1, b=1)
+            # nn.init.uniform_(last.weight.data, a=-1e-1, b=1e-1)
             last.bias[4:].zero_()
             for network, eps in zip(nets, vals):
                 for layer in network[:-1]:
                     if hasattr(layer, 'weight'):
                         nn.init.xavier_uniform_(layer.weight.data, nn.init.calculate_gain('relu'))
                 last = network[-1]
-                with torch.no_grad():
-                    nn.init.uniform_(last.weight.data, a=-eps, b=eps)
-                    # nn.init.xavier_uniform_(m.weight, gain)
-                    last.bias.zero_()
+                nn.init.uniform_(last.weight.data, a=-eps, b=eps)
+                # nn.init.xavier_uniform_(m.weight, gain)
+                last.bias.zero_()
 
     def _encode(self, x: torch.Tensor, cr: torch.Tensor):
-        output = self.encoding(x)
+        output = self.encoding(x.detach())
         output = output.reshape(-1, self.dim, self.L)
         if not self.ablate_downweighing:
             cr = cr.detach() * self.scale_multi
@@ -280,6 +279,7 @@ class Model(BaseModel):
             [math.pi/3, math.pi/3],
         ], device=self.device)
         sh_dim = ((1+max_sh_deg)**2-1)*3
+        self.additional_attr = additional_attr
 
         module = iNGPDW(sh_dim, additional_attr=additional_attr, **kwargs)
         self.compile = module.compile
@@ -437,6 +437,32 @@ class Model(BaseModel):
         return shs, features
 
     @staticmethod
+    def init_rand_from_pcd(point_cloud, cameras, device, max_sh_deg,
+                      num_points=10000, **kwargs):
+        torch.manual_seed(2)
+
+        ccenters = torch.stack([c.camera_center.reshape(3) for c in cameras], dim=0).to(device)
+        center = ccenters.mean(dim=0)
+        scaling = torch.linalg.norm(ccenters - center.reshape(1, 3), dim=1, ord=torch.inf).max()
+        print(f"Scene scaling: {scaling}. Center: {center}")
+
+        vertices = torch.as_tensor(point_cloud.points).float()
+
+        # add sphere
+        pcd_scaling = torch.linalg.norm(vertices - center.cpu().reshape(1, 3), dim=1, ord=2).max()
+        new_radius = pcd_scaling.cpu().item()
+
+        vertices = sample_uniform_in_sphere(num_points, 3, base_radius=0, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
+
+        num_ext = 1000
+        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+        num_ext = ext_vertices.shape[0]
+
+        model = Model(vertices.cuda(), ext_vertices, center, scaling,
+                      max_sh_deg=max_sh_deg, **kwargs)
+        return model
+
+    @staticmethod
     def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
                       voxel_size=0.00, **kwargs):
         torch.manual_seed(2)
@@ -493,8 +519,9 @@ class Model(BaseModel):
         #     ext_vertices = ext_vertices[inds]
         # else:
         #     num_ext = ext_vertices.shape[0]
-        # vertices = torch.cat([vertices, ext_vertices], dim=0)
-        # ext_vertices = torch.empty((0, 3))
+
+        vertices = torch.cat([vertices, ext_vertices], dim=0)
+        ext_vertices = torch.empty((0, 3))
 
         model = Model(vertices.cuda(), ext_vertices, center, scaling,
                       max_sh_deg=max_sh_deg, **kwargs)
@@ -586,8 +613,9 @@ class Model(BaseModel):
         else:
             v = Del(verts.shape[0])
             indices_np, prev = v.compute(verts.detach().cpu().double())
-            indices_np = indices_np.numpy()
-            indices_np = indices_np[(indices_np < verts.shape[0]).all(axis=1)]
+            indices_np = indices_np.clone().numpy()
+            valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
+            indices_np = indices_np[valid_mask.all(axis=1)]
             del prev
         
 

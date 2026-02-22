@@ -1,12 +1,17 @@
 import gc
 import cv2
+from numpy.random import random
 import torch
 import imageio
 from utils import safe_math
 from typing import NamedTuple, List
 from delaunay_rasterization.internal.render_err import render_err
 from icecream import ic
-
+from utils.topo_utils import tet_volumes
+import termplotlib as tpl
+import numpy as np
+from utils.train_util import render_debug
+import torchvision.transforms as T
 
 @torch.no_grad()
 def determine_cull_mask(
@@ -157,8 +162,9 @@ def collect_render_stats(
     # Main per-camera loop -----------------------------------------------------
     for cam in sampled_cameras:
         target = cam.original_image.cuda()
+        gt_mask = cam.gt_alpha_mask.cuda()
 
-        image_votes, extras = render_err( target, cam, model, tile_size=args.tile_size)
+        image_votes, extras = render_err( target, gt_mask, cam, model, tile_size=args.tile_size)
 
         tc = extras["tet_count"][..., 0]
         max_T = extras["tet_count"][..., 1].float() / 65535
@@ -258,7 +264,7 @@ def apply_densification(
     total_var_std[s0_t < 1] = 0
 
     N_b = stats.tet_view_count # Num views
-    within_var = (stats.top_ssim).sum(dim=1)
+    within_var = stats.top_ssim.sum(dim=1)
     total_var = s0_t * total_var_std
     total_var[(N_b < 2) | (s0_t < 1)] = 0
 
@@ -267,14 +273,14 @@ def apply_densification(
     total_var[stats.peak_contrib < args.clone_min_contrib] = 0
     within_var[stats.peak_contrib < args.split_min_contrib] = 0
 
-    keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=device)
-    indices = model.indices.long()
-    reduce_type = "sum"
-    mask_alive_i = mask_alive.int()
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
-    keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts = torch.zeros((model.vertices.shape[0]), dtype=torch.int, device=device)
+    # indices = model.indices.long()
+    # reduce_type = "sum"
+    # mask_alive_i = mask_alive.int()
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 0], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 1], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 2], src=mask_alive_i, reduce=reduce_type)
+    # keep_verts.scatter_reduce_(dim=0, index=indices[..., 3], src=mask_alive_i, reduce=reduce_type)
 
     target_addition = int(min(target_addition, stats.tet_view_count.shape[0]))
     if target_addition < 0:
@@ -297,29 +303,6 @@ def apply_densification(
     
     # clone_mask = within_mask | total_mask
 
-    if args.output_path is not None:
-
-        # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
-        # color = torch.rand_like(f[:, :3])
-        # # color = rgb + 0.5#torch.rand_like(f[:, :3])
-        # f[:, :3] = color
-        # f[:, 3] *= 2.0    # alpha
-        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
-        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
-        # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
-        # f[:, :3] = color
-        # f[:, 3] *= 2.0    # alpha
-        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
-        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size))
-        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
-        #                 render_debug(total_var[:, None],
-        #                              model, sample_cam, tile_size=args.tile_size))
-        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
-        #                 render_debug(within_var[:, None],
-        #                              model, sample_cam, tile_size=args.tile_size))
-        imageio.imwrite(args.output_path / f"im{iteration}.png",
-                        cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
-
     within_mask = (within_var > args.within_thresh)
     total_mask = (total_var > args.total_thresh)
     clone_mask = within_mask | total_mask
@@ -330,6 +313,30 @@ def apply_densification(
         
         clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
         clone_mask[selected_indices] = True
+
+    if args.output_path is not None:
+        # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
+        # color = torch.rand_like(f[:, :3])
+        # # color = rgb + 0.5#torch.rand_like(f[:, :3])
+        # f[:, :3] = color
+        # f[:, 3] *= 2.0    # alpha
+        # imageio.imwrite(args.output_path / f"alive_mask{iteration}.png",
+        #                 T.ToPILImage()(
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
+        # f = clone_mask.float().unsqueeze(1).expand(-1, 4).clone()
+        # f[:, 1:4] = color
+        # f[:, 0] *= 2.0    # alpha
+        # imageio.imwrite(args.output_path / f"densify{iteration}.png",
+        #                 T.ToPILImage()(
+        #                 render_debug(f, model, sample_cam, 10, tile_size=args.tile_size)))
+        # tv = render_debug(total_var[:, None], model, sample_cam, tile_size=args.tile_size)
+        # imageio.imwrite(args.output_path / f"total_var{iteration}.png",
+        #                 T.ToPILImage()(tv))
+        # imageio.imwrite(args.output_path / f"within_var{iteration}.png",
+        #                 T.ToPILImage()(render_debug(within_var[:, None],
+        #                              model, sample_cam, tile_size=args.tile_size)))
+        imageio.imwrite(args.output_path / f"im{iteration:07d}.png",
+                        cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
 
     clone_indices = model.indices[clone_mask]
     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
@@ -343,7 +350,7 @@ def apply_densification(
     barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
     barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-    # split_point[bad] = random_locations[bad]    # fall back
+    split_point[bad] = random_locations[bad]    # fall back
 
     tet_optim.split(split_point, **args.as_dict())
     # keep_verts = keep_verts > 0
@@ -356,5 +363,6 @@ def apply_densification(
 
     print(
         f"#Grow: {total_mask.sum():4d} #Split: {within_mask.sum():4d} | "
+        f"#Alive: {mask_alive.sum():4d} | "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} "
     )

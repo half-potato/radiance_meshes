@@ -3,12 +3,12 @@
 import utils;
 import camera;
 import safe_math;
-import interp_version;
+import flux_version;
 
 static const uint TILE_HEIGHT = PYTHON_TILE_HEIGHT;
 static const uint TILE_WIDTH = PYTHON_TILE_WIDTH;
 
-groupshared SplatTetrahedra_interp collected_splats[TILE_HEIGHT * TILE_WIDTH];
+groupshared FluxTetrahedra collected_splats[TILE_HEIGHT * TILE_WIDTH];
 groupshared uint32_t collected_idx[TILE_HEIGHT * TILE_WIDTH];
 
 struct DistortionState5 : IDifferentiable {
@@ -186,8 +186,9 @@ AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
 [BackwardDerivative(bwd_alpha_blend)]
 AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      TensorView<int32_t> indices,
+                     TensorView<int32_t> tet_face_ids,
                      DiffTensorView vertices,
-                     DiffTensorView cell_values,
+                     DiffTensorView face_values,
                      DiffTensorView final_pixel_state,
                      DiffTensorView final_distortion_state,
                      DiffTensorView final_xyzd_state,
@@ -226,8 +227,8 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_start + splat_pointer_offset]);
             bool valid = coll_id < indices.size(0);
             collected_idx[thread_rank] = valid ? coll_id : 0;
-            SplatTetrahedra_interp g = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, cell_values);
-            if (!valid) g.density = 0;
+            FluxTetrahedra g = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_face_ids, face_values);
+            if (!valid) g.density = {{0.f, 0.f, 0.f}, 0.f};
             collected_splats[thread_rank] = g;
         }
         AllMemoryBarrierWithGroupSync();
@@ -235,7 +236,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             for (int j = 0; j < min(block_size, splats_left_to_process); j++)
             {
                 local_n_contrib++;
-                SplatTetrahedra_interp g = collected_splats[j];
+                FluxTetrahedra g = collected_splats[j];
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
@@ -259,8 +260,9 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
 void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      TensorView<int32_t> indices,
+                     TensorView<int32_t> tet_face_ids,
                      DiffTensorView vertices,
-                     DiffTensorView cell_values,
+                     DiffTensorView face_values,
                      DiffTensorView final_pixel_state,
                      DiffTensorView final_distortion_state,
                      DiffTensorView final_xyzd_state,
@@ -319,8 +321,8 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             uint32_t coll_id = uint32_t(sorted_gauss_idx[tile_idx_end - progress - 1]);
             bool valid = coll_id < indices.size(0);
             collected_idx[thread_rank] = valid ? coll_id : 0;
-            SplatTetrahedra_interp splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, cell_values);
-            if (!valid) splat.density = 0;
+            FluxTetrahedra splat = load_tet_alphablend_interp(collected_idx[thread_rank], vertices, indices, tet_face_ids, face_values);
+            if (!valid) splat.density = {{0.f, 0.f, 0.f}, 0.f};
             collected_splats[thread_rank] = splat;
         }
         AllMemoryBarrierWithGroupSync();
@@ -331,14 +333,14 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (current_splat_offset >= n_contrib_fwd || current_splat_offset < 0)
                     continue;
                 uint32_t g_idx = collected_idx[j];
-                SplatTetrahedra_interp g = collected_splats[j];
+                FluxTetrahedra g = collected_splats[j];
 
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
                     ao = undo_alpha_out(ao, tetra_ctrl);
 
-                    DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
+                    DifferentialPair<FluxTetrahedra> dp_g = diffPair(g);
                     DifferentialPair<Ray> dp_ray = diffPair(ray);
                     DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
                     DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
@@ -349,11 +351,9 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                         dp_tetra_ctrl.d.rgba,
                         dp_tetra_ctrl.d.dist,
                         dp_tetra_ctrl.d.density,
-                        dp_tetra_ctrl.d.xyzd,
-                        dp_tetra_ctrl.d.aux
                     };
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
-                    bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, cell_values, dp_g.d);
+                    bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, tet_face_ids, face_values, dp_g.d);
                 }
             }
         }
@@ -367,8 +367,9 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  TensorView<int32_t> tile_ranges,
                  TensorView<int32_t> indices,
+                 TensorView<int32_t> tet_face_ids,
                  DiffTensorView vertices,
-                 DiffTensorView cell_values,
+                 DiffTensorView face_values,
                  DiffTensorView output_img,
                  DiffTensorView xyzd_img,
                  DiffTensorView distortion_img,
@@ -401,8 +402,9 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut pixel_states = alpha_blend(
         sorted_gauss_idx,
         indices,
+        tet_face_ids,
         vertices,
-        cell_values,
+        face_values,
         output_img,
         distortion_img,
         xyzd_img,
@@ -443,8 +445,9 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
 void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   TensorView<int32_t> tile_ranges,
                   TensorView<int32_t> indices,
-                  TensorView<float> vertices,
-                  TensorView<float> cell_values,
+                  TensorView<int32_t> tet_face_ids,
+                  DiffTensorView vertices,
+                  DiffTensorView face_values,
                   TensorView<float> output_img,
                   TensorView<float> gt,
                   TensorView<float> pixel_err,
@@ -486,8 +489,9 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
     kern_calc_tet_err(
         sorted_gauss_idx,
         indices,
+        tet_face_ids,
         vertices,
-        cell_values,
+        face_values,
         output_img,
         tet_err,
         tet_count,
@@ -503,8 +507,9 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
 void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                        TensorView<int32_t> indices,
-                       TensorView<float> vertices,
-                       TensorView<float> cell_values,
+                       TensorView<int32_t> tet_face_ids,
+                       DiffTensorView vertices,
+                       DiffTensorView face_values,
                        TensorView<float> final_pixel_state,
                        TensorView<float> tet_err,
                        TensorView<int32_t> tet_count,
@@ -553,7 +558,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 
         // Only load if valid ID
         if (coll_id != 0xFFFFFFFF) {
-            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, cell_values);
+            collected_splats[thread_rank] = load_tet_alphablend_interp(coll_id, vertices, indices, tet_face_ids, face_values);
         }
 
         AllMemoryBarrierWithGroupSync();
@@ -566,7 +571,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 // Skip Sentinel OR Out of bounds writes
                 if (g_idx == 0xFFFFFFFF || g_idx >= tet_err.size(0)) continue;
 
-                SplatTetrahedra_interp g = collected_splats[j];
+                FluxTetrahedra g = collected_splats[j];
                 CtrlPt tetra_ctrl;
 
                 if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
