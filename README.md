@@ -38,6 +38,14 @@ To obtain a reduced model for mobile viewing, we recommend the following paramet
  - `--freeze_start 8000` Freeze earlier to reflect shorter training time
  - `--alpha_threshold 0 --density_threshold 0` For underwater scenes
  
+# Troubleshooting
+If training hangs during Slang shader compilation (no output after initial warnings), delete the slangtorch cache directories and `.lock` files:
+```
+find . -name ".slangtorch_cache" -type d -exec rm -rf {} + 2>/dev/null
+find . -name "*.lock" -path "*/slang/*" -delete 2>/dev/null
+```
+This is needed when cache files become stale (e.g., after modifying `.slang` shader source files).
+
  # Fisheye Lenses
 Fisheye rendering is supported, fisheye training "works" but something seems a little wrong with the quality.
 

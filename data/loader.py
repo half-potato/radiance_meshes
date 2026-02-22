@@ -87,8 +87,14 @@ def load_cam(data_device, resolution, id, cam_info, resolution_scale):
     if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  fovx=cam_info.fovx, fovy=cam_info.fovy, cx=cam_info.cx, cy=cam_info.cy, 
+    # Scale principal point from COLMAP intrinsic resolution to final loaded resolution
+    scale_x = resolution[0] / cam_info.width
+    scale_y = resolution[1] / cam_info.height
+    cx = cam_info.cx * scale_x if cam_info.cx != -1 else -1
+    cy = cam_info.cy * scale_y if cam_info.cy != -1 else -1
+
+    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
+                  fovx=cam_info.fovx, fovy=cam_info.fovy, cx=cx, cy=cy,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=data_device,
                   model=cam_info.model, distortion_params=cam_info.distortion_params,

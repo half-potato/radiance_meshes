@@ -85,10 +85,10 @@ class Camera(nn.Module):
             # fx=fx,
             # fy=fy,
             K = torch.tensor([
-                [self.fx, 0, self.image_width/2],
-                [0, self.fy, self.image_height/2],
+                [self.fx, 0, self.cx if self.cx != -1 else self.image_width / 2],
+                [0, self.fy, self.cy if self.cy != -1 else self.image_height / 2],
                 [0, 0, 1],
-            ]).to(device),
+            ], dtype=torch.float32).to(device),
             image_height=self.image_height,
             image_width=self.image_width,
             fovy=self.fovy,
@@ -156,6 +156,37 @@ class Camera(nn.Module):
         return p_undistorted
 
     @torch.no_grad()
+    def _fisheye_undistort_coords(self, p_distorted: torch.Tensor, dist_params: torch.Tensor) -> torch.Tensor:
+        """
+        Kannala-Brandt equidistant fisheye undistortion.
+        Solves: theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^9
+        for theta given theta_d = |p_distorted|, via Newton-Raphson.
+        Returns p_undistorted with |p_undistorted| = theta.
+        """
+        if torch.dot(dist_params, dist_params) < 1e-9:
+            return p_distorted
+
+        k1, k2, k3, k4 = dist_params[0], dist_params[1], dist_params[2], dist_params[3]
+
+        theta_d = torch.linalg.norm(p_distorted, dim=-1, keepdim=True)
+
+        # Newton-Raphson: solve for theta
+        theta = theta_d.clone()
+        for _ in range(10):
+            theta2 = theta * theta
+            theta4 = theta2 * theta2
+            theta6 = theta4 * theta2
+            theta8 = theta4 * theta4
+            f_val = theta + k1 * theta * theta2 + k2 * theta * theta4 + k3 * theta * theta6 + k4 * theta * theta8 - theta_d
+            f_deriv = 1.0 + 3.0 * k1 * theta2 + 5.0 * k2 * theta4 + 7.0 * k3 * theta6 + 9.0 * k4 * theta8
+            step = f_val / f_deriv
+            theta = theta - step
+
+        # Scale p_distorted so |result| = theta instead of theta_d
+        scale = torch.where(theta_d.abs() < 1e-8, torch.ones_like(theta_d), theta / theta_d)
+        return p_distorted * scale
+
+    @torch.no_grad()
     def get_camera_space_directions(self, device=None, ray_jitter=None) -> torch.Tensor:
         """
         Computes the camera-space ray directions for every pixel.
@@ -200,29 +231,32 @@ class Camera(nn.Module):
         p_distorted = torch.stack([p_distorted_x, p_distorted_y], dim=-1) # [H, W, 2]
 
         # --- Step 2: Undistort ---
-        p_undistorted = self._get_undistorted_coords(p_distorted, dist_params) # [H, W, 2]
+        if self.model == ProjectionType.FISHEYE:
+            p_undistorted = self._fisheye_undistort_coords(p_distorted, dist_params)
+        else:
+            p_undistorted = self._get_undistorted_coords(p_distorted, dist_params)
 
         # --- Step 3: Form Camera-Space Ray Direction ---
         px_u = p_undistorted[..., 0]
         py_u = p_undistorted[..., 1]
-        
+
         if self.model == ProjectionType.FISHEYE:
             theta = torch.linalg.norm(p_undistorted, dim=-1)
             theta = torch.clamp_max(theta, 3.14159265)
-            
+
             sin_theta = torch.sin(theta)
             cos_theta = torch.cos(theta)
-            
+
             sin_theta_over_theta = torch.ones_like(theta)
             mask = theta >= 1e-6
             sin_theta_over_theta[mask] = sin_theta[mask] / theta[mask]
-            
+
             dir_cam = torch.stack([
                 px_u * sin_theta_over_theta,
                 py_u * sin_theta_over_theta,
                 cos_theta
             ], dim=-1) # [H, W, 3]
-            
+
         else: # Perspective
             dir_cam = torch.stack([
                 px_u,
@@ -230,11 +264,11 @@ class Camera(nn.Module):
                 torch.ones_like(px_u)
             ], dim=-1) # [H, W, 3]
             dir_cam = dir_cam / torch.linalg.norm(dir_cam, dim=-1, keepdim=True)
-        
+
         # --- Step 4: Flatten ---
         # dir_cam shape is [H, W, 3] -> [H*W, 3]
         dir_cam_flat = dir_cam.reshape(-1, 3)
-        
+
         return dir_cam_flat    
 
     @torch.no_grad()
@@ -336,31 +370,34 @@ class Camera(nn.Module):
         p_distorted = torch.stack([p_distorted_x, p_distorted_y], dim=-1) # Shape [H, W, 2]
 
         # --- Step 2: Undistort ---
-        p_undistorted = self._get_undistorted_coords(p_distorted, dist_params) # Shape [H, W, 2]
+        if self.model == ProjectionType.FISHEYE:
+            p_undistorted = self._fisheye_undistort_coords(p_distorted, dist_params)
+        else:
+            p_undistorted = self._get_undistorted_coords(p_distorted, dist_params)
 
         # --- Step 3: Form Camera-Space Ray Direction ---
         px_u = p_undistorted[..., 0]
         py_u = p_undistorted[..., 1]
-        
+
         if self.model == ProjectionType.FISHEYE:
             # Fisheye model
             theta = torch.linalg.norm(p_undistorted, dim=-1)
             theta = torch.clamp_max(theta, 3.14159265) # Clamp to pi
-            
+
             sin_theta = torch.sin(theta)
             cos_theta = torch.cos(theta)
-            
+
             # Handle theta ~= 0 to avoid 0/0
             sin_theta_over_theta = torch.ones_like(theta)
             mask = theta >= 1e-6
             sin_theta_over_theta[mask] = sin_theta[mask] / theta[mask]
-            
+
             dir_cam = torch.stack([
                 px_u * sin_theta_over_theta,
                 py_u * sin_theta_over_theta,
                 cos_theta
             ], dim=-1) # Shape [H, W, 3]
-            
+
         else:
             # Perspective model (default)
             dir_cam = torch.stack([

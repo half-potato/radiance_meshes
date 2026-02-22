@@ -310,7 +310,9 @@ Ray get_ray(Camera cam, float2 center_pix_coord)
 
     // Step 2: Undistort the normalized point
     float2 p_undistorted = p_distorted;
-    if (cam.camera_type == 0 || cam.camera_type == 1) { // PERSPECTIVE or FISHEYE
+    if (cam.camera_type == 1) { // FISHEYE — Kannala-Brandt equidistant
+        p_undistorted = fisheye_undistort(p_distorted, cam);
+    } else if (cam.camera_type == 0) { // PERSPECTIVE — Brown-Conrady
         p_undistorted = undistort(p_distorted, cam);
     }
 
@@ -357,13 +359,15 @@ Ray get_ray(Camera cam, float2 center_pix_coord)
 // is adapted from patterns common in modern NeRF codebases like Zip-NeRF.
 
 // Takes a normalized, undistorted point in camera space (where z=1) and applies distortion.
+// Brown-Conrady model — used for PERSPECTIVE cameras.
+// distortion_params: (k1, k2, p1, p2)
 float2 distort(float2 p_undistorted, Camera cam)
 {
     // Optimization: If there are no distortion params, return immediately.
     if (dot(cam.distortion_params, cam.distortion_params) < 1e-9f) {
         return p_undistorted;
     }
-    
+
     float k1 = cam.distortion_params.x;
     float k2 = cam.distortion_params.y;
     float p1 = cam.distortion_params.z;
@@ -377,6 +381,72 @@ float2 distort(float2 p_undistorted, Camera cam)
     tangential_dist.y = 2.0 * p2 * p_undistorted.x * p_undistorted.y + p1 * (r2 + 2.0 * p_undistorted.y * p_undistorted.y);
 
     return p_undistorted + p_undistorted * radial_dist + tangential_dist;
+}
+
+// Kannala-Brandt equidistant fisheye distortion (forward).
+// p_undistorted is in equidistant space: |p_undistorted| = theta (true angle from optical axis).
+// Returns p_distorted with |p_distorted| = theta_d (distorted angle).
+// distortion_params: (k1, k2, k3, k4)
+float2 fisheye_distort(float2 p_undistorted, Camera cam)
+{
+    if (dot(cam.distortion_params, cam.distortion_params) < 1e-9f) {
+        return p_undistorted;
+    }
+
+    float theta = length(p_undistorted);
+    if (theta < 1e-8f) return p_undistorted;
+
+    float k1 = cam.distortion_params.x;
+    float k2 = cam.distortion_params.y;
+    float k3 = cam.distortion_params.z;
+    float k4 = cam.distortion_params.w;
+
+    float theta2 = theta * theta;
+    float theta4 = theta2 * theta2;
+    float theta6 = theta4 * theta2;
+    float theta8 = theta4 * theta4;
+    float theta_d = theta + k1 * theta * theta2 + k2 * theta * theta4 + k3 * theta * theta6 + k4 * theta * theta8;
+
+    return p_undistorted * (theta_d / theta);
+}
+
+// Kannala-Brandt equidistant fisheye undistortion (inverse).
+// p_distorted has |p_distorted| = theta_d.
+// Returns p_undistorted with |p_undistorted| = theta.
+// Solves: theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^9
+// via Newton-Raphson.
+// distortion_params: (k1, k2, k3, k4)
+float2 fisheye_undistort(float2 p_distorted, Camera cam)
+{
+    if (dot(cam.distortion_params, cam.distortion_params) < 1e-9f) {
+        return p_distorted;
+    }
+
+    float theta_d = length(p_distorted);
+    if (theta_d < 1e-8f) return p_distorted;
+
+    float k1 = cam.distortion_params.x;
+    float k2 = cam.distortion_params.y;
+    float k3 = cam.distortion_params.z;
+    float k4 = cam.distortion_params.w;
+
+    // Newton-Raphson
+    float theta = theta_d; // initial guess
+    [loop] [MaxIters(10)]
+    for (int i = 0; i < 10; ++i) {
+        float theta2 = theta * theta;
+        float theta4 = theta2 * theta2;
+        float theta6 = theta4 * theta2;
+        float theta8 = theta4 * theta4;
+        float f_val = theta + k1 * theta * theta2 + k2 * theta * theta4 + k3 * theta * theta6 + k4 * theta * theta8 - theta_d;
+        float f_deriv = 1.0 + 3.0 * k1 * theta2 + 5.0 * k2 * theta4 + 7.0 * k3 * theta6 + 9.0 * k4 * theta8;
+        if (abs(f_deriv) < 1e-12f) break;
+        float step = f_val / f_deriv;
+        theta -= step;
+        if (abs(step) < 1e-10f) break;
+    }
+
+    return p_distorted * (theta / theta_d);
 }
 
 // Projects a 3D point from camera space to a 2D pixel coordinate (with depth).
@@ -404,8 +474,13 @@ float3 camspace_to_image(float3 p_cam, Camera cam)
         p_undistorted = p_cam.xy / p_cam.z;
     }
 
-    // Apply radial and tangential distortion (common to both models)
-    float2 p_distorted = distort(p_undistorted, cam);
+    // Apply distortion model appropriate to the camera type
+    float2 p_distorted;
+    if (cam.camera_type == 1) { // FISHEYE — Kannala-Brandt
+        p_distorted = fisheye_distort(p_undistorted, cam);
+    } else { // PERSPECTIVE — Brown-Conrady
+        p_distorted = distort(p_undistorted, cam);
+    }
 
     // Apply intrinsics matrix K to get pixel coordinates
     float px = p_distorted.x * cam.K[0][0] + cam.K[0][2];

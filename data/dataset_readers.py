@@ -13,7 +13,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 import json
 from data.types import BasicPointCloud, ProjectionType, CameraInfo, SceneInfo
-
+from icecream import ic
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -100,16 +100,15 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
             model = ProjectionType.FISHEYE
             fovy = focal2fov(fx, height)
             fovx = focal2fov(fx, width)
-            print(fovx, fx)
         elif intr.model=="OPENCV_FISHEYE":
             distortion_params = {}
             fx, fy, cx, cy = intr.params[:4]
             k1, k2, k3, k4 = intr.params[4:]
             distortion_params = {}
             distortion_params['k1'] = k1
-            distortion_params['k2'] = 0#k2
-            distortion_params['k3'] = 0#k3
-            distortion_params['k4'] = 0#k4
+            distortion_params['k2'] = 0
+            distortion_params['k3'] = 0
+            distortion_params['k4'] = 0
             model = ProjectionType.FISHEYE
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
