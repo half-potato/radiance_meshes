@@ -95,7 +95,7 @@ inline CtrlPt integrate_tetra_segment(
 
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        result.aux[i] = g.aux[i] * detach(alpha);
+        result.aux[i] = g.aux[i] * alpha;
     }
     
     return result;

@@ -159,7 +159,7 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
     // 2. Accumulate Aux (Standard Alpha Blending)
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        res.aux[i] = prev.aux[i] + ctrl.aux[i] * detach(T);
+        res.aux[i] = prev.aux[i] + ctrl.aux[i] * T;
     }
 
     return res;
@@ -345,11 +345,15 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                     bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
-                    CtrlPt.Differential d_tetra_scale = {
-                        dp_tetra_ctrl.d.rgba,
-                        dp_tetra_ctrl.d.dist,
-                        dp_tetra_ctrl.d.density,
-                    };
+                    CtrlPt.Differential d_tetra_scale;
+                    d_tetra_scale.rgba    = dp_tetra_ctrl.d.rgba;
+                    d_tetra_scale.dist    = dp_tetra_ctrl.d.dist;
+                    d_tetra_scale.density = dp_tetra_ctrl.d.density;
+                    d_tetra_scale.xyzd    = dp_tetra_ctrl.d.xyzd;
+                    [ForceUnroll]
+                    for (int ii = 0; ii < AUX_DIM; ++ii) {
+                        d_tetra_scale.aux[ii] = dp_tetra_ctrl.d.aux[ii];
+                    }
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, cell_values, dp_g.d);
                 }
