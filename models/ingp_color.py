@@ -424,10 +424,11 @@ class Model(BaseModel):
             if self.ablate_gradient:
                 grd = torch.zeros_like(grd)
             centroids = vertices[indices[start:end]].mean(dim=1)
-            shs[start:end] = sh.reshape(-1, sh_dim, 3)
+            sh_r = sh.reshape(end - start, sh_dim, 3)
+            shs[start:end] = sh_r
             dvrgbs = activate_output(camera.camera_center.to(self.device),
                                      density, rgb, grd,
-                                     sh.reshape(-1, sh_dim, 3),
+                                     sh_r,
                                      attr,
                                      indices[start:end],
                                      centroids,
@@ -545,7 +546,7 @@ class Model(BaseModel):
         ext_vertices = ckpt['ext_vertices']
         model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         model.load_state_dict(ckpt)
-        model.min_t = config.min_t
+        model.min_t = getattr(config, 'min_t', 0.2)
         model.indices = torch.as_tensor(indices).cuda()
         model.empty_indices = torch.as_tensor(empty_indices).cuda()
         return model
