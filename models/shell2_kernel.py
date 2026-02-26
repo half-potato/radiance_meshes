@@ -1,3 +1,10 @@
+"""Shell-2 kernel: extends shell kernel with 2nd-ring flap-of-flap vertices.
+
+Shell-1 uses 4 own + 4 flap = 8 vertices per tet.
+Shell-2 adds the flap vertices of each face neighbor, giving ~14 unique
+vertices per tet on average — roughly doubling the captured kernel weight
+while staying well below the full star (~35 vertices).
+"""
 import torch
 import math
 from data.camera import Camera
@@ -66,6 +73,7 @@ class Model(BaseModel):
         ablate_gradient=False,
         kernel_sigma=1.0,
         project_cc=False,
+        scale_mode="mean",
         **kwargs,
     ):
         super().__init__()
@@ -78,6 +86,7 @@ class Model(BaseModel):
         self.ablate_gradient = ablate_gradient
         self.kernel_sigma = kernel_sigma
         self.project_cc = project_cc
+        self.scale_mode = scale_mode  # "mean" or "p25"
 
         # Per-vertex value dimension:
         # [0:1] density, [1:4] rgb, [4:7] gradient dir,
@@ -151,20 +160,13 @@ class Model(BaseModel):
             has_neigh = neigh >= 0
             if not has_neigh.any():
                 continue
-            # Own vertex set for tets with this neighbor
             own_verts = self.indices[has_neigh]  # (K, 4)
             neigh_verts = self.indices[neigh[has_neigh]]  # (K, 4)
-            # For each neighbor tet, find the vertex not in own_verts
-            # own_verts: (K, 4), neigh_verts: (K, 4)
-            # Compare each neighbor vertex against all own vertices
-            # not_shared[k, i] = True if neigh_verts[k, i] not in own_verts[k]
             not_shared = (
                 neigh_verts.unsqueeze(2) != own_verts.unsqueeze(1)
             ).all(
                 dim=2
             )  # (K, 4)
-            # Pick the first True column per row
-            # If multiple (shouldn't happen for valid meshes), take first
             flap_local = not_shared.float().argmax(dim=1)  # (K,)
             flap_vertex = neigh_verts[
                 torch.arange(neigh_verts.shape[0], device=device), flap_local
@@ -173,15 +175,61 @@ class Model(BaseModel):
 
         self.flap_indices = flap
 
+    def _compute_ring2_indices(self):
+        """Compute 2nd-ring vertices: flap-of-flap not already in shell-1.
+
+        Fully vectorized: gathers each neighbor's flap indices, deduplicates
+        against shell-1 and within-row, then compacts valid entries to front.
+        Result shape: (T, 12) with -1 padding.
+        """
+        T = self.indices.shape[0]
+        device = self.device
+
+        # 1. Gather each neighbor's flap indices → (T, 4, 4)
+        valid_neigh = self.tet_adj >= 0  # (T, 4)
+        safe_neigh = self.tet_adj.clamp(min=0)  # (T, 4)
+        neigh_flaps = self.flap_indices[safe_neigh]  # (T, 4, 4)
+
+        # 2. Flatten to (T, 16) candidates
+        candidates = neigh_flaps.reshape(T, 16)
+
+        # 3. Invalidate candidates from non-existent neighbors
+        neigh_mask = valid_neigh.unsqueeze(2).expand(-1, -1, 4).reshape(T, 16)
+        candidates = candidates.clone()
+        candidates[~neigh_mask] = -1
+
+        # 4. Remove candidates already in shell-1 (own 4 + flap 4)
+        shell1 = torch.cat([self.indices, self.flap_indices], dim=1)  # (T, 8)
+        is_in_shell1 = (candidates.unsqueeze(2) == shell1.unsqueeze(1)).any(dim=2)
+        candidates[is_in_shell1] = -1
+
+        # 5. Remove within-row duplicates (keep first occurrence)
+        for i in range(1, 16):
+            earlier = candidates[:, :i]  # (T, i)
+            cur = candidates[:, i : i + 1]  # (T, 1)
+            is_dup = ((cur == earlier) & (cur >= 0)).any(dim=1)  # (T,)
+            candidates[is_dup, i] = -1
+
+        # 6. Compact valid entries to front, take first 12
+        valid = candidates >= 0
+        sort_idx = (~valid).long().argsort(dim=1, stable=True)
+        self.ring2_indices = candidates.gather(1, sort_idx)[:, :12]
+
     def _precompute_vertex_edge_scale(self):
-        """Compute per-vertex mean incident edge length."""
+        """Compute per-vertex edge scale (mean or p25 of incident edges)."""
+        if self.scale_mode == "p25":
+            self._precompute_vertex_edge_scale_p25()
+        else:
+            self._precompute_vertex_edge_scale_mean()
+
+    def _precompute_vertex_edge_scale_mean(self):
+        """Per-vertex mean incident edge length."""
         vertices = self.vertices.detach()
         n_verts = vertices.shape[0]
         edge_sum = torch.zeros(n_verts, device=self.device)
         edge_count = torch.zeros(n_verts, device=self.device)
 
         idx = self.indices  # (T, 4)
-        # All 6 edges per tet: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
         pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
         ones = torch.ones(idx.shape[0], device=self.device)
         for i, j in pairs:
@@ -195,15 +243,46 @@ class Model(BaseModel):
 
         self.vertex_edge_scale = (edge_sum / edge_count.clamp(min=1)).clamp(min=1e-8)
 
+    def _precompute_vertex_edge_scale_p25(self):
+        """Per-vertex 25th-percentile incident edge length."""
+        vertices = self.vertices.detach()
+        n_verts = vertices.shape[0]
+        idx = self.indices
+        pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+
+        idx_cpu = idx.cpu().numpy()
+        verts_cpu = vertices.cpu().numpy()
+
+        vert_edges: list[list[float]] = [[] for _ in range(n_verts)]
+        for i, j in pairs:
+            vi = idx_cpu[:, i]
+            vj = idx_cpu[:, j]
+            elens = np.linalg.norm(verts_cpu[vi] - verts_cpu[vj], axis=-1)
+            for k in range(len(elens)):
+                vert_edges[int(vi[k])].append(float(elens[k]))
+                vert_edges[int(vj[k])].append(float(elens[k]))
+
+        scale = torch.zeros(n_verts, device=self.device)
+        for v in range(n_verts):
+            edges = vert_edges[v]
+            if edges:
+                scale[v] = float(np.percentile(edges, 25))
+            else:
+                scale[v] = 1e-8
+
+        self.vertex_edge_scale = scale.clamp(min=1e-8)
+
     # ------------------------------------------------------------------
-    # Core shell kernel computation
+    # Core shell-2 kernel computation
     # ------------------------------------------------------------------
 
     def compute_batch_features(
         self, vertices, indices, start, end, circumcenters=None,
-        flap_indices=None,
+        flap_indices=None, ring2_indices=None,
     ):
-        """Shell kernel: interpolate per-vertex values using Gaussian weights."""
+        """Shell-2 kernel: interpolate per-vertex values using Gaussian weights
+        over own (4) + flap (4) + ring2 (up to 12) vertices.
+        """
         batch_indices = indices[start:end]  # (B, 4)
         B = batch_indices.shape[0]
         device = vertices.device
@@ -224,8 +303,7 @@ class Model(BaseModel):
                 cc - vertices[batch_indices[:, 0]], dim=-1
             )
 
-        # Circumcenter as kernel center — it lies on the circumsphere
-        # which passes through all shell vertices.
+        # Circumcenter as kernel center
         if self.project_cc:
             kernel_center = project_points_to_tetrahedra(cc, own_pos)
         else:
@@ -235,36 +313,43 @@ class Model(BaseModel):
         all_flap = flap_indices if flap_indices is not None else self.flap_indices
         batch_flap = all_flap[start:end]  # (B, 4)
         flap_valid = batch_flap >= 0  # (B, 4)
-        safe_flap = batch_flap.clamp(min=0)  # safe indexing
+        safe_flap = batch_flap.clamp(min=0)
         flap_pos = vertices[safe_flap]  # (B, 4, 3)
         flap_val = all_values[safe_flap]  # (B, 4, D)
 
-        # 4. Distances from all 8 vertices to kernel center
+        # 4. Gather ring2 vertices (up to 12 extra)
+        all_ring2 = ring2_indices if ring2_indices is not None else self.ring2_indices
+        batch_ring2 = all_ring2[start:end]  # (B, 12)
+        ring2_valid = batch_ring2 >= 0  # (B, 12)
+        safe_ring2 = batch_ring2.clamp(min=0)
+        ring2_pos = vertices[safe_ring2]  # (B, 12, 3)
+        ring2_val = all_values[safe_ring2]  # (B, 12, D)
+
+        # 5. Distances from all vertices to kernel center
         kc_exp = kernel_center.unsqueeze(1)  # (B, 1, 3)
         own_dist = torch.linalg.norm(own_pos - kc_exp, dim=-1)  # (B, 4)
         flap_dist = torch.linalg.norm(flap_pos - kc_exp, dim=-1)  # (B, 4)
+        ring2_dist = torch.linalg.norm(ring2_pos - kc_exp, dim=-1)  # (B, 12)
 
-        # 5. Gaussian kernel weights scaled by per-vertex min edge length.
-        #    Each vertex has its own bandwidth: dense regions get tight
-        #    kernels, sparse regions get wide kernels.
+        # 6. Gaussian kernel weights scaled by per-vertex edge length
         own_scale = self.vertex_edge_scale[batch_indices]  # (B, 4)
         flap_scale = self.vertex_edge_scale[safe_flap]     # (B, 4)
+        ring2_scale = self.vertex_edge_scale[safe_ring2]   # (B, 12)
         inv_2sigma2 = 1.0 / (2.0 * self.kernel_sigma * self.kernel_sigma)
-        own_w = safe_exp(-(own_dist / own_scale) ** 2 * inv_2sigma2)  # (B, 4)
-        flap_w = safe_exp(-(flap_dist / flap_scale) ** 2 * inv_2sigma2)  # (B, 4)
+        own_w = safe_exp(-(own_dist / own_scale) ** 2 * inv_2sigma2)      # (B, 4)
+        flap_w = safe_exp(-(flap_dist / flap_scale) ** 2 * inv_2sigma2)   # (B, 4)
+        ring2_w = safe_exp(-(ring2_dist / ring2_scale) ** 2 * inv_2sigma2) # (B, 12)
 
-        # 6. Zero out weights for boundary flaps
+        # 7. Zero out weights for invalid entries
         flap_w = flap_w * flap_valid.float()
+        ring2_w = ring2_w * ring2_valid.float()
 
-        # 7. Concatenate and normalize weights, compute weighted average
-        all_w = torch.cat([own_w, flap_w], dim=1)  # (B, 8)
-        # w_sum = all_w.sum(dim=1, keepdim=True).clamp(min=1e-8)  # (B, 1)
-        # all_w = all_w / w_sum  # (B, 8)
-
-        all_val = torch.cat([own_val, flap_val], dim=1)  # (B, 8, D)
+        # 8. Concatenate and compute weighted average
+        all_w = torch.cat([own_w, flap_w, ring2_w], dim=1)     # (B, 20)
+        all_val = torch.cat([own_val, flap_val, ring2_val], dim=1)  # (B, 20, D)
         raw = (all_w.unsqueeze(2) * all_val).sum(dim=1)  # (B, D)
 
-        # 8. Unpack and activate
+        # 9. Unpack and activate
         sh_dim_per_channel = ((1 + self.max_sh_deg) ** 2 - 1)
         sh_dim_total = self.sh_dim  # sh_dim_per_channel * 3
 
@@ -305,9 +390,11 @@ class Model(BaseModel):
         if mask is not None:
             indices = self.indices[mask]
             flap = self.flap_indices[mask]
+            ring2 = self.ring2_indices[mask]
         else:
             indices = self.indices
             flap = self.flap_indices
+            ring2 = self.ring2_indices
         vertices = self.vertices
 
         sh_dim = (self.max_sh_deg + 1) ** 2 - 1
@@ -327,6 +414,7 @@ class Model(BaseModel):
                     end,
                     circumcenters=all_circumcenters,
                     flap_indices=flap,
+                    ring2_indices=ring2,
                 )
             )
             if self.ablate_gradient:
@@ -488,6 +576,7 @@ class Model(BaseModel):
         # Recompute topology
         model.tet_adj = build_adj(model.vertices, model.indices, device=model.device)
         model._compute_flap_indices()
+        model._compute_ring2_indices()
         model._precompute_vertex_edge_scale()
         return model
 
@@ -578,12 +667,13 @@ class Model(BaseModel):
 
         self.indices = indices
 
-        # Build adjacency, flap indices, and per-vertex min edge before
-        # density thresholding so that calc_tet_density can use them.
+        # Build adjacency, flap indices, ring2, and per-vertex edge scale
+        # before density thresholding so that calc_tet_density can use them.
         self.tet_adj = build_adj(
             self.vertices, self.indices, device=self.device
         )
         self._compute_flap_indices()
+        self._compute_ring2_indices()
         self._precompute_vertex_edge_scale()
 
         if density_threshold > 0 or alpha_threshold > 0:
@@ -600,6 +690,7 @@ class Model(BaseModel):
                 self.vertices, self.indices, device=self.device
             )
             self._compute_flap_indices()
+            self._compute_ring2_indices()
             # vertex_edge_scale doesn't need rebuild — it's per-vertex,
             # indexed by vertex ID, not affected by tet masking.
         else:
@@ -621,12 +712,12 @@ class Model(BaseModel):
 
     @torch.no_grad()
     def log_kernel_diagnostics(self):
-        """Compute and return shell kernel diagnostics for investigation."""
+        """Compute and return shell-2 kernel diagnostics."""
         vertices = self.vertices.detach()
         n_verts = vertices.shape[0]
         weight_sums = torch.zeros(n_verts, device=self.device)
         tet_count = torch.zeros(n_verts, dtype=torch.long, device=self.device)
-        all_own_w, all_flap_w = [], []
+        all_own_w, all_flap_w, all_ring2_w = [], [], []
         cc_outside_count = 0
         total_tets = 0
 
@@ -659,19 +750,29 @@ class Model(BaseModel):
             safe_flap = batch_flap.clamp(min=0)
             flap_pos = vertices[safe_flap]
 
+            batch_ring2 = self.ring2_indices[start:end]
+            ring2_valid = batch_ring2 >= 0
+            safe_ring2 = batch_ring2.clamp(min=0)
+            ring2_pos = vertices[safe_ring2]
+
             kc_exp = kernel_center.unsqueeze(1)
             own_dist = torch.linalg.norm(own_pos - kc_exp, dim=-1)
             flap_dist = torch.linalg.norm(flap_pos - kc_exp, dim=-1)
+            ring2_dist = torch.linalg.norm(ring2_pos - kc_exp, dim=-1)
 
             own_scale = self.vertex_edge_scale[batch_indices]
             flap_scale = self.vertex_edge_scale[safe_flap]
+            ring2_scale = self.vertex_edge_scale[safe_ring2]
             inv_2sigma2 = 1.0 / (2.0 * self.kernel_sigma * self.kernel_sigma)
             own_w = safe_exp(-(own_dist / own_scale) ** 2 * inv_2sigma2)
             flap_w = safe_exp(-(flap_dist / flap_scale) ** 2 * inv_2sigma2)
+            ring2_w = safe_exp(-(ring2_dist / ring2_scale) ** 2 * inv_2sigma2)
             flap_w = flap_w * flap_valid.float()
+            ring2_w = ring2_w * ring2_valid.float()
 
             all_own_w.append(own_w)
             all_flap_w.append(flap_w)
+            all_ring2_w.append(ring2_w)
 
             # Accumulate per-vertex weight sums and tet counts
             for j in range(4):
@@ -682,24 +783,31 @@ class Model(BaseModel):
                 valid = flap_valid[:, j]
                 if valid.any():
                     weight_sums.scatter_add_(0, safe_flap[valid, j], flap_w[valid, j])
+            for j in range(ring2_w.shape[1]):
+                valid = ring2_valid[:, j]
+                if valid.any():
+                    weight_sums.scatter_add_(0, safe_ring2[valid, j], ring2_w[valid, j])
 
         all_own_w = torch.cat(all_own_w, dim=0)
         all_flap_w = torch.cat(all_flap_w, dim=0)
+        all_ring2_w = torch.cat(all_ring2_w, dim=0)
 
         # Per-tet weight stats
-        tet_total_w = all_own_w.sum(dim=1) + all_flap_w.sum(dim=1)
+        tet_total_w = all_own_w.sum(dim=1) + all_flap_w.sum(dim=1) + all_ring2_w.sum(dim=1)
         own_frac = all_own_w.sum(dim=1) / tet_total_w.clamp(min=1e-8)
+        ring2_frac = all_ring2_w.sum(dim=1) / tet_total_w.clamp(min=1e-8)
 
-        # Weight entropy per tet (how uniform is the weighting)
-        all_w_cat = torch.cat([all_own_w, all_flap_w], dim=1)
+        # Weight entropy per tet
+        n_slots = 4 + 4 + all_ring2_w.shape[1]
+        all_w_cat = torch.cat([all_own_w, all_flap_w, all_ring2_w], dim=1)
         w_norm = all_w_cat / all_w_cat.sum(dim=1, keepdim=True).clamp(min=1e-8)
         entropy = -(w_norm * (w_norm + 1e-10).log()).sum(dim=1)
-        max_entropy = math.log(8)  # uniform over 8 vertices
+        max_entropy = math.log(n_slots)
 
-        # Own weight variance (how much the kernel differentiates own vertices)
+        # Own weight variance
         own_w_std = all_own_w.std(dim=1)
 
-        # Per-vertex stats (training speed imbalance)
+        # Per-vertex stats
         int_ws = weight_sums[:self.num_int_verts]
         int_tc = tet_count[:self.num_int_verts].float()
 
@@ -712,7 +820,9 @@ class Model(BaseModel):
             "own_w_mean": all_own_w.mean().item(),
             "own_w_std_across_tet": own_w_std.mean().item(),
             "flap_w_mean": all_flap_w[all_flap_w > 0].mean().item() if (all_flap_w > 0).any() else 0,
+            "ring2_w_mean": all_ring2_w[all_ring2_w > 0].mean().item() if (all_ring2_w > 0).any() else 0,
             "own_frac_mean": own_frac.mean().item(),
+            "ring2_frac_mean": ring2_frac.mean().item(),
             "entropy_mean": entropy.mean().item(),
             "entropy_ratio": (entropy.mean().item() / max_entropy),
             "vtx_weight_sum_mean": int_ws.mean().item(),
@@ -762,7 +872,6 @@ class TetOptimizer:
         final_network_lr: float = 1e-3,
         **kwargs,
     ):
-        # Use encoding_lr/network_lr as fallback for values_lr if not explicitly changed
         effective_values_lr = values_lr
         effective_final_values_lr = final_values_lr
 
