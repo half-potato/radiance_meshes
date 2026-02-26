@@ -18,7 +18,8 @@ import numpy as np
 from utils import cam_util
 from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
 # from models.vertex_color import Model, TetOptimizer
-from models.ingp_color import Model, TetOptimizer
+# from models.ingp_color import Model, TetOptimizer
+from models.shell_kernel import Model, TetOptimizer
 # from models.frozen import FrozenTetModel as Model
 # from models.frozen import FrozenTetOptimizer as TetOptimizer
 from models.frozen import freeze_model
@@ -32,7 +33,7 @@ import termplotlib as tpl
 import gc
 from utils.densification import collect_render_stats, apply_densification
 import mediapy
-from utils.graphics_utils import calculate_norm_loss, depth_to_normals
+from utils.graphics_utils import depth_to_normal
 from icecream import ic
 
 # from tracers.splinetracers.tetra_splinetracer import render_rt
@@ -82,6 +83,9 @@ args.lambda_weight_decay = 1
 args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 args.additional_attr = 0
+
+args.kernel_sigma = 1.5
+args.project_cc = False
 
 args.g_init=1e-5
 args.s_init=1e-1
@@ -290,7 +294,7 @@ for iteration in progress_bar:
             sample_image = sample_image.permute(1, 2, 0)
             sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
 
-            pred_normal = depth_to_normals(render_pkg['xyzd'][..., 3:], camera.fx, camera.fy)
+            pred_normal = depth_to_normal(render_pkg['xyzd'][..., 3:], camera)
             # vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
             vis_normal = (render_pkg['xyzd'][..., :3] * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             vis_pred_normal = (pred_normal * 127 + 128).clamp(0, 255).byte().cpu().numpy()
