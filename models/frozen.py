@@ -188,8 +188,9 @@ class FrozenTetModel(BaseModel):
             sh       = self.sh
 
         sh_dim = (self.max_sh_deg+1)**2 - 1
-        attr = torch.empty((sh.shape[0], 0), device=grd.device)
-        return circumcenter, density, rgb, grd, sh.reshape(-1, sh_dim, 3), attr
+        N = sh.shape[0]
+        attr = torch.empty((N, 0), device=grd.device)
+        return circumcenter, density, rgb, grd, sh.reshape(N, sh_dim, 3), attr
 
     def compute_features(self, offset=False):
         vertices = self.vertices

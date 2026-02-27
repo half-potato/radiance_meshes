@@ -79,7 +79,12 @@ inline CtrlPt integrate_tetra_segment(
     float alpha = max(-safe_expm1(-g.density * dt), 0.f);
     float3 final_color = compute_integral(c_exit, c_enter, dt * g.density);
 
-    float3 rendered_norm = alpha * l2_normalize(enter_norm);
+    // Density-gradient normal: per-tet contribution to volume-rendered ∇σ.
+    // Telescopes across tet boundaries: at shared faces, exit_norm_k = enter_norm_{k+1},
+    // so adjacent contributions cancel to leave T * (σ_{k+1} - σ_k) * face_normal.
+    float3 n_enter = l2_normalize(enter_norm) * sign(dot(ray.d, enter_norm));
+    float3 n_exit  = l2_normalize(exit_norm)  * sign(dot(ray.d, exit_norm));
+    float3 rendered_norm = g.density * (n_enter - n_exit * safe_exp(-g.density * dt));
     float depth = safe_div(compute_integral1D(enter, exit, dt * g.density), ray.ortho);
 
     float4 rgba = { final_color.x,

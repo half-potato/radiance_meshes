@@ -253,6 +253,15 @@ class Model(BaseModel):
         own_w = safe_exp(-(own_dist / own_scale) ** 2 * inv_2sigma2)  # (B, 4)
         flap_w = safe_exp(-(flap_dist / flap_scale) ** 2 * inv_2sigma2)  # (B, 4)
 
+        # 5. Gaussian kernel weights scaled by per-vertex min edge length.
+        #    Each vertex has its own bandwidth: dense regions get tight
+        #    kernels, sparse regions get wide kernels.
+        own_scale = self.vertex_edge_scale[batch_indices]  # (B, 4)
+        flap_scale = self.vertex_edge_scale[safe_flap]     # (B, 4)
+        inv_2sigma2 = 1.0 / (2.0 * self.kernel_sigma * self.kernel_sigma)
+        own_w = safe_exp(-(own_dist / own_scale) ** 2 * inv_2sigma2)  # (B, 4)
+        flap_w = safe_exp(-(flap_dist / flap_scale) ** 2 * inv_2sigma2)  # (B, 4)
+
         # 6. Zero out weights for boundary flaps
         flap_w = flap_w * flap_valid.float()
 
