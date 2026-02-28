@@ -126,6 +126,26 @@ float4 undo_xyzd_state(in float4 next_xyzd, in float4 ctrl_xyzd, in float T) {
     return next_xyzd - T * ctrl_xyzd;
 }
 
+// Multiply xyzd.xyz (entry face normal) by (prev_density - density) to get
+// the density-gradient normal contribution for this tet.
+// prev_density is no_diff: gradient flows to density and xyzd, not to the previous tet.
+[Differentiable]
+float4 apply_density_diff(in float4 xyzd, no_diff in float prev_density, in float density) {
+    return float4((prev_density - density) * xyzd.xyz, xyzd.w);
+}
+
+// End-of-ray exit correction: adds T_final * last_density * n_exit
+[Differentiable]
+float4 apply_exit_correction(in float4 xyzd, in float log_T, in float density, in float3 n_exit) {
+    float T = safe_exp(log_T);
+    return float4(xyzd.xyz + T * density * n_exit, xyzd.w);
+}
+
+float4 undo_exit_correction(in float4 xyzd, in float log_T, in float density, in float3 n_exit) {
+    float T = safe_exp(log_T);
+    return float4(xyzd.xyz - T * density * n_exit, xyzd.w);
+}
+
 struct AlphaOut: IDifferentiable {
     float4 rgba;
     DistortionState5 distortion_state;
@@ -154,6 +174,7 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
     AlphaOut res;
     res.rgba = update_pixel_state(prev.rgba, ctrl.rgba);
     res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist);
+
     res.xyzd = update_xyzd_state(prev.xyzd, ctrl.xyzd, T);
 
     // 2. Accumulate Aux (Standard Alpha Blending)
@@ -168,7 +189,6 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
 AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
     float4 pix_state = undo_pixel_state(curr.rgba, ctrl.rgba);
     float T = safe_exp(pix_state.a);
-
     AlphaOut res;
     res.rgba = pix_state;
     res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist);
@@ -216,6 +236,10 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     Ray ray = get_ray(cam, center_pix_coord);
     int32_t local_n_contrib = 0;
+    float prev_density = 0.0f;
+    float last_density = 0.0f;
+    float3 last_n_exit = float3(0);
+    bool first_hit = true;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
@@ -239,6 +263,21 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
+
+                    if (first_hit) {
+                        // Camera starts inside this primitive: don't add density-diff
+                        // term, just set prev_density and zero out xyzd normal.
+                        tetra_ctrl.xyzd = float4(float3(0), tetra_ctrl.xyzd.w);
+                        first_hit = false;
+                    } else {
+                        // Apply density difference: xyzd.xyz = (prev_density - density) * n_enter
+                        tetra_ctrl.xyzd = apply_density_diff(tetra_ctrl.xyzd, prev_density, tetra_ctrl.density);
+                    }
+
+                    last_density = tetra_ctrl.density;
+                    last_n_exit = tetra_ctrl.exit_contrib;
+                    prev_density = tetra_ctrl.density;
+
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     ao = new_ao;
                     if (new_ao.rgba.a < -5.5) {
@@ -250,6 +289,10 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
         }
         splats_left_to_process -= block_size;
     }
+
+    // Exit correction: transition from last_density to 0 (empty space).
+    // Adds T_final * last_density * n_exit.
+    ao.xyzd = apply_exit_correction(ao.xyzd, ao.rgba.a, last_density, last_n_exit);
 
     if (is_inside)
         n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)] = local_n_contrib;
@@ -310,6 +353,10 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
     Ray ray = get_ray(cam, center_pix_coord);
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
+    bool first_bwd_tet = true;
+    float bwd_prev_density = 0.0f; // running tracker for prev_density (approximate at boundaries)
+    float d_exit_density = 0.0f;
+    float3 d_exit_n = float3(0);
     for (int i = 0; i < rounds; i++)
     {
         AllMemoryBarrierWithGroupSync();
@@ -336,22 +383,81 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
-                    ao = undo_alpha_out(ao, tetra_ctrl);
+
+                    // First backward tet = last forward tet: undo exit correction.
+                    if (first_bwd_tet) {
+                        ao.xyzd = undo_exit_correction(ao.xyzd, ao.rgba.a, tetra_ctrl.density, tetra_ctrl.exit_contrib);
+
+                        DifferentialPair<float4> dp_xyzd = diffPair(ao.xyzd);
+                        DifferentialPair<float>  dp_logT = diffPair(ao.rgba.a);
+                        DifferentialPair<float>  dp_density = diffPair(tetra_ctrl.density);
+                        DifferentialPair<float3> dp_n_exit = diffPair(tetra_ctrl.exit_contrib);
+                        bwd_diff(apply_exit_correction)(dp_xyzd, dp_logT, dp_density, dp_n_exit, d_ao.xyzd);
+                        d_ao.xyzd = dp_xyzd.getDifferential();
+                        d_ao.rgba.a += dp_logT.getDifferential();
+                        d_exit_density = dp_density.getDifferential();
+                        d_exit_n = dp_n_exit.getDifferential();
+                        first_bwd_tet = false;
+                    }
+
+                    // Reconstruct the modified ctrl used in forward.
+                    // prev_density is no_diff; approximate using running tracker.
+                    bool is_last_fwd_tet = (current_splat_offset == 0);
+                    float approx_prev_density = bwd_prev_density;
+                    CtrlPt modified_ctrl = tetra_ctrl;
+                    if (is_last_fwd_tet) {
+                        // First forward tet: xyzd.xyz was zeroed (camera inside primitive)
+                        modified_ctrl.xyzd = float4(float3(0), tetra_ctrl.xyzd.w);
+                    } else {
+                        modified_ctrl.xyzd = apply_density_diff(tetra_ctrl.xyzd, approx_prev_density, tetra_ctrl.density);
+                    }
+
+                    ao = undo_alpha_out(ao, modified_ctrl);
+                    bwd_prev_density = tetra_ctrl.density;
+
+                    // Autodiff through update_alpha_out with the modified ctrl.
+                    DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
+                    DifferentialPair<CtrlPt> dp_modified = diffPair(modified_ctrl);
+                    bwd_diff(update_alpha_out)(dp_ao, dp_modified, d_ao);
+                    d_ao = dp_ao.getDifferential();
+
+                    CtrlPt.Differential d_tetra_scale;
+                    if (is_last_fwd_tet) {
+                        // First forward tet had zeroed xyzd.xyz — no density_diff to back-prop through.
+                        d_tetra_scale = {
+                            dp_modified.d.rgba,
+                            dp_modified.d.dist,
+                            dp_modified.d.density,
+                            float4(0), // no gradient for n_enter (was zeroed)
+                            dp_modified.d.aux,
+                            dp_modified.d.entry_contrib,
+                            dp_modified.d.exit_contrib
+                        };
+                    } else {
+                        // Back-propagate through apply_density_diff to get gradients for n_enter and density.
+                        // prev_density is no_diff so it's passed as a plain value.
+                        DifferentialPair<float4> dp_orig_xyzd = diffPair(tetra_ctrl.xyzd);
+                        DifferentialPair<float>  dp_dens = diffPair(tetra_ctrl.density);
+                        bwd_diff(apply_density_diff)(dp_orig_xyzd, approx_prev_density, dp_dens, dp_modified.d.xyzd);
+
+                        d_tetra_scale = {
+                            dp_modified.d.rgba,
+                            dp_modified.d.dist,
+                            dp_modified.d.density + dp_dens.getDifferential(),
+                            dp_orig_xyzd.getDifferential(),
+                            dp_modified.d.aux,
+                            dp_modified.d.entry_contrib,
+                            dp_modified.d.exit_contrib
+                        };
+                    }
+                    // Add exit correction gradients to the last forward tet only.
+                    d_tetra_scale.density += d_exit_density;
+                    d_tetra_scale.exit_contrib = d_tetra_scale.exit_contrib + d_exit_n;
+                    d_exit_density = 0.0f;
+                    d_exit_n = float3(0);
 
                     DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
                     DifferentialPair<Ray> dp_ray = diffPair(ray);
-                    DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
-                    DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
-
-                    bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
-                    d_ao = dp_ao.getDifferential();
-                    CtrlPt.Differential d_tetra_scale = {
-                        dp_tetra_ctrl.d.rgba,
-                        dp_tetra_ctrl.d.dist,
-                        dp_tetra_ctrl.d.density,
-                        dp_tetra_ctrl.d.xyzd,
-                        dp_tetra_ctrl.d.aux
-                    };
                     bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, cell_values, dp_g.d);
                 }

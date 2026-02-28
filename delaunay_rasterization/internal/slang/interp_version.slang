@@ -10,7 +10,22 @@ struct CtrlPt: IDifferentiable {
     float2 dist;
     float density;
     float4 xyzd;
-    float aux[AUX_DIM]; // <--- Added
+    float aux[AUX_DIM];
+    float3 entry_contrib; // unused (reserved)
+    float3 exit_contrib;  // exit face normal n_exit (for end-of-ray correction)
+
+    static CtrlPt zero(float density) {
+        CtrlPt cp;
+        cp.rgba = float4(0);
+        cp.dist = float2(0);
+        cp.density = density;
+        cp.xyzd = float4(0);
+        cp.entry_contrib = float3(0);
+        cp.exit_contrib = float3(0);
+        [ForceUnroll]
+        for (int i = 0; i < AUX_DIM; ++i) cp.aux[i] = 0;
+        return cp;
+    }
 };
 
 struct SplatTetrahedra_interp : IDifferentiable
@@ -79,30 +94,25 @@ inline CtrlPt integrate_tetra_segment(
     float alpha = max(-safe_expm1(-g.density * dt), 0.f);
     float3 final_color = compute_integral(c_exit, c_enter, dt * g.density);
 
-    // Density-gradient normal: per-tet contribution to volume-rendered ∇σ.
-    // Telescopes across tet boundaries: at shared faces, exit_norm_k = enter_norm_{k+1},
-    // so adjacent contributions cancel to leave T * (σ_{k+1} - σ_k) * face_normal.
     float3 n_enter = l2_normalize(enter_norm) * sign(dot(ray.d, enter_norm));
     float3 n_exit  = l2_normalize(exit_norm)  * sign(dot(ray.d, exit_norm));
-    float3 rendered_norm = g.density * (n_enter - n_exit * safe_exp(-g.density * dt));
     float depth = safe_div(compute_integral1D(enter, exit, dt * g.density), ray.ortho);
-
-    float4 rgba = { final_color.x,
-                    final_color.y,
-                    final_color.z,
-                    g.density * dt };
 
     CtrlPt result;
     result.rgba = { final_color.x, final_color.y, final_color.z, g.density * dt };
     result.dist = { enter, exit };
     result.density = g.density;
-    result.xyzd = float4(rendered_norm, depth);
+    // xyzd.xyz = entry face normal; alpha_blend multiplies by (prev_density - density)
+    result.xyzd = float4(n_enter, depth);
 
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
         result.aux[i] = g.aux[i] * alpha;
     }
-    
+
+    result.entry_contrib = float3(0); // unused now
+    result.exit_contrib = n_exit;     // exit face normal (for exit correction)
+
     return result;
 }
 
@@ -125,7 +135,7 @@ inline bool evaluate_tetra_interp(
     float exit = max(dist.y, enter);
 
     if (!hit) {
-        ctrl_pt = { (float4)(0.f, 0.f, 0.f, 0.f), {0.f, 0.f}, g.density };
+        ctrl_pt = no_diff CtrlPt.zero(g.density);
         return false;
     } else {
         ctrl_pt = integrate_tetra_segment(g, ray, enter, exit, enter_norm, exit_norm);
