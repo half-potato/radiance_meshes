@@ -41,6 +41,10 @@ void Forward::trace_rays(const OptixTraversableHandle &handle,
     params.start_tet_ids.size = num_rays;
 
     params.handle = handle;
+    if (d_param != 0) {
+      CUDA_CHECK(cudaFree(reinterpret_cast<void *>(d_param)));
+      d_param = 0;
+    }
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_param), sizeof(Params)));
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void *>(d_param), &params,
                           sizeof(params), cudaMemcpyHostToDevice));

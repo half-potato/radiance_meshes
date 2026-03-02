@@ -50,6 +50,32 @@ using namespace pybind11::literals; // to bring in the `_a` literal
   CHECK_FLOAT(x);                                                              \
   TORCH_CHECK(x.size(-1) == 3, #x " must have last dimension with size 3")
 
+// Get raw data pointer bypassing has_storage() check, which gives
+// false negatives with PYTORCH_ALLOC_CONF=expandable_segments:True.
+inline void* unsafe_data_ptr(const torch::Tensor& t) {
+  auto* impl = t.unsafeGetTensorImpl();
+  const auto& s = impl->unsafe_storage();
+  if (!s) return nullptr;
+  return static_cast<char*>(const_cast<void*>(s.data()))
+       + impl->storage_offset() * impl->dtype().itemsize();
+}
+
+#define CHECK_TENSOR_VALID(x)                                                  \
+  TORCH_CHECK(x.defined(), #x " is undefined (null tensor)");                 \
+  CHECK_CUDA(x);                                                               \
+  CHECK_CONTIGUOUS(x);                                                         \
+  TORCH_CHECK(unsafe_data_ptr(x) != nullptr, #x " has null data pointer")
+
+// Check for pending CUDA errors — a previous async op may have failed
+#define CHECK_CUDA_STATE(label)                                                \
+  {                                                                            \
+    cudaError_t _err = cudaGetLastError();                                     \
+    if (_err != cudaSuccess) {                                                 \
+      TORCH_CHECK(false, label ": pending CUDA error BEFORE this point: ",    \
+                  cudaGetErrorString(_err));                                    \
+    }                                                                          \
+  }
+
 static void context_log_cb(unsigned int level, const char *tag,
                            const char *message, void * /*cbdata */) {
   // std::cerr << "[" << std::setw( 2 ) << level << "][" << std::setw( 12 ) <<
@@ -92,40 +118,46 @@ public:
                       const torch::Tensor &side_index,
                       const torch::Tensor &densities,
                       const torch::Tensor &colors) {
+    CHECK_TENSOR_VALID(vertices);
+    CHECK_TENSOR_VALID(face_indices);
+    CHECK_TENSOR_VALID(side_index);
+    CHECK_TENSOR_VALID(densities);
+    CHECK_TENSOR_VALID(colors);
+
     const int64_t numPrimitives = densities.size(0);
     const int64_t numFaces = side_index.size(0);
+
     CHECK_FLOAT_DIM3(vertices);
     CHECK_FLOAT(colors);
-    TORCH_CHECK(colors.size(0) == numPrimitives,
-                "All inputs (colors) must have the same 0 dimension")
-    TORCH_CHECK(side_index.size(0) == face_indices.size(0),
-                "All inputs (side_index, face_indices) must have the same 0 dimension")
-    TORCH_CHECK(face_indices.size(1) == 3,
-                "Face indices must have shape (N, 3)")
-    TORCH_CHECK(side_index.size(1) == 2,
-                "Side index must have shape (N, 2)")
+    CHECK_FLOAT(densities);
     CHECK_INT(side_index);
-    CHECK_CONTIGUOUS(side_index);
-    CHECK_CONTIGUOUS(face_indices);
-    CHECK_CONTIGUOUS(densities);
-    CHECK_CONTIGUOUS(colors);
-    TORCH_CHECK(densities.size(0) == numPrimitives,
-                "All inputs (densities) must have the same 0 dimension")
+    TORCH_CHECK(colors.size(0) == numPrimitives,
+                "colors.size(0)=", colors.size(0), " != densities.size(0)=", numPrimitives)
+    TORCH_CHECK(side_index.size(0) == face_indices.size(0),
+                "side_index.size(0)=", side_index.size(0), " != face_indices.size(0)=", face_indices.size(0))
+    TORCH_CHECK(face_indices.size(1) == 3,
+                "face_indices.size(1)=", face_indices.size(1), " expected 3")
+    TORCH_CHECK(side_index.size(1) == 2,
+                "side_index.size(1)=", side_index.size(1), " expected 2")
+
     model.feature_size = colors.size(1);
-    model.side_index = reinterpret_cast<uint2 *>(side_index.data_ptr());
-    model.densities = reinterpret_cast<float *>(densities.data_ptr());
-    model.features = reinterpret_cast<float *>(colors.data_ptr());
-    model.vertices = reinterpret_cast<glm::vec3 *>(vertices.data_ptr());
-    model.indices = reinterpret_cast<glm::ivec3 *>(face_indices.data_ptr());
+    model.side_index = reinterpret_cast<uint2 *>(unsafe_data_ptr(side_index));
+    model.densities = reinterpret_cast<float *>(unsafe_data_ptr(densities));
+    model.features = reinterpret_cast<float *>(unsafe_data_ptr(colors));
+    model.vertices = reinterpret_cast<glm::vec3 *>(unsafe_data_ptr(vertices));
+    model.indices = reinterpret_cast<glm::ivec3 *>(unsafe_data_ptr(face_indices));
     model.num_vertices = vertices.size(0);
     model.num_indices = face_indices.size(0);
     model.num_faces = numFaces;
     model.num_prims = numPrimitives;
   }
   void set_features(const torch::Tensor &colors) {
+    CHECK_TENSOR_VALID(colors);
+    CHECK_FLOAT(colors);
     TORCH_CHECK(colors.size(0) == model.num_prims,
-                "All inputs (colors) must have the same 0 dimension");
-    model.features = reinterpret_cast<float *>(colors.data_ptr());
+                "set_features: colors.size(0)=", colors.size(0),
+                " != num_prims=", model.num_prims);
+    model.features = reinterpret_cast<float *>(unsafe_data_ptr(colors));
   }
 };
 
@@ -136,7 +168,13 @@ public:
         const tsPyPrimitives &model, const bool enable_anyhit,
         const bool fast_build, const bool enable_rebuild)
       : gas(context.context, device.index(), model.model, enable_anyhit,
-            fast_build) {}
+            fast_build) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cerr << "[GAS] WARNING: pending CUDA error after GAS build: "
+                << cudaGetErrorString(err) << std::endl;
+    }
+  }
   // void update(const tsPyPrimitives &model) {
   //     gas.build(model.model, true);
   // }
@@ -152,38 +190,30 @@ public:
   tsSavedForBackward(torch::Device device)
       : num_prims(0), num_rays(0), num_float_per_state(sizeof(SplineState) / sizeof(float)),
         device(device) {}
-  tsSavedForBackward(size_t num_rays, size_t num_prims, torch::Device device)
+  // Accept pre-allocated tensors from Python (avoids torch::zeros inside C++ after OptiX)
+  tsSavedForBackward(size_t num_prims, torch::Device device,
+                     const torch::Tensor &states_,
+                     const torch::Tensor &diracs_,
+                     const torch::Tensor &faces_,
+                     const torch::Tensor &touch_count_,
+                     const torch::Tensor &iters_)
       : num_prims(num_prims), num_float_per_state(sizeof(SplineState) / sizeof(float)),
-        device(device) {
-    allocate(num_rays);
-  }
-  uint *iters_data_ptr() { return reinterpret_cast<uint *>(iters.data_ptr()); }
-  uint *touch_count_data_ptr() { return reinterpret_cast<uint *>(touch_count.data_ptr()); }
-  uint *faces_data_ptr() { return reinterpret_cast<uint *>(faces.data_ptr()); }
+        device(device), states(states_), diracs(diracs_), faces(faces_),
+        touch_count(touch_count_), iters(iters_), num_rays(states_.size(0)) {}
+  uint *iters_data_ptr() { return reinterpret_cast<uint *>(unsafe_data_ptr(iters)); }
+  uint *touch_count_data_ptr() { return reinterpret_cast<uint *>(unsafe_data_ptr(touch_count)); }
+  uint *faces_data_ptr() { return reinterpret_cast<uint *>(unsafe_data_ptr(faces)); }
   float4 *diracs_data_ptr() {
-    return reinterpret_cast<float4 *>(diracs.data_ptr());
+    return reinterpret_cast<float4 *>(unsafe_data_ptr(diracs));
   }
   SplineState *states_data_ptr() {
-    return reinterpret_cast<SplineState *>(states.data_ptr());
+    return reinterpret_cast<SplineState *>(unsafe_data_ptr(states));
   }
   torch::Tensor get_states() { return states; }
   torch::Tensor get_diracs() { return diracs; }
   torch::Tensor get_faces() { return faces; }
   torch::Tensor get_iters() { return iters; }
   torch::Tensor get_touch_count() { return touch_count; }
-  void allocate(size_t num_rays) {
-    states = torch::zeros({(long)num_rays, num_float_per_state},
-                          torch::device(device).dtype(torch::kFloat32));
-    diracs = torch::zeros({(long)num_rays, 4},
-                          torch::device(device).dtype(torch::kFloat32));
-    faces = torch::zeros({(long)num_rays},
-                         torch::device(device).dtype(torch::kInt32));
-    touch_count = torch::zeros({(long)num_prims},
-                         torch::device(device).dtype(torch::kInt32));
-    iters = torch::zeros({(long)num_rays},
-                         torch::device(device).dtype(torch::kInt32));
-    this->num_rays = num_rays;
-  }
 };
 
 struct tsPyForward {
@@ -201,33 +231,63 @@ public:
   void update_model(const tsPyPrimitives &model) {
     forward.reset_features(model.model);
   }
+  // All output tensors are pre-allocated from Python to avoid torch::zeros
+  // inside C++ after OptiX operations (which can corrupt PyTorch's allocator).
   py::dict trace_rays(const tsPyGAS &gas, const torch::Tensor &ray_origins,
                       const torch::Tensor &ray_directions, float tmin,
                       float tmax, const size_t max_iters,
-                      const torch::Tensor start_tet_ids) {
+                      const torch::Tensor start_tet_ids,
+                      const torch::Tensor &color,
+                      const torch::Tensor &tri_collection,
+                      const torch::Tensor &states,
+                      const torch::Tensor &diracs,
+                      const torch::Tensor &faces,
+                      const torch::Tensor &touch_count,
+                      const torch::Tensor &iters_buf) {
     torch::AutoGradMode enable_grad(false);
+
+    // --- Validate inputs ---
+    CHECK_TENSOR_VALID(ray_origins);
+    CHECK_TENSOR_VALID(ray_directions);
+    CHECK_TENSOR_VALID(start_tet_ids);
     CHECK_FLOAT_DIM3(ray_origins);
     CHECK_FLOAT_DIM3(ray_directions);
+    CHECK_INT(start_tet_ids);
+    TORCH_CHECK(ray_origins.size(0) == ray_directions.size(0),
+                "trace_rays: ray count mismatch: origins=", ray_origins.size(0),
+                " directions=", ray_directions.size(0));
+    TORCH_CHECK(start_tet_ids.size(0) == ray_origins.size(0),
+                "trace_rays: start_tet_ids.size(0)=", start_tet_ids.size(0),
+                " != num_rays=", ray_origins.size(0));
+
+    // --- Validate pre-allocated output buffers ---
+    CHECK_TENSOR_VALID(color);
+    CHECK_TENSOR_VALID(tri_collection);
+    CHECK_TENSOR_VALID(states);
+    CHECK_TENSOR_VALID(diracs);
+    CHECK_TENSOR_VALID(faces);
+    CHECK_TENSOR_VALID(touch_count);
+    CHECK_TENSOR_VALID(iters_buf);
+
     const size_t num_rays = ray_origins.numel() / 3;
-    torch::Tensor color;
-    color = torch::zeros({(long)num_rays, 4},
-                         torch::device(device).dtype(torch::kFloat32));
-    torch::Tensor tri_collection =
-        torch::zeros({(long)num_rays * max_iters},
-                     torch::device(device).dtype(torch::kInt32));
-    tsSavedForBackward saved_for_backward(num_rays, num_prims, device);
+
+    tsSavedForBackward saved_for_backward(num_prims, device,
+                                          states, diracs, faces,
+                                          touch_count, iters_buf);
+
     forward.trace_rays(gas.gas.gas_handle, num_rays,
-                       reinterpret_cast<float3 *>(ray_origins.data_ptr()),
-                       reinterpret_cast<float3 *>(ray_directions.data_ptr()),
-                       reinterpret_cast<void *>(color.data_ptr()), 
-                       tmin, tmax, max_iters, 
+                       reinterpret_cast<float3 *>(unsafe_data_ptr(ray_origins)),
+                       reinterpret_cast<float3 *>(unsafe_data_ptr(ray_directions)),
+                       unsafe_data_ptr(color),
+                       tmin, tmax, max_iters,
                        saved_for_backward.iters_data_ptr(),
                        saved_for_backward.faces_data_ptr(),
                        saved_for_backward.touch_count_data_ptr(),
                        saved_for_backward.diracs_data_ptr(),
                        saved_for_backward.states_data_ptr(),
-                       reinterpret_cast<int *>(tri_collection.data_ptr()),
-                       reinterpret_cast<int *>(start_tet_ids.data_ptr()));
+                       reinterpret_cast<int *>(unsafe_data_ptr(tri_collection)),
+                       reinterpret_cast<int *>(unsafe_data_ptr(start_tet_ids)));
+
     return py::dict("color"_a = color, "saved"_a = saved_for_backward,
                     "tri_collection"_a = tri_collection);
   }

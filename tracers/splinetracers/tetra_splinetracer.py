@@ -5,7 +5,6 @@ from typing import *
 import slangtorch
 import torch
 from torch.autograd import Function
-from icecream import ic
 import numpy as np
 from utils.model_util import activate_output
 from dtlookup import TetrahedraLookup
@@ -28,20 +27,37 @@ otx = sp.OptixContext(torch.device("cuda:0"))
 
 MAX_ITERS = 500
 
+NUM_FLOAT_PER_STATE = 20  # sizeof(SplineState) / sizeof(float)
+
+def _allocate_trace_buffers(num_rays, num_prims, max_iters, alloc_tri_collection=False):
+    """Pre-allocate all output buffers for trace_rays from Python side.
+
+    tri_collection write is disabled in the forward shader, so by default we
+    allocate a 1-element stub (saves ~800MB).  Pass alloc_tri_collection=True
+    for the backward pass which actually uses it.
+    """
+    tri_n = (num_rays * max_iters) if alloc_tri_collection else 1
+    return dict(
+        color=torch.zeros((num_rays, 4), device='cuda', dtype=torch.float32),
+        tri_collection=torch.zeros((tri_n,), device='cuda', dtype=torch.int32),
+        states=torch.zeros((num_rays, NUM_FLOAT_PER_STATE), device='cuda', dtype=torch.float32),
+        diracs=torch.zeros((num_rays, 4), device='cuda', dtype=torch.float32),
+        faces=torch.zeros((num_rays,), device='cuda', dtype=torch.int32),
+        touch_count=torch.zeros((num_prims,), device='cuda', dtype=torch.int32),
+        iters_buf=torch.zeros((num_rays,), device='cuda', dtype=torch.int32),
+    )
+
 class FastTracer:
     def __init__(self, vertices, face_indices, side_index, density, features, lookup_tool, tmin=0, tmax=1000, max_iters=200):
-        self.face_indices = face_indices.to(torch.uint32)
+        self.face_indices = face_indices.contiguous().to(torch.uint32)
         self.side_index = side_index.int().contiguous()
         # ic(side_index[25], face_indices[25], indices[13], rayo[0], rayd[0])
         # print(time.time()-st)
         self.density = density.contiguous()
-        self.face_indices = face_indices.contiguous()
         self.vertices = vertices.contiguous()
         self.features = features.contiguous()
 
         self.device = vertices.device
-        st = time.time()
-        # otx = sp.OptixContext(self.device)
         self.prims = sp.Primitives(self.device)
         self.prims.add_primitives(self.vertices, self.face_indices, self.side_index, self.density, self.features)
         self.gas = sp.GAS(otx, self.device, self.prims, True, False, True)
@@ -53,12 +69,42 @@ class FastTracer:
         self.max_iters = max_iters
         
     def trace(self, features, rayo, rayd):
+        rayo = rayo.contiguous()
+        rayd = rayd.contiguous()
+        num_rays = rayo.shape[0]
+        num_prims = self.density.shape[0]
+
+        # Allocate persistent input+output buffers on first call.
+        # Reuse the SAME tensor objects every frame to avoid pybind11
+        # reference leaks (each C++ call leaks ~1 refcount per tensor arg;
+        # reusing the same tensors means leaked refs cost 0 extra memory).
+        if not hasattr(self, '_buffers') or self._buffers['color'].shape[0] != num_rays:
+            self._features_buf = torch.empty_like(features)
+            self._rayo_buf = torch.empty_like(rayo)
+            self._rayd_buf = torch.empty_like(rayd)
+            self._start_buf = torch.empty((num_rays,), dtype=torch.int32, device='cuda')
+            self._buffers = _allocate_trace_buffers(num_rays, num_prims, self.max_iters)
+
+        # Copy per-frame data into persistent buffers (no new tensors created)
+        self._features_buf.copy_(features)
+        self._rayo_buf.copy_(rayo)
+        self._rayd_buf.copy_(rayd)
+
         start_tet_ids = self.lookup_tool.lookup(rayo[0].reshape(1, 3).cuda())
-        start_tet_ids = start_tet_ids * torch.ones((rayo.shape[0]), dtype=torch.int, device='cuda')
-        self.prims.set_features(features)
+        self._start_buf.fill_(start_tet_ids.item())
+
+        self.prims.set_features(self._features_buf)
         self.forward.update_model(self.prims)
+
+        # Zero output buffers
+        for t in self._buffers.values():
+            t.zero_()
+        b = self._buffers
+
         out = self.forward.trace_rays(
-            self.gas, rayo.contiguous(), rayd.contiguous(), self.tmin, self.tmax, self.max_iters, start_tet_ids.contiguous())
+            self.gas, self._rayo_buf, self._rayd_buf, self.tmin, self.tmax, self.max_iters, self._start_buf,
+            b['color'], b['tri_collection'], b['states'], b['diracs'],
+            b['faces'], b['touch_count'], b['iters_buf'])
         return out["color"]
 
 def render_rt(camera, model, ray_jitter=None, min_t=0, **kwargs):
@@ -115,33 +161,30 @@ class SplineTracer(Function):
         return_extras: bool = False,
     ):
         ctx.device = rayo.device
-        st = time.time()
-        # otx = sp.OptixContext(ctx.device)
         ctx.prims = sp.Primitives(ctx.device)
         assert density.device == ctx.device
         density = density.contiguous()
         face_indices = face_indices.contiguous()
         vertices = vertices.contiguous()
+        features = features.contiguous()
 
-        # assume all same start. Not strictly necessary
-        st = time.time()
         start_tet_ids = lookup_tool.lookup(rayo[0].reshape(1, 3).cuda())
         start_tet_ids = start_tet_ids * torch.ones((rayo.shape[0]), dtype=torch.int, device='cuda')
-        face_indices = face_indices.to(torch.uint32)
-        side_index = side_index.int()
-        # ic(side_index[25], face_indices[25], indices[13], rayo[0], rayd[0])
-        # print(time.time()-st)
+        face_indices = face_indices.contiguous().to(torch.uint32)
+        side_index = side_index.contiguous().int()
 
-        st = time.time()
         ctx.prims.add_primitives(vertices, face_indices, side_index, density, features)
         ctx.gas = sp.GAS(otx, ctx.device, ctx.prims, True, False, True)
 
         ctx.forward = sp.Forward(otx, ctx.device, ctx.prims, True)
-        # print(time.time()-st)
-        st = time.time()
         ctx.max_iters = max_iters
+        num_rays = rayo.shape[0]
+        num_prims = features.shape[0]
+        b = _allocate_trace_buffers(num_rays, num_prims, max_iters, alloc_tri_collection=True)
         out = ctx.forward.trace_rays(
-            ctx.gas, rayo, rayd, tmin, tmax, ctx.max_iters, start_tet_ids)
+            ctx.gas, rayo, rayd, tmin, tmax, ctx.max_iters, start_tet_ids,
+            b['color'], b['tri_collection'], b['states'], b['diracs'],
+            b['faces'], b['touch_count'], b['iters_buf'])
         # print(time.time()-st)
         ctx.saved = out["saved"]
         ctx.tmin = tmin

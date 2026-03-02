@@ -23,7 +23,6 @@ from models.base_model import BaseModel
 from utils.ingp_util import grid_scale, compute_grid_offsets
 from utils.hashgrid import HashEmbedderOptimized
 from utils import hashgrid
-import tinycudann as tcnn
 import time
 
 def get_tet_adjacency_from_scipy(tri):
@@ -149,6 +148,7 @@ class iNGPDW(nn.Module):
             log2_hashmap_size=log2_hashmap_size,
         )
         if use_tcnn:
+            import tinycudann as tcnn
             self.encoding = tcnn.Encoding(3, self.config)
             print("Using TCNN")
             self.compile = False

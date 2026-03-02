@@ -173,7 +173,7 @@ with torch.no_grad():
         offset = (( - vertices[model.indices[..., 0]]) * grd).sum(dim=1, keepdim=True)
         base_color = features[..., :3] + offset
         features = torch.cat([base_color, grd], dim=1).contiguous()
-        # render_pkg = render_rt(camera, model, cds, min_t=args.min_t, density=dvrgbs[:, :1], cell_values=features, lookup_tool=lookup)
+        del dvrgbs, grd, offset, base_color
 
         rays = camera.get_world_space_rays(cds, 'cuda')
         image = tracer.trace(
@@ -181,9 +181,7 @@ with torch.no_grad():
             rays[:, :3].contiguous(),
             rays[:, 3:].contiguous(),
         ).reshape(camera.image_height, camera.image_width, 4)[:, :, :3]
-        # image = render_pkg
-        # image = render_pkg['render']
-        # image = image.permute(1, 2, 0)
+        del features, rays
         image = image.detach().cpu().numpy()
         eimages.append(image)
 

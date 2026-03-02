@@ -94,8 +94,8 @@ inline CtrlPt integrate_tetra_segment(
     float alpha = max(-safe_expm1(-g.density * dt), 0.f);
     float3 final_color = compute_integral(c_exit, c_enter, dt * g.density);
 
-    float3 n_enter = l2_normalize(enter_norm) * sign(dot(ray.d, enter_norm));
-    float3 n_exit  = l2_normalize(exit_norm)  * sign(dot(ray.d, exit_norm));
+    float3 n_enter = l2_normalize(enter_norm) * -sign(dot(ray.d, enter_norm));
+    float3 n_exit  = l2_normalize(exit_norm) * -sign(dot(ray.d, exit_norm));
     float depth = safe_div(compute_integral1D(enter, exit, dt * g.density), ray.ortho);
 
     CtrlPt result;
