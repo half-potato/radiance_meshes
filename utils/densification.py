@@ -340,17 +340,9 @@ def apply_densification(
 
     clone_indices = model.indices[clone_mask]
     split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
-    # grow_point = safe_math.safe_div(
-    #     stats.tet_moments[:, :3],
-    #     stats.tet_moments[:, 3:4]
-    # )
-    # split_point[bad] = grow_point[bad]
     split_point = split_point[clone_mask]
     bad = bad[clone_mask]
-    barycentric = torch.rand((clone_indices.shape[0], clone_indices.shape[1], 1), device=device).clip(min=0.01, max=0.99)
-    barycentric_weights = barycentric / (1e-3+barycentric.sum(dim=1, keepdim=True))
-    random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
-    split_point[bad] = random_locations[bad]    # fall back
+    # Clamped intersection is already inside tet bbox; no fallback needed
 
     tet_optim.split(split_point, **args.as_dict())
     # keep_verts = keep_verts > 0

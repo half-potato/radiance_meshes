@@ -31,6 +31,7 @@ from utils import test_util
 import termplotlib as tpl
 import gc
 from utils.densification import collect_render_stats, apply_densification
+from utils.decimation import apply_decimation
 import mediapy
 from utils.graphics_utils import calculate_norm_loss, depth_to_normals
 from icecream import ic
@@ -126,6 +127,7 @@ args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.2
+args.lambda_ssim_bw = 0.0
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
@@ -138,6 +140,19 @@ args.voxel_size = 0.01
 args.ablate_gradient = False
 args.ablate_circumsphere = True
 args.ablate_downweighing = False
+
+# Decimation Settings
+args.decimate_start = 4000
+args.decimate_end = 17000
+args.decimate_interval = 2000
+args.decimate_count = 5000
+args.decimate_threshold = 0.0
+
+# Edge Length Regularization
+args.lambda_edge_length = 0.0
+
+# MCMC-style vertex noise (SGLD)
+args.noise_lr = 0.0
 
 
 args = Args.from_namespace(args.get_parser().parse_args())
@@ -185,6 +200,7 @@ N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
 dschedule = list(range(args.densify_start, args.densify_end, args.densify_interval))
+dschedule_decimate = list(range(args.decimate_start, args.decimate_end, args.decimate_interval))
 
 # print("Encoding LR")
 # xs = list(range(args.iterations))
@@ -195,7 +211,7 @@ dschedule = list(range(args.densify_start, args.densify_end, args.densify_interv
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, device)
 
-video_writer = imageio.get_writer(str(args.output_path / "training.mp4"), fps=10)
+# video_writer = imageio.get_writer(str(args.output_path / "training.mp4"), fps=10)
 
 progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
@@ -205,6 +221,7 @@ for iteration in progress_bar:
     do_cloning = iteration in dschedule
     do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
     do_sh_step = iteration % args.sh_step == 0
+    do_decimation = iteration in dschedule_decimate and not model.frozen
 
     if do_delaunay or do_freeze:
         st = time.time()
@@ -242,15 +259,34 @@ for iteration in progress_bar:
     l2_loss = ((target - image)**2 * gt_mask).mean()
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
-    # dl_loss = render_pkg['distortion_loss']
+    dl_loss = render_pkg.get('distortion_loss', 0.0)
     # norm_loss = calculate_norm_loss(render_pkg['xyzd'], camera.fx, camera.fy)
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
-           args.lambda_opacity * (1-render_pkg['alpha']).mean()
+           args.lambda_opacity * (1-render_pkg['alpha']).mean() + \
+           args.lambda_dist * dl_loss
+    if args.lambda_ssim_bw > 0:
+        bw_weights = torch.tensor([0.2989, 0.5870, 0.1140], device=image.device).view(3, 1, 1)
+        image_bw = (image * bw_weights).sum(dim=0, keepdim=True)
+        target_bw = (target * bw_weights).sum(dim=0, keepdim=True)
+        ssim_bw_loss = (1-fused_ssim(image_bw.unsqueeze(0), target_bw.unsqueeze(0))).clip(min=0, max=1)
+        loss = loss + args.lambda_ssim_bw * ssim_bw_loss
         #    args.lambda_sh * render_pkg['sh_reg']
-        #    args.lambda_dist * dl_loss + \
         #    args.lambda_norm * norm_loss + \
+
+    if args.lambda_edge_length > 0 and not model.frozen:
+        idx = model.indices.long()
+        v = model.vertices
+        edge_len_sq = (
+            (v[idx[:, 0]] - v[idx[:, 1]]).pow(2).sum(-1) +
+            (v[idx[:, 0]] - v[idx[:, 2]]).pow(2).sum(-1) +
+            (v[idx[:, 0]] - v[idx[:, 3]]).pow(2).sum(-1) +
+            (v[idx[:, 1]] - v[idx[:, 2]]).pow(2).sum(-1) +
+            (v[idx[:, 1]] - v[idx[:, 3]]).pow(2).sum(-1) +
+            (v[idx[:, 2]] - v[idx[:, 3]]).pow(2).sum(-1)
+        ) / 6
+        loss = loss + args.lambda_edge_length * edge_len_sq.mean()
 
     loss.backward()
 
@@ -267,19 +303,25 @@ for iteration in progress_bar:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
+        # MCMC-style SGLD noise on vertex positions
+        if args.noise_lr > 0 and not model.frozen:
+            with torch.no_grad():
+                vlr = tet_optim.vertices_lr
+                noise = torch.randn_like(model.interior_vertices) * args.noise_lr * vlr
+                model.interior_vertices.data.add_(noise)
+
     tet_optim.update_learning_rate(iteration)
 
     if do_sh_up:
         model.sh_up()
 
-    if iteration % 10 == 0:
-        with torch.no_grad():
-            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-            sample_image = render_pkg['render']
-            sample_image = sample_image.permute(1, 2, 0)
-            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-            # sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
-            video_writer.append_data(pad_image2even(sample_image))
+    # if iteration % 10 == 0:
+    #     with torch.no_grad():
+    #         render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
+    #         sample_image = render_pkg['render']
+    #         sample_image = sample_image.permute(1, 2, 0)
+    #         sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
+    #         video_writer.append_data(pad_image2even(sample_image))
 
     if do_cloning and not model.frozen:
         with torch.no_grad():
@@ -300,7 +342,7 @@ for iteration in progress_bar:
             #                 vis_normal)
             # imageio.imwrite(args.output_path / f"depth{iteration}.png",
             #                 vis_depth)
-            video_writer.append_data(pad_image2even(sample_image))
+            # video_writer.append_data(pad_image2even(sample_image))
             sample_image = cv2.cvtColor(sample_image, cv2.COLOR_RGB2BGR)
 
             gc.collect()
@@ -328,6 +370,12 @@ for iteration in progress_bar:
             gc.collect()
             torch.cuda.empty_cache()
 
+    if do_decimation:
+        with torch.no_grad():
+            n_removed = apply_decimation(model, tet_optim, args, device)
+            gc.collect()
+            torch.cuda.empty_cache()
+
     psnr = -20 * math.log10(math.sqrt(l2_loss.detach().cpu().clip(min=1e-6).item()))
     psnrs[-1].append(psnr)
 
@@ -342,7 +390,7 @@ for iteration in progress_bar:
     })
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
-video_writer.close()
+# video_writer.close()
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
@@ -362,6 +410,9 @@ results = test_util.evaluate_and_save(model, splits, args.output_path, args.tile
 with (args.output_path / "results.json").open("w") as f:
     all_data = dict(
         psnr = avged_psnrs[-1] if len(avged_psnrs) > 0 else 0,
+        n_vertices = model.vertices.shape[0],
+        n_interior_vertices = model.num_int_verts,
+        n_tets = model.indices.shape[0],
         **results
     )
     json.dump(all_data, f, cls=CustomEncoder)

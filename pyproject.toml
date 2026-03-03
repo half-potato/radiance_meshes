@@ -28,6 +28,7 @@ dependencies = [
     "tinycudann",
     "pyvista>=0.46.5",
     "tetgen>=0.7.0",
+    "marimo>=0.20.2",
 ]
 
 [tool.uv.sources]

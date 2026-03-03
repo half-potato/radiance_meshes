@@ -212,9 +212,23 @@ def rectify_fisheye_images(input_dir: Path, output_dir: Path,
     # Scale factor: theta_d / theta  (handle theta==0 to avoid division by zero)
     scale = np.where(theta > 1e-9, theta_d / theta, 1.0)
 
+    # Validity mask: the distortion polynomial d(theta_d)/d(theta) must be > 0,
+    # otherwise the mapping folds back on itself, producing mirrored artifacts.
+    # d(theta_d)/d(theta) = 1 + 3*k1*theta^2 + 5*k2*theta^4 + 7*k3*theta^6 + 9*k4*theta^8
+    dtheta_d = (1.0
+                + 3.0 * k1 * theta2
+                + 5.0 * k2 * theta2 * theta2
+                + 7.0 * k3 * theta2 * theta2 * theta2
+                + 9.0 * k4 * theta2 * theta2 * theta2 * theta2)
+    valid_mask = dtheta_d > 0
+
     # Source pixel coordinates in the original (distorted) image
     map_x = (px * scale * fx + cx).astype(np.float32)
     map_y = (py * scale * fy + cy).astype(np.float32)
+
+    # Also mask out source coords that land outside the image
+    valid_mask &= (map_x >= 0) & (map_x < width) & (map_y >= 0) & (map_y < height)
+    alpha_mask = (valid_mask * 255).astype(np.uint8)
 
     # Process each image
     extensions = {".jpg", ".jpeg", ".png"}
@@ -238,16 +252,21 @@ def rectify_fisheye_images(input_dir: Path, output_dir: Path,
                                    interpolation=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_CONSTANT,
                                    borderValue=0)
+            # Intersect original alpha with validity mask
+            alpha_rect = np.minimum(alpha_rect, alpha_mask)
             out_np = np.dstack([rgb_rect, alpha_rect])
         else:
             img_np = np.array(img_pil.convert("RGB"))
-            out_np = cv2.remap(img_np, map_x, map_y,
-                               interpolation=cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_CONSTANT,
-                               borderValue=(0, 0, 0))
+            rgb_rect = cv2.remap(img_np, map_x, map_y,
+                                 interpolation=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=(0, 0, 0))
+            # Convert to RGBA with validity mask as alpha
+            out_np = np.dstack([rgb_rect, alpha_mask])
 
         out_pil = Image.fromarray(out_np)
-        out_pil.save(output_dir / img_path.name)
+        # Always save as PNG to preserve alpha channel
+        out_pil.save(output_dir / (img_path.stem + ".png"))
 
     print(f"    Rectified {len(images)} images -> {output_dir}")
 
