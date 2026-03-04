@@ -63,6 +63,66 @@ def _min_edge_length(vertices, indices):
     return el.min(dim=0).values
 
 
+EDGE_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+
+
+def _canonical_edge_keys(indices: torch.Tensor, n_verts: int) -> torch.Tensor:
+    """Return (T, 6) int64 canonical edge keys (min_v * n_verts + max_v)."""
+    idx = indices.long()
+    keys = []
+    for i, j in EDGE_PAIRS:
+        va = torch.min(idx[:, i], idx[:, j])
+        vb = torch.max(idx[:, i], idx[:, j])
+        keys.append(va * n_verts + vb)
+    return torch.stack(keys, dim=1)  # (T, 6)
+
+
+def build_e2t(indices: torch.Tensor, n_verts: int):
+    """Build padded edge->tet adjacency table.
+
+    Returns:
+        unique_keys: (E,) sorted unique edge keys
+        e2t: (E, max_valence) int64, padded with -1
+        tet_edge_idx: (T, 6) index into unique_keys for each tet's 6 edges
+        valence: (E,) int64, tet count per edge
+    """
+    T = indices.shape[0]
+    device = indices.device
+
+    # (T, 6) canonical edge keys
+    all_keys = _canonical_edge_keys(indices, n_verts)  # (T, 6)
+    flat_keys = all_keys.reshape(-1)  # (6T,)
+    flat_tidx = torch.arange(T, device=device).unsqueeze(1).expand(-1, 6).reshape(-1)
+
+    # Sort by key
+    sort_order = torch.argsort(flat_keys)
+    sorted_keys = flat_keys[sort_order]
+    sorted_tidx = flat_tidx[sort_order]
+
+    # Unique edges
+    unique_keys, inverse = torch.unique(sorted_keys, return_inverse=True)
+    E = unique_keys.shape[0]
+
+    # Valence per edge
+    valence = torch.bincount(inverse, minlength=E)
+    max_val = valence.max().item()
+
+    # Build padded e2t
+    offsets = torch.zeros(E + 1, dtype=torch.long, device=device)
+    offsets[1:] = torch.cumsum(valence, dim=0)
+    group_starts = offsets[inverse]
+    local_pos = torch.arange(len(inverse), device=device) - group_starts
+
+    e2t = torch.full((E, max_val), -1, dtype=torch.long, device=device)
+    e2t[inverse, local_pos] = sorted_tidx.long()
+
+    # Per-tet edge indices into unique_keys: use searchsorted
+    tet_edge_idx = torch.searchsorted(unique_keys, all_keys.reshape(-1))
+    tet_edge_idx = tet_edge_idx.reshape(T, 6)
+
+    return unique_keys, e2t, tet_edge_idx, valence
+
+
 def compute_transfer_weights(
     v2t: torch.Tensor,              # (V, max_val) padded with -1
     new_indices: torch.Tensor,       # (T_new, 4) int
@@ -126,6 +186,134 @@ def compute_transfer_weights(
     old_el = torch.stack([
         _min_edge_length(vertex_positions, old_indices[cands[:, i]]) for i in range(4)
     ], dim=1)  # (T_new, 4)
+    density_scale = (old_el / new_el.unsqueeze(1).clamp(min=1e-8)).clamp(min=0.1, max=10.0)
+
+    return cands, weights, density_scale
+
+
+def compute_transfer_weights_edge(
+    v2t: torch.Tensor,              # (V, max_val) padded with -1
+    new_indices: torch.Tensor,       # (T_new, 4) int
+    old_indices: torch.Tensor,       # (T_old, 4) int
+    old_cc: torch.Tensor,            # (T_old, 3)
+    new_cc: torch.Tensor,            # (T_new, 3)
+    vertex_positions: torch.Tensor,  # (V, 3)
+    n_verts: int,
+    vert_chunk: int = 50_000,
+):
+    """For each new tet, compute blending weights across 6 candidate old tets (one per edge).
+
+    Returns:
+        cands: (T_new, 6) long — candidate old tet indices
+        weights: (T_new, 6) float — normalized blending weights
+        density_scale: (T_new, 6) float — per-candidate edge-length ratio
+    """
+    device = new_indices.device
+    T_new = new_indices.shape[0]
+    V = vertex_positions.shape[0]
+
+    # Stage 1: per-vertex best old tet (same as before)
+    vert_best = torch.zeros(V, dtype=torch.long, device=device)
+    for start in range(0, V, vert_chunk):
+        end = min(start + vert_chunk, V)
+        v_pos = vertex_positions[start:end]
+        v_cands = v2t[start:end]
+        valid = v_cands >= 0
+        safe = v_cands.clamp(min=0)
+        dists = (old_cc[safe] - v_pos.unsqueeze(1)).pow(2).sum(-1)
+        dists[~valid] = float("inf")
+        best_local = dists.argmin(dim=1)
+        vert_best[start:end] = safe.gather(1, best_local.unsqueeze(1)).squeeze(1)
+
+    # Stage 2: per-edge candidates (chunked to avoid OOM)
+    # Pre-build per-vertex set membership for shared-edge bonus:
+    # For each vertex, store a set of vertices it shares an edge with in old mesh.
+    # Use v2t + old_indices to find, for each vertex, which other vertices appear
+    # in its incident tets. We store this as a (V, max_neighbor) padded table.
+    # This is too expensive for large meshes, so we use a simpler approach:
+    # find intersection of v2t[va] and v2t[vb] — tets incident to both vertices.
+    new_idx = new_indices.long()
+    cands = torch.zeros(T_new, 6, dtype=torch.long, device=device)
+    tet_chunk = 10_000
+
+    for ei, (li, lj) in enumerate(EDGE_PAIRS):
+        va_all = torch.min(new_idx[:, li], new_idx[:, lj])
+        vb_all = torch.max(new_idx[:, li], new_idx[:, lj])
+
+        for start in range(0, T_new, tet_chunk):
+            end = min(start + tet_chunk, T_new)
+            va = va_all[start:end]
+            vb = vb_all[start:end]
+            chunk_sz = end - start
+
+            midpt = (vertex_positions[va] + vertex_positions[vb]) * 0.5
+
+            cands_a = v2t[va]  # (chunk, max_val)
+            cands_b = v2t[vb]  # (chunk, max_val)
+
+            # Shared-edge bonus via intersection: tets in both v2t[va] and v2t[vb]
+            # Mark shared tets with 0.01x distance (100x bonus)
+            # Use set intersection: expand and compare
+            max_val = cands_a.shape[1]
+            # (chunk, max_val, 1) == (chunk, 1, max_val) → (chunk, max_val, max_val)
+            # This is max_val^2 per chunk element. If max_val ~500 this is 250K bools per row.
+            # For chunk=10k, that's 2.5G bools = too much.
+            # Instead: just use a per-row sort+searchsorted approach, or simpler:
+            # mark shared tets by checking if cands_a values appear in cands_b.
+            # Use a flat approach: for each row, the set of valid tets from a and b.
+
+            all_cands = torch.cat([cands_a, cands_b], dim=1)  # (chunk, 2*max_val)
+            valid = all_cands >= 0
+            safe = all_cands.clamp(min=0)
+
+            dists = (old_cc[safe] - midpt.unsqueeze(1)).pow(2).sum(-1)
+            dists[~valid] = float("inf")
+
+            # Shared-edge bonus: mark tets that appear in BOTH cands_a and cands_b
+            # A tet in cands_a is shared if it also appears in cands_b for the same row.
+            # Use sorted searchsorted per-row (vectorized).
+            valid_a = cands_a >= 0
+            valid_b = cands_b >= 0
+            # Sort cands_b per row for searchsorted
+            sorted_b, _ = cands_b.sort(dim=1)
+            # For cands_a entries, check if they exist in sorted_b
+            insert_pos = torch.searchsorted(sorted_b, cands_a)
+            insert_pos = insert_pos.clamp(max=max_val - 1)
+            found_in_b = (sorted_b.gather(1, insert_pos) == cands_a) & valid_a & valid_b.any(dim=1, keepdim=True)
+            # Similarly for cands_b in cands_a
+            sorted_a, _ = cands_a.sort(dim=1)
+            insert_pos2 = torch.searchsorted(sorted_a, cands_b)
+            insert_pos2 = insert_pos2.clamp(max=max_val - 1)
+            found_in_a = (sorted_a.gather(1, insert_pos2) == cands_b) & valid_b & valid_a.any(dim=1, keepdim=True)
+            shared_mask = torch.cat([found_in_b, found_in_a], dim=1)  # (chunk, 2*max_val)
+            dists[shared_mask] *= 0.01
+
+            best_local = dists.argmin(dim=1)
+            cands[start:end, ei] = safe.gather(1, best_local.unsqueeze(1)).squeeze(1)
+
+    del v2t
+
+    # Vertex overlap for 6 candidates
+    cand_verts = old_indices[cands].long()               # (T_new, 6, 4)
+    new_verts = new_indices.long().unsqueeze(1)           # (T_new, 1, 4)
+    matches = (cand_verts.unsqueeze(-1) == new_verts.unsqueeze(2))  # (T_new, 6, 4, 4)
+    overlap = matches.any(dim=-1).sum(dim=-1).float()    # (T_new, 6)
+
+    # CC distance
+    cand_cc = old_cc[cands]                             # (T_new, 6, 3)
+    cc_dist_sq = (cand_cc - new_cc.unsqueeze(1)).pow(2).sum(-1)  # (T_new, 6)
+
+    # Weight: overlap bonus * inverse distance kernel
+    overlap_weight = torch.exp(overlap * 2.0)
+    dist_weight = 1.0 / (cc_dist_sq + 1e-8)
+    raw_weights = overlap_weight * dist_weight
+    weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)  # (T_new, 6) normalized
+
+    # Per-candidate density scale (edge-length ratio)
+    new_el = _min_edge_length(vertex_positions, new_indices)  # (T_new,)
+    old_el = torch.stack([
+        _min_edge_length(vertex_positions, old_indices[cands[:, i]]) for i in range(6)
+    ], dim=1)  # (T_new, 6)
     density_scale = (old_el / new_el.unsqueeze(1).clamp(min=1e-8)).clamp(min=0.1, max=10.0)
 
     return cands, weights, density_scale
@@ -297,13 +485,15 @@ class SimpleModel(BaseModel):
         Does NOT modify per-tet parameters — the optimizer handles that.
 
         Returns:
-            (cands, weights, density_scale, new_indices, new_cc, old_cc) or None
+            (cands, weights, density_scale, new_indices, new_cc, old_cc,
+             old_indices, old_tet_edge_idx, new_tet_edge_idx,
+             old_unique_keys, new_unique_keys) or None
         """
         torch.cuda.empty_cache()
 
         old_indices = self.indices.clone()
         verts = self.vertices
-        old_n_verts = verts.shape[0]
+        n_verts = verts.shape[0]
 
         old_cc, _ = calculate_circumcenters_torch(
             verts[old_indices.long()].double()
@@ -311,7 +501,10 @@ class SimpleModel(BaseModel):
         old_cc = old_cc.float()
 
         # Build v2t adjacency on old mesh
-        v2t, _ = build_v2t(old_indices, old_n_verts)
+        v2t, _ = build_v2t(old_indices, n_verts)
+
+        # Build e2t on old mesh (for edge-local conservation later)
+        old_unique_keys, _, old_tet_edge_idx, _ = build_e2t(old_indices, n_verts)
 
         # Retriangulate
         if high_precision:
@@ -336,12 +529,17 @@ class SimpleModel(BaseModel):
         new_cc, _ = calculate_circumcenters_torch(verts[new_indices.long()].double())
         new_cc = new_cc.float()
 
-        # Compute transfer weights across 4 candidates per new tet
-        cands, weights, density_scale = compute_transfer_weights(
-            v2t, new_indices, old_indices, old_cc, new_cc, verts)
+        # Build e2t on new mesh
+        new_unique_keys, _, new_tet_edge_idx, _ = build_e2t(new_indices, n_verts)
+
+        # Compute transfer weights across 6 candidates per new tet (edge-based)
+        cands, weights, density_scale = compute_transfer_weights_edge(
+            v2t, new_indices, old_indices, old_cc, new_cc, verts, n_verts)
 
         torch.cuda.empty_cache()
-        return cands, weights, density_scale, new_indices, new_cc, old_cc, old_indices
+        return (cands, weights, density_scale, new_indices, new_cc, old_cc,
+                old_indices, old_tet_edge_idx, new_tet_edge_idx,
+                old_unique_keys, new_unique_keys)
 
     @staticmethod
     def init_from_pcd(
@@ -611,8 +809,8 @@ class SimpleOptimizer:
 
     @staticmethod
     def _blend_old_values(old_tensor, cands, weights):
-        """Weighted blend of old tensor values across 4 candidates.
-        old_tensor: (T_old, ...), cands: (T_new, 4), weights: (T_new, 4)
+        """Weighted blend of old tensor values across candidates.
+        old_tensor: (T_old, ...), cands: (T_new, K), weights: (T_new, K)
         Returns: (T_new, ...)
         """
         # Gather candidates: (T_new, 4, ...)
@@ -669,13 +867,11 @@ class SimpleOptimizer:
         )
         if result is None:
             return
-        cands, weights, density_scale, new_indices, new_cc, old_cc, old_indices = result
+        (cands, weights, density_scale, new_indices, new_cc, old_cc,
+         old_indices, old_tet_edge_idx, new_tet_edge_idx,
+         old_unique_keys, new_unique_keys) = result
 
-        # Save old sums for conservation
-        old_density_sum = self.model.density.data.sum()
-        old_rgb_sum = self.model.rgb.data.sum(dim=0)  # per-channel (3,)
-
-        # Weighted blend of parameter values across candidates
+        # Weighted blend of parameter values across 6 candidates
         # Scale density per-candidate by edge-length ratio before blending
         old_density = self.model.density.data
         scaled_density = old_density[cands] * density_scale.unsqueeze(-1)
@@ -686,9 +882,60 @@ class SimpleOptimizer:
         new_gradient = self._blend_old_values(self.model.gradient.data, cands, weights)
         new_sh = self._blend_old_values(self.model.sh.data, cands, weights)
 
-        # Conservation: scale so global sums are preserved
-        new_density *= (old_density_sum / new_density.sum().clamp(min=1e-8))
-        new_rgb *= (old_rgb_sum / new_rgb.sum(dim=0).clamp(min=1e-8))
+        # --- Edge-local conservation ---
+        E_old = old_unique_keys.shape[0]
+        E_new = new_unique_keys.shape[0]
+        device = new_density.device
+
+        # Per-edge density sums on old mesh
+        old_density_flat = old_density.squeeze(-1)  # (T_old,)
+        old_edge_density = torch.zeros(E_old, device=device)
+        old_edge_density.scatter_add_(0, old_tet_edge_idx.reshape(-1), old_density_flat.repeat_interleave(6))
+
+        # Per-edge density sums on new mesh (blended, pre-conservation)
+        new_density_flat = new_density.squeeze(-1)  # (T_new,)
+        new_edge_density = torch.zeros(E_new, device=device)
+        new_edge_density.scatter_add_(0, new_tet_edge_idx.reshape(-1), new_density_flat.repeat_interleave(6))
+
+        # Per-edge RGB sums on old mesh: (E_old, 3)
+        old_rgb_data = self.model.rgb.data  # (T_old, 3)
+        old_edge_rgb = torch.zeros(E_old, 3, device=device)
+        old_edge_idx_exp = old_tet_edge_idx.reshape(-1).unsqueeze(1).expand(-1, 3)
+        old_edge_rgb.scatter_add_(0, old_edge_idx_exp, old_rgb_data.repeat_interleave(6, dim=0))
+
+        # Per-edge RGB sums on new mesh: (E_new, 3)
+        new_edge_rgb = torch.zeros(E_new, 3, device=device)
+        new_edge_idx_exp = new_tet_edge_idx.reshape(-1).unsqueeze(1).expand(-1, 3)
+        new_edge_rgb.scatter_add_(0, new_edge_idx_exp, new_rgb.repeat_interleave(6, dim=0))
+
+        # Match old→new edges via searchsorted on sorted unique keys
+        match_idx = torch.searchsorted(new_unique_keys, old_unique_keys)
+        match_idx = match_idx.clamp(0, E_new - 1)
+        matched = new_unique_keys[match_idx] == old_unique_keys  # (E_old,)
+
+        # Density ratio per new edge (default 1.0 for unmatched)
+        density_ratio_new = torch.ones(E_new, device=device)
+        if matched.any():
+            target_new_idx = match_idx[matched]
+            old_sum_matched = old_edge_density[matched]
+            new_sum_matched = new_edge_density[target_new_idx]
+            ratio = old_sum_matched / new_sum_matched.clamp(min=1e-8)
+            density_ratio_new[target_new_idx] = ratio.clamp(0.5, 2.0)
+
+        # RGB ratio per new edge: (E_new, 3), default 1.0
+        rgb_ratio_new = torch.ones(E_new, 3, device=device)
+        if matched.any():
+            old_rgb_matched = old_edge_rgb[matched]  # (n_matched, 3)
+            new_rgb_matched = new_edge_rgb[target_new_idx]  # (n_matched, 3)
+            rgb_r = old_rgb_matched / new_rgb_matched.clamp(min=1e-8)
+            rgb_ratio_new[target_new_idx] = rgb_r.clamp(0.5, 2.0)
+
+        # Per new tet: mean ratio across its 6 edges
+        tet_density_scale = density_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new,)
+        tet_rgb_scale = rgb_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new, 3)
+
+        new_density = new_density * tet_density_scale.unsqueeze(-1)
+        new_rgb = new_rgb * tet_rgb_scale
 
         self.model.density = nn.Parameter(new_density.contiguous().requires_grad_(True))
         self.model.rgb = nn.Parameter(new_rgb.contiguous().requires_grad_(True))
