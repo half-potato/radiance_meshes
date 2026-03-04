@@ -33,9 +33,11 @@ class CustomAdam:
                     stored_state["exp_avg"] = stored_state["exp_avg"][inds]
                     stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][inds]
 
-                del self.optimizer.state[group['params'][0]]
+                if group['params'][0] in self.optimizer.state:
+                    del self.optimizer.state[group['params'][0]]
                 group['params'][0] = nn.Parameter(group['params'][0][inds].requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                if stored_state is not None:
+                    self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group['name']] = group['params'][0]
 
@@ -55,9 +57,11 @@ class CustomAdam:
                     stored_state["exp_avg"] = torch.zeros_like(tensor)
                     stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
-                del self.optimizer.state[group['params'][0]]
+                if group['params'][0] in self.optimizer.state:
+                    del self.optimizer.state[group['params'][0]]
                 group['params'][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                if stored_state is not None:
+                    self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group['name']] = group['params'][0]
         return optimizable_tensors

@@ -124,7 +124,10 @@ class BaseModel(nn.Module):
         base_color_v0_raw = base_color_v0_raw.cpu().numpy().astype(np.float32)
         grds = normed_grd.reshape(-1, 3).cpu().numpy().astype(np.float32)
         densities = density.reshape(-1).cpu().numpy().astype(np.float32)
-        sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
+        if sh_dim > 0:
+            sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
+        else:
+            sh_coeffs = np.empty((N, 0, 3), dtype=np.float32)
 
         tetra_dict = {}
         tetra_dict["indices"] = self.indices.cpu().numpy().astype(np.int32)

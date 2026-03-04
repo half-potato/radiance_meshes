@@ -4,3 +4,6 @@
 [submodule "submodules/fused-ssim"]
 	path = submodules/fused-ssim
 	url = https://github.com/rahul-goel/fused-ssim
+[submodule "rmeshvk"]
+	path = rmeshvk
+	url = git@github.com:half-potato/rmeshvk.git

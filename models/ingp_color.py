@@ -424,10 +424,11 @@ class Model(BaseModel):
             if self.ablate_gradient:
                 grd = torch.zeros_like(grd)
             centroids = vertices[indices[start:end]].mean(dim=1)
-            shs[start:end] = sh.reshape(-1, sh_dim, 3)
+            sh_reshaped = sh.reshape(-1, max(sh_dim, 1), 3) if sh_dim > 0 else torch.zeros(end - start, 0, 3, device=self.device)
+            shs[start:end] = sh_reshaped[:, :sh_dim, :]
             dvrgbs = activate_output(camera.camera_center.to(self.device),
                                      density, rgb, grd,
-                                     sh.reshape(-1, sh_dim, 3),
+                                     sh_reshaped[:, :sh_dim, :],
                                      attr,
                                      indices[start:end],
                                      centroids,
