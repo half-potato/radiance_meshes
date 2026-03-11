@@ -64,17 +64,27 @@ def _min_edge_length(vertices, indices):
 
 
 EDGE_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+_EDGE_I = [0, 0, 0, 1, 1, 2]
+_EDGE_J = [1, 2, 3, 2, 3, 3]
 
 
 def _canonical_edge_keys(indices: torch.Tensor, n_verts: int) -> torch.Tensor:
     """Return (T, 6) int64 canonical edge keys (min_v * n_verts + max_v)."""
     idx = indices.long()
-    keys = []
-    for i, j in EDGE_PAIRS:
-        va = torch.min(idx[:, i], idx[:, j])
-        vb = torch.max(idx[:, i], idx[:, j])
-        keys.append(va * n_verts + vb)
-    return torch.stack(keys, dim=1)  # (T, 6)
+    vi = idx[:, _EDGE_I]  # (T, 6)
+    vj = idx[:, _EDGE_J]  # (T, 6)
+    va = torch.min(vi, vj)
+    vb = torch.max(vi, vj)
+    return va * n_verts + vb
+
+
+def _edge_keys_and_indices(indices: torch.Tensor, n_verts: int):
+    """Compute unique edge keys and per-tet edge indices (no padded e2t table)."""
+    all_keys = _canonical_edge_keys(indices, n_verts)  # (T, 6)
+    flat_keys = all_keys.reshape(-1)
+    unique_keys, inverse = torch.unique(flat_keys, sorted=True, return_inverse=True)
+    tet_edge_idx = inverse.reshape(-1, 6)  # (T, 6)
+    return unique_keys, tet_edge_idx
 
 
 def build_e2t(indices: torch.Tensor, n_verts: int):
@@ -199,9 +209,15 @@ def compute_transfer_weights_edge(
     new_cc: torch.Tensor,            # (T_new, 3)
     vertex_positions: torch.Tensor,  # (V, 3)
     n_verts: int,
+    old_unique_keys: torch.Tensor = None,
+    old_tet_edge_idx: torch.Tensor = None,
     vert_chunk: int = 50_000,
 ):
     """For each new tet, compute blending weights across 6 candidate old tets (one per edge).
+
+    Uses edge matching: shared edges (~85%) get direct old tet lookup via searchsorted,
+    unmatched edges (~15%) fall back to v2t search without vertex membership check
+    (shared-edge bonus is guaranteed zero for unmatched edges).
 
     Returns:
         cands: (T_new, 6) long — candidate old tet indices
@@ -210,88 +226,71 @@ def compute_transfer_weights_edge(
     """
     device = new_indices.device
     T_new = new_indices.shape[0]
-    V = vertex_positions.shape[0]
+    T_old = old_indices.shape[0]
 
-    # Stage 1: per-vertex best old tet (same as before)
-    vert_best = torch.zeros(V, dtype=torch.long, device=device)
-    for start in range(0, V, vert_chunk):
-        end = min(start + vert_chunk, V)
-        v_pos = vertex_positions[start:end]
-        v_cands = v2t[start:end]
-        valid = v_cands >= 0
-        safe = v_cands.clamp(min=0)
-        dists = (old_cc[safe] - v_pos.unsqueeze(1)).pow(2).sum(-1)
-        dists[~valid] = float("inf")
-        best_local = dists.argmin(dim=1)
-        vert_best[start:end] = safe.gather(1, best_local.unsqueeze(1)).squeeze(1)
+    # --- Precompute old edge → tet mapping ---
+    if old_unique_keys is None or old_tet_edge_idx is None:
+        old_unique_keys, old_tet_edge_idx = _edge_keys_and_indices(old_indices, n_verts)
 
-    # Stage 2: per-edge candidates (chunked to avoid OOM)
-    # Pre-build per-vertex set membership for shared-edge bonus:
-    # For each vertex, store a set of vertices it shares an edge with in old mesh.
-    # Use v2t + old_indices to find, for each vertex, which other vertices appear
-    # in its incident tets. We store this as a (V, max_neighbor) padded table.
-    # This is too expensive for large meshes, so we use a simpler approach:
-    # find intersection of v2t[va] and v2t[vb] — tets incident to both vertices.
+    E_old = old_unique_keys.shape[0]
+
+    # One representative old tet per old edge (last-write-wins scatter)
+    old_edge_to_tet = torch.zeros(E_old, dtype=torch.long, device=device)
+    tet_idx_expanded = torch.arange(T_old, device=device).unsqueeze(1).expand(-1, 6).reshape(-1)
+    old_edge_to_tet.scatter_(0, old_tet_edge_idx.reshape(-1), tet_idx_expanded)
+
+    # --- Compute new edge keys and match to old ---
     new_idx = new_indices.long()
-    cands = torch.zeros(T_new, 6, dtype=torch.long, device=device)
-    tet_chunk = 10_000
+    new_all_keys = _canonical_edge_keys(new_indices, n_verts)  # (T_new, 6)
+    new_flat_keys = new_all_keys.reshape(-1)  # (T_new * 6,)
 
-    for ei, (li, lj) in enumerate(EDGE_PAIRS):
-        va_all = torch.min(new_idx[:, li], new_idx[:, lj])
-        vb_all = torch.max(new_idx[:, li], new_idx[:, lj])
+    match_pos = torch.searchsorted(old_unique_keys, new_flat_keys)
+    match_pos = match_pos.clamp(0, E_old - 1)
+    is_matched = old_unique_keys[match_pos] == new_flat_keys
 
-        for start in range(0, T_new, tet_chunk):
-            end = min(start + tet_chunk, T_new)
-            va = va_all[start:end]
-            vb = vb_all[start:end]
-            chunk_sz = end - start
+    # --- Fast path: matched edges → direct old tet lookup ---
+    flat_cands = torch.zeros(T_new * 6, dtype=torch.long, device=device)
+    flat_cands[is_matched] = old_edge_to_tet[match_pos[is_matched]]
+
+    # --- Slow path: unmatched edges → v2t search (no vertex membership check) ---
+    unmatched_idx = torch.where(~is_matched)[0]
+
+    if unmatched_idx.numel() > 0:
+        # Recover va, vb for unmatched edges
+        vi_all = new_idx[:, _EDGE_I].reshape(-1)  # (T_new*6,)
+        vj_all = new_idx[:, _EDGE_J].reshape(-1)
+        va_all = torch.min(vi_all, vj_all)
+        vb_all = torch.max(vi_all, vj_all)
+
+        flat_va = va_all[unmatched_idx]
+        flat_vb = vb_all[unmatched_idx]
+
+        tet_chunk = 50_000
+        N_unmatched = unmatched_idx.shape[0]
+
+        for start in range(0, N_unmatched, tet_chunk):
+            end = min(start + tet_chunk, N_unmatched)
+            va = flat_va[start:end]
+            vb = flat_vb[start:end]
 
             midpt = (vertex_positions[va] + vertex_positions[vb]) * 0.5
 
-            cands_a = v2t[va]  # (chunk, max_val)
-            cands_b = v2t[vb]  # (chunk, max_val)
-
-            # Shared-edge bonus via intersection: tets in both v2t[va] and v2t[vb]
-            # Mark shared tets with 0.01x distance (100x bonus)
-            # Use set intersection: expand and compare
-            max_val = cands_a.shape[1]
-            # (chunk, max_val, 1) == (chunk, 1, max_val) → (chunk, max_val, max_val)
-            # This is max_val^2 per chunk element. If max_val ~500 this is 250K bools per row.
-            # For chunk=10k, that's 2.5G bools = too much.
-            # Instead: just use a per-row sort+searchsorted approach, or simpler:
-            # mark shared tets by checking if cands_a values appear in cands_b.
-            # Use a flat approach: for each row, the set of valid tets from a and b.
-
-            all_cands = torch.cat([cands_a, cands_b], dim=1)  # (chunk, 2*max_val)
+            all_cands = torch.cat([v2t[va], v2t[vb]], dim=1)  # (chunk, 2*max_val)
             valid = all_cands >= 0
             safe = all_cands.clamp(min=0)
 
             dists = (old_cc[safe] - midpt.unsqueeze(1)).pow(2).sum(-1)
             dists[~valid] = float("inf")
 
-            # Shared-edge bonus: mark tets that appear in BOTH cands_a and cands_b
-            # A tet in cands_a is shared if it also appears in cands_b for the same row.
-            # Use sorted searchsorted per-row (vectorized).
-            valid_a = cands_a >= 0
-            valid_b = cands_b >= 0
-            # Sort cands_b per row for searchsorted
-            sorted_b, _ = cands_b.sort(dim=1)
-            # For cands_a entries, check if they exist in sorted_b
-            insert_pos = torch.searchsorted(sorted_b, cands_a)
-            insert_pos = insert_pos.clamp(max=max_val - 1)
-            found_in_b = (sorted_b.gather(1, insert_pos) == cands_a) & valid_a & valid_b.any(dim=1, keepdim=True)
-            # Similarly for cands_b in cands_a
-            sorted_a, _ = cands_a.sort(dim=1)
-            insert_pos2 = torch.searchsorted(sorted_a, cands_b)
-            insert_pos2 = insert_pos2.clamp(max=max_val - 1)
-            found_in_a = (sorted_a.gather(1, insert_pos2) == cands_b) & valid_b & valid_a.any(dim=1, keepdim=True)
-            shared_mask = torch.cat([found_in_b, found_in_a], dim=1)  # (chunk, 2*max_val)
-            dists[shared_mask] *= 0.01
-
+            # No vertex membership check — shared-edge bonus is guaranteed zero
+            # for unmatched edges (no old tet contains both va and vb)
             best_local = dists.argmin(dim=1)
-            cands[start:end, ei] = safe.gather(1, best_local.unsqueeze(1)).squeeze(1)
+            flat_cands[unmatched_idx[start:end]] = safe.gather(1, best_local.unsqueeze(1)).squeeze(1)
 
     del v2t
+
+    # Reshape to (T_new, 6)
+    cands = flat_cands.reshape(T_new, 6)
 
     # Vertex overlap for 6 candidates
     cand_verts = old_indices[cands].long()               # (T_new, 6, 4)
@@ -310,10 +309,9 @@ def compute_transfer_weights_edge(
     weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)  # (T_new, 6) normalized
 
     # Per-candidate density scale (edge-length ratio)
-    new_el = _min_edge_length(vertex_positions, new_indices)  # (T_new,)
-    old_el = torch.stack([
-        _min_edge_length(vertex_positions, old_indices[cands[:, i]]) for i in range(6)
-    ], dim=1)  # (T_new, 6)
+    old_el_all = _min_edge_length(vertex_positions, old_indices)  # (T_old,)
+    new_el = _min_edge_length(vertex_positions, new_indices)      # (T_new,)
+    old_el = old_el_all[cands]                                    # (T_new, 6)
     density_scale = (old_el / new_el.unsqueeze(1).clamp(min=1e-8)).clamp(min=0.1, max=10.0)
 
     return cands, weights, density_scale
@@ -503,8 +501,8 @@ class SimpleModel(BaseModel):
         # Build v2t adjacency on old mesh
         v2t, _ = build_v2t(old_indices, n_verts)
 
-        # Build e2t on old mesh (for edge-local conservation later)
-        old_unique_keys, _, old_tet_edge_idx, _ = build_e2t(old_indices, n_verts)
+        # Build edge keys on old mesh (for edge-local conservation later)
+        old_unique_keys, old_tet_edge_idx = _edge_keys_and_indices(old_indices, n_verts)
 
         # Retriangulate
         if high_precision:
@@ -529,12 +527,13 @@ class SimpleModel(BaseModel):
         new_cc, _ = calculate_circumcenters_torch(verts[new_indices.long()].double())
         new_cc = new_cc.float()
 
-        # Build e2t on new mesh
-        new_unique_keys, _, new_tet_edge_idx, _ = build_e2t(new_indices, n_verts)
+        # Build edge keys on new mesh
+        new_unique_keys, new_tet_edge_idx = _edge_keys_and_indices(new_indices, n_verts)
 
         # Compute transfer weights across 6 candidates per new tet (edge-based)
         cands, weights, density_scale = compute_transfer_weights_edge(
-            v2t, new_indices, old_indices, old_cc, new_cc, verts, n_verts)
+            v2t, new_indices, old_indices, old_cc, new_cc, verts, n_verts,
+            old_unique_keys=old_unique_keys, old_tet_edge_idx=old_tet_edge_idx)
 
         torch.cuda.empty_cache()
         return (cands, weights, density_scale, new_indices, new_cc, old_cc,

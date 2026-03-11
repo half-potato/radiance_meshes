@@ -29,6 +29,7 @@ dependencies = [
     "pyvista>=0.46.5",
     "tetgen>=0.7.0",
     "marimo>=0.20.2",
+    "maturin>=1.12.6",
 ]
 
 [tool.uv.sources]

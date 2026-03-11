@@ -96,16 +96,15 @@ with torch.no_grad():
 
 # === VK ===
 print(f"\n=== VK Renderer ===")
-from utils.render_vk import create_vk_renderer, compute_vk_tensors
+from utils.render_vk import create_vk_renderer, compute_vk_tensors, make_vk_vp
 with torch.no_grad():
     vk_renderer = create_vk_renderer(model, W, H)
     verts_flat, sh_coeffs, densities, color_grads = compute_vk_tensors(model)
     print(f"  VK density: mean={densities.mean():.6f}, range=[{densities.min():.6f}, {densities.max():.6f}]")
 
     from rmesh_wgpu.autograd import RMeshForward
-    vp = camera.full_proj_transform.to(device)
-    inv_vp = torch.inverse(vp)
-    cam_pos = camera.camera_center.to(device)
+    vp, inv_vp, cam_pos = make_vk_vp(camera, model, device)
+    print(f"  VK VP: znear/zfar computed from scene bounds")
 
     image_rgba = RMeshForward.apply(
         vk_renderer, cam_pos, vp, inv_vp,

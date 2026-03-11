@@ -290,6 +290,14 @@ for iteration in progress_bar:
 
     loss.backward()
 
+    # Gradient diagnostics (temporary)
+    if iteration % 50 == 0:
+        for name, p in model.backbone.named_parameters():
+            if p.grad is not None:
+                g = p.grad
+                print(f"  [Slang] grad {name}: mean={g.mean():.6f} std={g.std():.6f} max={g.abs().max():.6f}")
+                break
+
     # tet_optim.clip_grad_norm_(args.max_norm)
 
     tet_optim.main_step()

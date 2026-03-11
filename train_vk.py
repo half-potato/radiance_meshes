@@ -23,7 +23,9 @@ import time
 from tqdm import tqdm
 import numpy as np
 from utils import cam_util
-from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
+# NOTE: Do NOT import from utils.train_util at top level -- it triggers Slang
+# shader compilation which can hang if the cache is stale. Slang-dependent
+# imports are deferred to the code blocks that actually need them.
 from models.ingp_color import Model, TetOptimizer
 from models.frozen import freeze_model
 from fused_ssim import fused_ssim
@@ -31,16 +33,43 @@ from pathlib import Path, PosixPath
 from utils.args import Args
 import json
 import imageio
-from utils import test_util
 import termplotlib as tpl
 import gc
-from utils.densification import collect_render_stats, apply_densification
 from utils.decimation import apply_decimation
 import mediapy
 from utils.graphics_utils import calculate_norm_loss, depth_to_normals
 from icecream import ic
 
 from utils.render_vk import render_vk, create_vk_renderer
+
+
+# Inline simple utilities to avoid importing utils.train_util at top level
+def pad_hw2even(h, w):
+    return int(math.ceil(h / 2)) * 2, int(math.ceil(w / 2)) * 2
+
+def pad_image2even(im, fnp=np):
+    h, w = im.shape[:2]
+    nh, nw = pad_hw2even(h, w)
+    im_full = fnp.zeros((nh, nw, 3), dtype=im.dtype)
+    im_full[:h, :w] = im
+    return im_full
+
+class SimpleSampler:
+    def __init__(self, total_num_samples, batch_size, device):
+        self.total_num_samples = total_num_samples
+        self.batch_size = batch_size
+        self.curr = total_num_samples
+        self.ids = None
+        self.device = device
+
+    def nextids(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        self.curr += batch_size
+        if self.curr + batch_size > self.total_num_samples:
+            self.ids = torch.randperm(self.total_num_samples, dtype=torch.long, device=self.device)
+            self.curr = 0
+        ids = self.ids[self.curr : self.curr + batch_size]
+        return ids
 
 torch.set_num_threads(1)
 
@@ -218,7 +247,7 @@ def maybe_recreate_renderer(model, camera, vk_renderer, vk_sh_deg, vk_width, vk_
     w, h = camera.image_width, camera.image_height
     deg = model.current_sh_deg
     if vk_renderer is None or deg != vk_sh_deg or w != vk_width or h != vk_height:
-        vk_renderer = create_vk_renderer(model, w, h)
+        vk_renderer = create_vk_renderer(model, camera, w, h)
         vk_sh_deg = deg
         vk_width = w
         vk_height = h
@@ -317,9 +346,10 @@ for iteration in progress_bar:
                     break  # just print the first one for brevity
 
     if iteration == 0:
-        # Also render with Slang for comparison
+        # Also render with Slang for comparison (deferred import)
         with torch.no_grad():
             try:
+                from utils.train_util import render
                 render_pkg_slang = render(camera, model, min_t=min_t, tile_size=args.tile_size)
                 slang_img = render_pkg_slang['render'].detach().permute(1, 2, 0).cpu().numpy()
                 slang_img = (slang_img * 255).clip(0, 255).astype(np.uint8)
@@ -354,6 +384,8 @@ for iteration in progress_bar:
 
     if do_cloning and not model.frozen:
         with torch.no_grad():
+            from utils.train_util import render
+            from utils.densification import collect_render_stats, apply_densification
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
 
             # Use Slang renderer for densification stats (needs per-tet info)
@@ -424,6 +456,7 @@ sd['empty_indices'] = model.empty_indices
 torch.save(sd, args.output_path / "ckpt.pth")
 
 # Evaluation uses Slang renderer for cross-check
+from utils import test_util
 if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
 else:
@@ -442,10 +475,11 @@ with (args.output_path / "results.json").open("w") as f:
 
 # Rotating video uses Slang renderer
 with torch.no_grad():
+    from utils.train_util import render as slang_render
     epath = cam_util.generate_cam_path(train_cameras, 400)
     eimages = []
     for camera in tqdm(epath):
-        render_pkg = render(camera, model, min_t=min_t, tile_size=args.tile_size)
+        render_pkg = slang_render(camera, model, min_t=min_t, tile_size=args.tile_size)
         image = render_pkg['render']
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()
