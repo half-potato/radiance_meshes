@@ -14,7 +14,7 @@ from utils.args import Args
 
 device = torch.device('cuda')
 train_cameras, _, scene_info = loader.load_dataset(
-    Path('/optane/nerf_datasets/360/bicycle'), 'images_8',
+    Path('/data/nerf_datasets/360/bicycle'), 'images_8',
     data_device='cpu', eval=True, resolution=1)
 
 args = Args()
@@ -40,7 +40,7 @@ model = Model.init_from_pcd(
 tet_optim = TetOptimizer(model, **args.as_dict())
 
 W, H = train_cameras[0].image_width, train_cameras[0].image_height
-vk_renderer = create_vk_renderer(model, W, H)
+vk_renderer = create_vk_renderer(model, train_cameras[0], W, H)
 
 inds = list(range(len(train_cameras)))
 random.shuffle(inds)
@@ -52,7 +52,7 @@ for iteration in range(100):
 
     if camera.image_width != W or camera.image_height != H:
         W, H = camera.image_width, camera.image_height
-        vk_renderer = create_vk_renderer(model, W, H)
+        vk_renderer = create_vk_renderer(model, camera, W, H)
 
     render_pkg = render_vk(camera, model, vk_renderer)
     image = render_pkg['render']

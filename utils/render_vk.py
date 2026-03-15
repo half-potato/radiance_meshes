@@ -30,7 +30,12 @@ def make_vk_vp(camera, model, device):
 
     # Build new projection matrix with proper bounds
     proj = getProjectionMatrix(znear=znear, zfar=zfar,
-                               fovX=camera.fovx, fovY=camera.fovy).transpose(0, 1).to(device)
+                               fovX=camera.fovx, fovY=camera.fovy)
+    # getProjectionMatrix has P[1,1] = +1/tanHalfFovY (OpenGL convention).
+    # WGSL shader maps ndc→pixel as py = (1 - ndc_y)*H/2, so we need
+    # P[1,1] = -1/tanHalfFovY to correctly map COLMAP's y-down camera to screen.
+    proj[1, 1] = -proj[1, 1]
+    proj = proj.transpose(0, 1).to(device)
     wvt = camera.world_view_transform.to(device)
     vp = wvt.unsqueeze(0).bmm(proj.unsqueeze(0)).squeeze(0)
     inv_vp = torch.inverse(vp)
