@@ -35,18 +35,29 @@ float safe_exp4alpha(float x) {
     return safe_clip(safe_exp(x), 0, 1);
 }
 
+// Exact moments for piecewise-constant density w(t) = σ·T·exp(-σ(t-a)).
+// These converge to the Barron point-mass approximation as u→0.
+
 [Differentiable]
-float moment_0_int(float a, float b, float s1, float T) {
-    return s1;
-}
-[Differentiable]
-float moment_1_int(float a, float b, float s1, float T) {
-    return s1 * (b+a)/2;
-}
-[Differentiable]
-float self_dist(float a, float b, float s, float T) {
+float moment_0_int(float a, float b, float density, float T) {
     float dt = max(b - a, 0);
-    return s*s*dt/3;
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    return T * alpha;
+}
+[Differentiable]
+float moment_1_int(float a, float b, float density, float T) {
+    float dt = max(b - a, 0);
+    float u = density * dt;
+    float exp_neg_u = safe_exp(-u);
+    float alpha = max(1.0f - exp_neg_u, 0);
+    return T * (a * alpha + safe_div(1 - (1 + u) * exp_neg_u, density));
+}
+[Differentiable]
+float self_dist(float a, float b, float density, float T) {
+    float dt = max(b - a, 0);
+    float u = density * dt;
+    float exp_neg_u = safe_exp(-u);
+    return T * T * safe_div(1 - 2 * u * exp_neg_u - exp_neg_u * exp_neg_u, density);
 }
 
 [Differentiable]
@@ -58,18 +69,16 @@ DistortionState5 update_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, density, T);
+    float m1 = moment_1_int(start, end, density, T);
 
     DistortionState5 new_state;
     new_state.x = old_state.x + 2.0f * m1 * old_state.z;
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + self_dist(start, end, d, T);
+    new_state.v = old_state.v + self_dist(start, end, density, T);
 
     return new_state;
 }
@@ -82,18 +91,16 @@ DistortionState5 undo_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, density, T);
+    float m1 = moment_1_int(start, end, density, T);
 
     DistortionState5 old_state;
     old_state.z = new_state.z - m0;
     old_state.w = new_state.w - m1;
     old_state.x = new_state.x - 2.0f * m1 * old_state.z;
     old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - self_dist(start, end, d, T);
+    old_state.v = new_state.v - self_dist(start, end, density, T);
     return old_state;
 }
 
