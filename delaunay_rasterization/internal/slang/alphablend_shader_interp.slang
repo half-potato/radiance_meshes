@@ -58,18 +58,19 @@ DistortionState5 update_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
+    float dt = max(end - start, 0);
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    float w = alpha * T;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, w, T);
+    float m1 = moment_1_int(start, end, w, T);
 
     DistortionState5 new_state;
     new_state.x = old_state.x + 2.0f * m1 * old_state.z;
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + self_dist(start, end, d, T);
+    new_state.v = old_state.v + self_dist(start, end, w, T);
 
     return new_state;
 }
@@ -82,18 +83,19 @@ DistortionState5 undo_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
+    float dt = max(end - start, 0);
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    float w = alpha * T;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, w, T);
+    float m1 = moment_1_int(start, end, w, T);
 
     DistortionState5 old_state;
     old_state.z = new_state.z - m0;
     old_state.w = new_state.w - m1;
     old_state.x = new_state.x - 2.0f * m1 * old_state.z;
     old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - self_dist(start, end, d, T);
+    old_state.v = new_state.v - self_dist(start, end, w, T);
     return old_state;
 }
 
