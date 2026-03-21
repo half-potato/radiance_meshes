@@ -352,7 +352,7 @@ def apply_densification(
     random_locations = (model.vertices[clone_indices] * barycentric_weights).sum(dim=1)
     split_point[bad] = random_locations[bad]    # fall back
 
-    tet_optim.split(split_point, **args.as_dict())
+    tet_optim.split(split_point, clone_indices=clone_indices, **args.as_dict())
     # keep_verts = keep_verts > 0
     # keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
     # print(f"Pruned: {(~keep_verts).sum()}")

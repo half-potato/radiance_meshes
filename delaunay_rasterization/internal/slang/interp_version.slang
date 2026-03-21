@@ -72,55 +72,102 @@ inline float3 compute_integral(float3 c0, float3 c1, float ddt) {
 }
 
 [Differentiable]
+float3[4] load_vert_normals(no_diff uint4 vtet, DiffTensorView vertex_normals) {
+    float3[4] vn;
+    vn[0] = read_t3_float3(vtet.x, vertex_normals);
+    vn[1] = read_t3_float3(vtet.y, vertex_normals);
+    vn[2] = read_t3_float3(vtet.z, vertex_normals);
+    vn[3] = read_t3_float3(vtet.w, vertex_normals);
+    return vn;
+}
+
+float3[4] load_vert_normals(uint4 vtet, TensorView<float> vertex_normals) {
+    float3[4] vn;
+    vn[0] = read_t3_float3(vtet.x, vertex_normals);
+    vn[1] = read_t3_float3(vtet.y, vertex_normals);
+    vn[2] = read_t3_float3(vtet.z, vertex_normals);
+    vn[3] = read_t3_float3(vtet.w, vertex_normals);
+    return vn;
+}
+
+[Differentiable]
 inline CtrlPt integrate_tetra_segment(
-    in SplatTetrahedra_interp g, 
+    in SplatTetrahedra_interp g,
     in Ray ray,
     in float enter,
     in float exit,
     in float3 enter_norm,
     in float3 exit_norm,
+    in float3[4] vert_normals,
 )
 {
     float dt = max(exit - enter, 0.0f);
 
+    // v_enter/v_exit = offset from vertex 0, reused for both color and normal bary coords
     float3 v_enter = enter * ray.d + ray.o - g.tet.verts[0];
     float3 v_exit = exit * ray.d + ray.o - g.tet.verts[0];
     float3 c_enter = max(dot(g.grd, v_enter) + g.base_color, 0.f);
     float3 c_exit = max(dot(g.grd, v_exit) + g.base_color, 0.f);
-    // float3 c_enter = dot(g.grd, v_enter) + g.base_color;
-    // float3 c_exit = dot(g.grd, v_exit) + g.base_color;
 
-    // float alpha = safe_clip(1.0f - safe_exp(-g.density * dt), 0.f, 1.f);
     float alpha = max(-safe_expm1(-g.density * dt), 0.f);
     float3 final_color = compute_integral(c_exit, c_enter, dt * g.density);
 
-    float3 n_enter = l2_normalize(enter_norm) * sign(dot(ray.d, enter_norm));
-    float3 n_exit  = l2_normalize(exit_norm)  * sign(dot(ray.d, exit_norm));
-    float depth = safe_div(compute_integral1D(enter, exit, dt * g.density), ray.ortho);
+    // Barycentric interpolation of vertex normals via Cramer's rule.
+    // Compute cofactors once; reuse for both enter and exit points.
+    float3 e1 = g.tet.verts[1] - g.tet.verts[0];
+    float3 e2 = g.tet.verts[2] - g.tet.verts[0];
+    float3 e3 = g.tet.verts[3] - g.tet.verts[0];
+    float3 c23 = cross(e2, e3);
+    float3 c31 = cross(e3, e1);
+    float3 c12 = cross(e1, e2);
+    float inv_det = safe_div(1.0f, dot(e1, c23));
+
+    // Enter point bary coords (reuse v_enter = p_enter - v0)
+    float b1_en = dot(v_enter, c23) * inv_det;
+    float b2_en = dot(v_enter, c31) * inv_det;
+    float b3_en = dot(v_enter, c12) * inv_det;
+    float b0_en = 1.0 - b1_en - b2_en - b3_en;
+    float3 n_enter = b0_en * vert_normals[0] + b1_en * vert_normals[1] + b2_en * vert_normals[2] + b3_en * vert_normals[3];
+
+    // Exit point bary coords (reuse v_exit = p_exit - v0)
+    float b1_ex = dot(v_exit, c23) * inv_det;
+    float b2_ex = dot(v_exit, c31) * inv_det;
+    float b3_ex = dot(v_exit, c12) * inv_det;
+    float b0_ex = 1.0 - b1_ex - b2_ex - b3_ex;
+    float3 n_exit = b0_ex * vert_normals[0] + b1_ex * vert_normals[1] + b2_ex * vert_normals[2] + b3_ex * vert_normals[3];
+
+    // Flip interpolated normals to face camera (same convention as old
+    // density-diff approach).  Without this, front-facing and back-facing
+    // tet contributions cancel during alpha blending → black normals.
+    // The sign is no_diff so gradient correctly pushes the rendered normal
+    // toward the target; the underlying parameter stores the axis.
+
+    float3 normal_contrib = compute_integral(n_exit, n_enter, dt * g.density);
+    float depth = safe_div(compute_integral1D(exit, enter, dt * g.density), ray.ortho);
 
     CtrlPt result;
     result.rgba = { final_color.x, final_color.y, final_color.z, g.density * dt };
     result.dist = { enter, exit };
     result.density = g.density;
-    // xyzd.xyz = entry face normal; alpha_blend multiplies by (prev_density - density)
-    result.xyzd = float4(n_enter, depth);
+    result.xyzd = float4(normal_contrib, depth);
 
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
         result.aux[i] = g.aux[i] * alpha;
     }
 
-    result.entry_contrib = float3(0); // unused now
-    result.exit_contrib = n_exit;     // exit face normal (for exit correction)
+    result.entry_contrib = float3(0);
+    result.exit_contrib = float3(0);
 
     return result;
 }
 
 [Differentiable]
 inline bool evaluate_tetra_interp(
-    in SplatTetrahedra_interp g, 
+    in SplatTetrahedra_interp g,
     in Ray ray,
     no_diff in float t_min,
+    in float3[4] vert_normals,
     out CtrlPt ctrl_pt)
 {
     float2 dist;
@@ -138,7 +185,7 @@ inline bool evaluate_tetra_interp(
         ctrl_pt = no_diff CtrlPt.zero(g.density);
         return false;
     } else {
-        ctrl_pt = integrate_tetra_segment(g, ray, enter, exit, enter_norm, exit_norm);
+        ctrl_pt = integrate_tetra_segment(g, ray, enter, exit, enter_norm, exit_norm, vert_normals);
         return true;
     }
 }
