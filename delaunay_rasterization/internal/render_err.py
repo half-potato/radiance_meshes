@@ -84,11 +84,13 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
     torch.cuda.synchronize()
     shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0)
     st = time.time()
+    vertex_normals = model.vertex_normals
     args = dict(
         sorted_gauss_idx=sorted_tetra_idx,
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
+        vertex_normals=vertex_normals,
         cell_values=cell_values,
         output_img=output_img,
         n_contributors=n_contributors,

@@ -25,6 +25,7 @@ from utils.hashgrid import HashEmbedderOptimized
 from utils import hashgrid
 import tinycudann as tcnn
 import time
+import torch.nn.functional as F
 
 def get_tet_adjacency_from_scipy(tri):
     # tri.simplices is (N, 4)
@@ -267,6 +268,7 @@ class Model(BaseModel):
                  additional_attr=0,
                  ablate_circumsphere=False,
                  ablate_gradient=False,
+                 normal_init=1e-3,
                  **kwargs):
         super().__init__()
         self.device = vertices.device
@@ -338,6 +340,7 @@ class Model(BaseModel):
         # sphere_pattern = torch.special.ndtri(qmc_samples_01)
         # ic(sphere_pattern*0.35)
 
+        self.normal_init = normal_init
         s = math.sqrt(1/3)
         fixed_pattern = torch.tensor([
             [ 0.0,  0.0,  0.0],
@@ -353,6 +356,9 @@ class Model(BaseModel):
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
         self.interior_vertices = nn.Parameter(vertices.detach())
+        # self.interior_vertex_normals = nn.Parameter(self.normal_init * torch.randn(vertices.shape[0], 3, device=self.device))
+        self.interior_vertex_normals = nn.Parameter(self.normal_init * F.normalize(torch.randn(vertices.shape[0], 3, device=self.device), dim=-1))
+        self.register_buffer('ext_vertex_normals', self.normal_init * torch.randn(ext_vertices.shape[0], 3, device=self.device))
         self.update_triangulation()
 
     @property
@@ -545,8 +551,12 @@ class Model(BaseModel):
         print(f"Loaded {vertices.shape[0]} vertices")
         ext_vertices = ckpt['ext_vertices']
         model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
+        if 'interior_vertex_normals' not in ckpt:
+            ckpt['interior_vertex_normals'] = torch.randn(vertices.shape[0], 3, device=device)
+        if 'ext_vertex_normals' not in ckpt:
+            ckpt['ext_vertex_normals'] = torch.randn(ext_vertices.shape[0], 3, device=device)
         model.load_state_dict(ckpt)
-        model.min_t = config.min_t
+        model.min_t = getattr(config, 'min_t', 0.2)
         model.indices = torch.as_tensor(indices).cuda()
         model.empty_indices = torch.as_tensor(empty_indices).cuda()
         return model
@@ -593,6 +603,10 @@ class Model(BaseModel):
     def vertices(self):
         verts = self.interior_vertices
         return torch.cat([verts, self.ext_vertices])
+
+    @property
+    def vertex_normals(self):
+        return torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
 
     def sh_up(self):
         self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
@@ -682,6 +696,9 @@ class TetOptimizer:
                  densify_end: int = 15000,
                  midpoint: int = 2000,
 
+                 normal_lr = 1e-3,
+                 final_normal_lr = 1e-5,
+
                  percent_alpha: float = 0.02,
 
                  **kwargs):
@@ -701,6 +718,7 @@ class TetOptimizer:
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},
+            {"params": [model.interior_vertex_normals], "lr": normal_lr, "name": "interior_vertex_normals"},
         ])
         self.model = model
 
@@ -748,6 +766,17 @@ class TetOptimizer:
             midpoint, densify_interval, densify_end,
             # self.vertices_lr, self.final_vertices_lr)
             self.vertices_lr, self.vertices_lr)
+
+        self.normal_lr = normal_lr
+        base_normal_scheduler = get_expon_lr_func(lr_init=normal_lr,
+                                                  lr_final=final_normal_lr,
+                                                  lr_delay_mult=1e-8,
+                                                  lr_delay_steps=lr_delay,
+                                                  max_steps=freeze_start)
+        self.normal_scheduler_args = SpikingLR(
+            spike_duration, freeze_start, base_normal_scheduler,
+            midpoint, densify_interval, densify_end,
+            normal_lr, normal_lr)
         self.iteration = 0
 
     def update_learning_rate(self, iteration):
@@ -766,21 +795,34 @@ class TetOptimizer:
                 lr = self.vertex_scheduler_args(iteration)
                 self.vertices_lr = lr
                 param_group['lr'] = lr
+            elif param_group["name"] == "interior_vertex_normals":
+                param_group['lr'] = self.normal_scheduler_args(iteration)
 
-    def add_points(self, new_verts: torch.Tensor, raw_verts=False):
-        self.model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
-            interior_vertices = new_verts
-        ))['interior_vertices']
+    def add_points(self, new_verts: torch.Tensor, clone_indices=None, raw_verts=False):
+        if clone_indices is not None:
+            # Average the 4 vertex normals of the source tet
+            normals = self.model.vertex_normals
+            new_normals = normals[clone_indices.long()].mean(dim=1)
+        else:
+            new_normals = self.model.normal_init * torch.randn(new_verts.shape[0], 3, device=new_verts.device)
+        result = self.vertex_optim.cat_tensors_to_optimizer(dict(
+            interior_vertices = new_verts,
+            interior_vertex_normals = new_normals,
+        ))
+        self.model.interior_vertices = result['interior_vertices']
+        self.model.interior_vertex_normals = result['interior_vertex_normals']
         self.model.update_triangulation()
 
     def remove_points(self, keep_mask: torch.Tensor):
         keep_mask = keep_mask[:self.model.interior_vertices.shape[0]]
-        self.model.interior_vertices = self.vertex_optim.prune_optimizer(keep_mask)['interior_vertices']
+        result = self.vertex_optim.prune_optimizer(keep_mask)
+        self.model.interior_vertices = result['interior_vertices']
+        self.model.interior_vertex_normals = result['interior_vertex_normals']
         self.model.update_triangulation()
 
     @torch.no_grad()
-    def split(self, split_point, **kwargs):
-        self.add_points(split_point)
+    def split(self, split_point, clone_indices=None, **kwargs):
+        self.add_points(split_point, clone_indices=clone_indices)
 
     def main_step(self):
         self.optim.step()
@@ -839,3 +881,4 @@ class TetOptimizer:
     def clip_grad_norm_(self, max_norm):
         torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.interior_vertices, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.interior_vertex_normals, max_norm)

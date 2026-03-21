@@ -18,7 +18,8 @@ import numpy as np
 from utils import cam_util
 from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
 # from models.vertex_color import Model, TetOptimizer
-from models.ingp_color import Model, TetOptimizer
+# from models.ingp_color import Model, TetOptimizer
+from models.shell_kernel import Model, TetOptimizer
 # from models.frozen import FrozenTetModel as Model
 # from models.frozen import FrozenTetOptimizer as TetOptimizer
 from models.frozen import freeze_model
@@ -33,7 +34,7 @@ import gc
 from utils.densification import collect_render_stats, apply_densification
 from utils.decimation import apply_decimation
 import mediapy
-from utils.graphics_utils import calculate_norm_loss, depth_to_normals
+from utils.graphics_utils import depth_to_normal
 from icecream import ic
 
 # from tracers.splinetracers.tetra_splinetracer import render_rt
@@ -83,6 +84,11 @@ args.lambda_weight_decay = 1
 args.percent_alpha = 0.0 # preconditioning
 args.spike_duration = 500
 args.additional_attr = 0
+
+args.kernel_sigma = 1.5
+args.project_cc = False
+args.values_lr = 5e-3
+args.final_values_lr = 5e-4
 
 args.g_init=1e-5
 args.s_init=1e-1
@@ -340,7 +346,7 @@ for iteration in progress_bar:
             sample_image = sample_image.permute(1, 2, 0)
             sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
 
-            pred_normal = depth_to_normals(render_pkg['xyzd'][..., 3:], camera.fx, camera.fy)
+            pred_normal = depth_to_normal(render_pkg['xyzd'][..., 3:], camera)
             # vis_depth, _ = visualize_depth_numpy(render_pkg['xyzd'][..., 3:].cpu().numpy())
             vis_normal = (render_pkg['xyzd'][..., :3] * 127 + 128).clamp(0, 255).byte().cpu().numpy()
             vis_pred_normal = (pred_normal * 127 + 128).clamp(0, 255).byte().cpu().numpy()
@@ -396,6 +402,32 @@ for iteration in progress_bar:
         "#T": model.indices.shape[0],
         # "DL": repr(f"{dl_loss:>5.2f}"),
     })
+
+    if iteration % 500 == 0 and hasattr(model, 'log_kernel_diagnostics'):
+        diag = model.log_kernel_diagnostics()
+        print(f"\n[iter {iteration}] Shell kernel diagnostics:")
+        print(f"  CC outside tet: {diag['cc_outside_pct']:.1f}%")
+        print(f"  Own weights: mean={diag['own_w_mean']:.4f}, "
+              f"std_within_tet={diag['own_w_std_across_tet']:.4f}")
+        print(f"  Flap weights: mean={diag['flap_w_mean']:.4f}, "
+              f"own_frac={diag['own_frac_mean']:.3f}")
+        print(f"  Entropy: {diag['entropy_mean']:.3f} / {math.log(8):.3f} "
+              f"({diag['entropy_ratio']:.1%} of uniform)")
+        print(f"  Vtx weight sums: mean={diag['vtx_weight_sum_mean']:.2f}, "
+              f"std={diag['vtx_weight_sum_std']:.2f}, "
+              f"min={diag['vtx_weight_sum_min']:.2f}, "
+              f"max={diag['vtx_weight_sum_max']:.2f}")
+        print(f"  Vtx tet count: mean={diag['vtx_tet_count_mean']:.0f}, "
+              f"std={diag['vtx_tet_count_std']:.0f}, "
+              f"range=[{diag['vtx_tet_count_min']:.0f}, {diag['vtx_tet_count_max']:.0f}]")
+        if 'val_grad_mean' in diag:
+            print(f"  Val grad: mean={diag['val_grad_mean']:.6f}, "
+                  f"std={diag['val_grad_std']:.6f}, "
+                  f"max={diag['val_grad_max']:.6f}")
+        if 'pos_grad_mean' in diag:
+            print(f"  Pos grad: mean={diag['pos_grad_mean']:.6f}, "
+                  f"std={diag['pos_grad_std']:.6f}, "
+                  f"max={diag['pos_grad_max']:.6f}")
 
 avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
 # video_writer.close()

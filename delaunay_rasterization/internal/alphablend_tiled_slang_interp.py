@@ -8,9 +8,9 @@ from delaunay_rasterization.internal.util import recombine_tensors, split_tensor
 
 class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, 
+    def forward(ctx,
                 sorted_tetra_idx, tile_ranges,
-                indices, vertices, cell_values, render_grid,
+                indices, vertices, vertex_normals, cell_values, render_grid,
                 tcam, ray_jitter, aux_dim, device="cuda"
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         distortion_img = torch.zeros((render_grid.image_height, 
@@ -40,6 +40,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             tile_ranges=tile_ranges,
             indices=indices,
             vertices=vertices,
+            vertex_normals=vertex_normals,
             cell_values=cell_values,
             output_img=output_img,
             xyzd_img=xyzd_img,
@@ -58,7 +59,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
         tensors = [
             sorted_tetra_idx, tile_ranges,
-            indices, vertices, cell_values, 
+            indices, vertices, vertex_normals, cell_values,
             output_img, xyzd_img, distortion_img, n_contributors,
             ray_jitter
         ]
@@ -74,14 +75,15 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img, grad_vert_alive):
-        (sorted_tetra_idx, tile_ranges, 
-         indices, vertices, cell_values,
+        (sorted_tetra_idx, tile_ranges,
+         indices, vertices, vertex_normals, cell_values,
          output_img, xyzd_img, distortion_img, n_contributors,
             ray_jitter) = ctx.saved_tensors[:ctx.len_tensors]
         tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
 
         vertices_grad = torch.zeros_like(vertices)
+        vertex_normals_grad = torch.zeros_like(vertex_normals)
         cell_values_grad = torch.zeros_like(cell_values)
 
         alpha_blend_tile_shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, ctx.aux_dim)
@@ -93,6 +95,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             tile_ranges=tile_ranges,
             indices=indices,
             vertices=(vertices, vertices_grad),
+            vertex_normals=(vertex_normals, vertex_normals_grad),
             tcam=tcam,
             cell_values=(cell_values, cell_values_grad),
             output_img=(output_img, grad_output_img),
@@ -110,5 +113,5 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                       render_grid.grid_height, 1)
         )
 
-        return (None, None, None, vertices_grad, cell_values_grad, 
+        return (None, None, None, vertices_grad, vertex_normals_grad, cell_values_grad,
                 None, None, None, None)

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from typing import Optional, Tuple
 import gc
@@ -57,6 +58,8 @@ class FrozenTetModel(BaseModel):
         # geometry ----------------------------------------------------------------
         self.interior_vertices = nn.Parameter(int_vertices.cuda(), requires_grad=True)          # immutable
         self.register_buffer("ext_vertices", ext_vertices.cuda())
+        self.interior_vertex_normals = nn.Parameter(torch.zeros(int_vertices.shape[0], 3, device='cuda'))
+        self.register_buffer("ext_vertex_normals", torch.zeros(ext_vertices.shape[0], 3, device='cuda'))
         self.register_buffer("indices", indices.int())
         self.empty_indices = indices
         self.register_buffer("center", center.reshape(1, 3))
@@ -143,6 +146,10 @@ class FrozenTetModel(BaseModel):
 
         
         # Load state dict to ensure all parameters are properly loaded
+        if 'interior_vertex_normals' not in ckpt:
+            ckpt['interior_vertex_normals'] = torch.zeros(int_vertices.shape[0], 3, device=device)
+        if 'ext_vertex_normals' not in ckpt:
+            ckpt['ext_vertex_normals'] = torch.zeros(ext_vertices.shape[0], 3, device=device)
         model.load_state_dict(ckpt)
         model.min_t = config.min_t
         
@@ -156,6 +163,9 @@ class FrozenTetModel(BaseModel):
         """Concatenated vertex tensor (internal + exterior)."""
         return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
 
+    @property
+    def vertex_normals(self) -> torch.Tensor:
+        return torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
 
     # ------------------------------------------------------------------
     # core helper (network‑free)
@@ -188,8 +198,9 @@ class FrozenTetModel(BaseModel):
             sh       = self.sh
 
         sh_dim = (self.max_sh_deg+1)**2 - 1
-        attr = torch.empty((sh.shape[0], 0), device=grd.device)
-        return circumcenter, density, rgb, grd, sh.reshape(-1, sh_dim, 3), attr
+        N = sh.shape[0]
+        attr = torch.empty((N, 0), device=grd.device)
+        return circumcenter, density, rgb, grd, sh.reshape(N, sh_dim, 3), attr
 
     def compute_features(self, offset=False):
         vertices = self.vertices
@@ -329,6 +340,7 @@ class FrozenTetOptimizer:
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {"params": [model.interior_vertices], "lr": self.vert_lr_multi*vertices_lr, "name": "interior_vertices"},
+            {"params": [model.interior_vertex_normals], "lr": 1e-3, "name": "interior_vertex_normals"},
         ])
         self.freeze_start = freeze_start
         self.scheduler = get_expon_lr_func(lr_init=freeze_lr,
@@ -411,9 +423,13 @@ class FrozenTetOptimizer:
         return 0.0
 
     def add_points(self, new_verts: torch.Tensor, raw_verts=False):
-        self.model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(dict(
-            interior_vertices = new_verts
-        ))['interior_vertices']
+        new_normals = torch.zeros(new_verts.shape[0], 3, device=new_verts.device)
+        result = self.vertex_optim.cat_tensors_to_optimizer(dict(
+            interior_vertices = new_verts,
+            interior_vertex_normals = new_normals,
+        ))
+        self.model.interior_vertices = result['interior_vertices']
+        self.model.interior_vertex_normals = result['interior_vertex_normals']
         self.model.update_triangulation()
 
     @torch.no_grad()

@@ -344,7 +344,7 @@ def apply_densification(
     bad = bad[clone_mask]
     # Clamped intersection is already inside tet bbox; no fallback needed
 
-    tet_optim.split(split_point, **args.as_dict())
+    tet_optim.split(split_point, clone_indices=clone_indices, **args.as_dict())
     # keep_verts = keep_verts > 0
     # keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
     # print(f"Pruned: {(~keep_verts).sum()}")

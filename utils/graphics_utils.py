@@ -113,65 +113,143 @@ def tetra_volume(vertices: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     volume = torch.abs(vol6) / 6.0
     return volume
 
-def depth_to_normals(depth, fx, fy):
-    """Assuming `depth` is orthographic, linearize it to a set of normals."""
+# def depth_to_normals(depth, fx, fy):
+#     """Assuming `depth` is orthographic, linearize it to a set of normals."""
+#
+#     f_blur = torch.tensor([1, 2, 1], device=depth.device) / 4
+#     f_edge = torch.tensor([-1, 0, 1], device=depth.device) / 2
+#     depth = depth.unsqueeze(0).unsqueeze(0).squeeze(-1)
+#     dy = F.conv2d(
+#         depth, (f_blur[None, :] * f_edge[:, None]).unsqueeze(0).unsqueeze(0), padding=1
+#     )[0, 0]
+#     dx = F.conv2d(
+#         depth, (f_blur[:, None] * f_edge[None, :]).unsqueeze(0).unsqueeze(0), padding=1
+#     )[0, 0]
+#
+#     # so dx, dy are in image space but we want to transform them to world space
+#     dx = dx * fx * 2 / depth[0, 0]
+#     dy = dy * fy * 2 / depth[0, 0]
+#     inv_denom = 1 / torch.sqrt(1 + dx**2 + dy**2)
+#     normals = torch.stack([dx * inv_denom, -dy * inv_denom, inv_denom], -1)
+#     return normals
+#
+# def depth_to_camera_normals(depth, fx, fy):
+#     """Calculates normals in camera space from an orthographic depth map."""
+#
+#     f_blur = torch.tensor([1, 2, 1], device=depth.device, dtype=torch.float32) / 4
+#     f_edge = torch.tensor([-1, 0, 1], device=depth.device, dtype=torch.float32) / 2
+#     
+#     # Reshape for convolution
+#     depth = depth.unsqueeze(0).unsqueeze(0)
+#
+#     # Sobel filters to get gradients
+#     dy = F.conv2d(
+#         depth, (f_blur[None, :] * f_edge[:, None]).unsqueeze(0).unsqueeze(0), padding='same'
+#     )[0, 0]
+#     dx = F.conv2d(
+#         depth, (f_blur[:, None] * f_edge[None, :]).unsqueeze(0).unsqueeze(0), padding='same'
+#     )[0, 0]
+#
+#     # The derivatives dx and dy are in pixel units (change in depth per pixel).
+#     # We convert them to camera space units.
+#     # Note: Using per-pixel depth is more accurate than a single depth value.
+#     depth_val = depth.squeeze().clip(min=1e-6)
+#
+#     # Convert gradients to camera space
+#     dx_cam = safe_div(dx * fx, depth_val)
+#     dy_cam = safe_div(dy * fy, depth_val)
+#
+#     # Construct normals in camera space
+#     # The vector is [-dx, -dy, 1] to account for image Y-down and camera Y-up conventions
+#     # and to have the normal point towards the camera in a right-handed system (-Z view).
+#     inv_denom = 1 / torch.sqrt(1 + dx_cam**2 + dy_cam**2)
+#     normals_camera = torch.stack([-dx_cam * inv_denom, -dy_cam * inv_denom, inv_denom], -1)
+#     
+#     return normals_camera
+#
 
-    f_blur = torch.tensor([1, 2, 1], device=depth.device) / 4
-    f_edge = torch.tensor([-1, 0, 1], device=depth.device) / 2
-    depth = depth.unsqueeze(0).unsqueeze(0).squeeze(-1)
-    dy = F.conv2d(
-        depth, (f_blur[None, :] * f_edge[:, None]).unsqueeze(0).unsqueeze(0), padding=1
-    )[0, 0]
-    dx = F.conv2d(
-        depth, (f_blur[:, None] * f_edge[None, :]).unsqueeze(0).unsqueeze(0), padding=1
-    )[0, 0]
+def depths_to_points(depthmap, view):
+    c2w = (view.world_view_transform.T).inverse().cuda()
+    W, H = view.image_width, view.image_height
+    fx = W / (2 * math.tan(view.fovx / 2.))
+    fy = H / (2 * math.tan(view.fovy / 2.))
+    intrins = torch.tensor(
+        [[fx, 0., W/2.],
+         [0., fy, H/2.],
+         [0., 0., 1.0]]
+    ).float().cuda()
+    grid_x, grid_y = torch.meshgrid(torch.arange(W, device='cuda').float(), torch.arange(H, device='cuda').float(), indexing='xy')
+    points = torch.stack([grid_x, grid_y, torch.ones_like(grid_x)], dim=-1).reshape(-1, 3)
+    rays_d = points @ intrins.inverse().T @ c2w[:3,:3].T
+    rays_o = c2w[:3, 3]
+    points = depthmap.reshape(-1, 1) * rays_d + rays_o
+    return points
 
-    # so dx, dy are in image space but we want to transform them to world space
-    dx = dx * fx * 2 / depth[0, 0]
-    dy = dy * fy * 2 / depth[0, 0]
-    inv_denom = 1 / torch.sqrt(1 + dx**2 + dy**2)
-    normals = torch.stack([dx * inv_denom, -dy * inv_denom, inv_denom], -1)
-    return normals
+# def depth_to_normal(depth, view):
+#     depth = depth.unsqueeze(0).squeeze(-1)
+#     points = depths_to_points(depth, view).reshape(*depth.shape[1:], 3)
+#     output = torch.zeros_like(points)
+#     dx = torch.cat([points[2:, 1:-1] - points[:-2, 1:-1]], dim=0)
+#     dy = torch.cat([points[1:-1, 2:] - points[1:-1, :-2]], dim=1)
+#     normal_map = l2_normalize_th(torch.cross(dx, dy, dim=-1), dim=-1, eps=1e-5)
+#     output[1:-1, 1:-1, :] = normal_map
+#     return output
 
 def depth_to_camera_normals(depth, fx, fy):
-    """Calculates normals in camera space from an orthographic depth map."""
+    """Compute normals in camera space from a z-depth map using Sobel filters.
 
-    f_blur = torch.tensor([1, 2, 1], device=depth.device, dtype=torch.float32) / 4
-    f_edge = torch.tensor([-1, 0, 1], device=depth.device, dtype=torch.float32) / 2
-    
-    # Reshape for convolution
-    depth = depth.unsqueeze(0).unsqueeze(0)
+    Returns [H, W, 3] normals that always face toward the camera (positive z).
+    """
+    f_blur = torch.tensor([1, 2, 1], device=depth.device, dtype=depth.dtype) / 4
+    f_edge = torch.tensor([-1, 0, 1], device=depth.device, dtype=depth.dtype) / 2
 
-    # Sobel filters to get gradients
+    depth_4d = depth[None, None]  # [1, 1, H, W]
+
     dy = F.conv2d(
-        depth, (f_blur[None, :] * f_edge[:, None]).unsqueeze(0).unsqueeze(0), padding='same'
+        depth_4d, (f_blur[None, :] * f_edge[:, None])[None, None], padding='same'
     )[0, 0]
     dx = F.conv2d(
-        depth, (f_blur[:, None] * f_edge[None, :]).unsqueeze(0).unsqueeze(0), padding='same'
+        depth_4d, (f_blur[:, None] * f_edge[None, :])[None, None], padding='same'
     )[0, 0]
 
-    # The derivatives dx and dy are in pixel units (change in depth per pixel).
-    # We convert them to camera space units.
-    # Note: Using per-pixel depth is more accurate than a single depth value.
-    depth_val = depth.squeeze().clip(min=1e-6)
-
-    # Convert gradients to camera space
+    depth_val = depth.clamp(min=1e-6)
     dx_cam = safe_div(dx * fx, depth_val)
     dy_cam = safe_div(dy * fy, depth_val)
 
-    # Construct normals in camera space
-    # The vector is [-dx, -dy, 1] to account for image Y-down and camera Y-up conventions
-    # and to have the normal point towards the camera in a right-handed system (-Z view).
-    inv_denom = 1 / torch.sqrt(1 + dx_cam**2 + dy_cam**2)
-    normals_camera = torch.stack([-dx_cam * inv_denom, -dy_cam * inv_denom, inv_denom], -1)
-    
-    return normals_camera
+    inv_denom = 1 / torch.sqrt(1 + dx_cam ** 2 + dy_cam ** 2)
+    return torch.stack([-dx_cam * inv_denom, -dy_cam * inv_denom, inv_denom], -1)
 
 
-def calculate_norm_loss(xyzd, fx, fy):
-    pred_normals = depth_to_normals(xyzd[..., 3], fx, fy)
-    field_normals = xyzd[..., :3]
-    align_world_loss = 2 * (
-        1 - (pred_normals * field_normals).sum(dim=-1)
-    )
-    return align_world_loss.mean()
+def depth_to_normal(depth, view):
+    """Compute world-space normals from a z-depth map.
+
+    Uses Sobel-filtered camera-space normals (always facing toward camera)
+    rotated to world space.
+    """
+    depth = depth.unsqueeze(0).squeeze(-1).squeeze(0)  # ensure [H, W]
+    H, W = depth.shape
+    fx = W / (2 * math.tan(view.fovx / 2.))
+    fy = H / (2 * math.tan(view.fovy / 2.))
+
+    cam_normals = depth_to_camera_normals(depth, fx, fy)  # [H, W, 3]
+
+    # Rotate camera-space normals to world space:
+    # world_view_transform[:3,:3] = R_w2c^T, so .T = R_w2c;
+    # v_cam @ R_w2c = v_world  (row-vector convention)
+    R_cam2world = view.world_view_transform[:3, :3].T.to(depth.device)
+    world_normals = (cam_normals.reshape(-1, 3) @ R_cam2world).reshape(H, W, 3)
+    return world_normals
+
+# def depth_to_normal(depth, view):
+#     depth = depth.unsqueeze(0).squeeze(-1)
+#     points = depths_to_points(depth, view).reshape(*depth.shape[1:], 3)
+#     output = torch.zeros_like(points)
+#     
+#     vec_y = torch.cat([points[2:, 1:-1] - points[:-2, 1:-1]], dim=0)
+#     vec_x = torch.cat([points[1:-1, 2:] - points[1:-1, :-2]], dim=1)
+#     
+#     # normal_map = l2_normalize_th(torch.cross(vec_x, vec_y, dim=-1), dim=-1, eps=1e-5)
+#     normal_map = torch.cross(vec_x, vec_y, dim=-1)
+#     output[1:-1, 1:-1, :] = -normal_map
+#     
+#     return output

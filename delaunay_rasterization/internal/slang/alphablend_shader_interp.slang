@@ -35,18 +35,32 @@ float safe_exp4alpha(float x) {
     return safe_clip(safe_exp(x), 0, 1);
 }
 
+// Exact moments for piecewise-constant density w(t) = σ·T·exp(-σ(t-a)).
+// M0 = T·α = T·(1-exp(-u)),  where u = σ·(b-a)
+// M1 = T·(a·α + (1-(1+u)·exp(-u))/σ)
+// Self = T²·(1 - 2u·exp(-u) - exp(-2u))/σ
+// These converge to the Barron point-mass approximation as u→0.
+
 [Differentiable]
-float moment_0_int(float a, float b, float s1, float T) {
-    return s1;
-}
-[Differentiable]
-float moment_1_int(float a, float b, float s1, float T) {
-    return s1 * (b+a)/2;
-}
-[Differentiable]
-float self_dist(float a, float b, float s, float T) {
+float moment_0_int(float a, float b, float density, float T) {
     float dt = max(b - a, 0);
-    return s*s*dt/3;
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    return T * alpha;
+}
+[Differentiable]
+float moment_1_int(float a, float b, float density, float T) {
+    float dt = max(b - a, 0);
+    float u = density * dt;
+    float exp_neg_u = safe_exp(-u);
+    float alpha = max(1.0f - exp_neg_u, 0);
+    return T * (a * alpha + safe_div(1 - (1 + u) * exp_neg_u, density));
+}
+[Differentiable]
+float self_dist(float a, float b, float density, float T) {
+    float dt = max(b - a, 0);
+    float u = density * dt;
+    float exp_neg_u = safe_exp(-u);
+    return T * T * safe_div(1 - 2 * u * exp_neg_u - exp_neg_u * exp_neg_u, density);
 }
 
 [Differentiable]
@@ -58,18 +72,16 @@ DistortionState5 update_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, density, T);
+    float m1 = moment_1_int(start, end, density, T);
 
     DistortionState5 new_state;
     new_state.x = old_state.x + 2.0f * m1 * old_state.z;
     new_state.y = old_state.y + 2.0f * m0 * old_state.w;
     new_state.z = old_state.z + m0;
     new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + self_dist(start, end, d, T);
+    new_state.v = old_state.v + self_dist(start, end, density, T);
 
     return new_state;
 }
@@ -82,18 +94,16 @@ DistortionState5 undo_distortion_state(
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
+    float m0 = moment_0_int(start, end, density, T);
+    float m1 = moment_1_int(start, end, density, T);
 
     DistortionState5 old_state;
     old_state.z = new_state.z - m0;
     old_state.w = new_state.w - m1;
     old_state.x = new_state.x - 2.0f * m1 * old_state.z;
     old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - self_dist(start, end, d, T);
+    old_state.v = new_state.v - self_dist(start, end, density, T);
     return old_state;
 }
 
@@ -126,6 +136,7 @@ float4 undo_xyzd_state(in float4 next_xyzd, in float4 ctrl_xyzd, in float T) {
     return next_xyzd - T * ctrl_xyzd;
 }
 
+
 struct AlphaOut: IDifferentiable {
     float4 rgba;
     DistortionState5 distortion_state;
@@ -154,12 +165,13 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
     AlphaOut res;
     res.rgba = update_pixel_state(prev.rgba, ctrl.rgba);
     res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist);
+
     res.xyzd = update_xyzd_state(prev.xyzd, ctrl.xyzd, T);
 
     // 2. Accumulate Aux (Standard Alpha Blending)
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        res.aux[i] = prev.aux[i] + ctrl.aux[i] * detach(T);
+        res.aux[i] = prev.aux[i] + ctrl.aux[i] * T;
     }
 
     return res;
@@ -168,7 +180,6 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
 AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
     float4 pix_state = undo_pixel_state(curr.rgba, ctrl.rgba);
     float T = safe_exp(pix_state.a);
-
     AlphaOut res;
     res.rgba = pix_state;
     res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist);
@@ -187,6 +198,7 @@ AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
 AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      TensorView<int32_t> indices,
                      DiffTensorView vertices,
+                     DiffTensorView vertex_normals,
                      DiffTensorView cell_values,
                      DiffTensorView final_pixel_state,
                      DiffTensorView final_distortion_state,
@@ -236,9 +248,12 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             {
                 local_n_contrib++;
                 SplatTetrahedra_interp g = collected_splats[j];
+                // Load vertex normals from global memory (not shared memory) to stay within shared mem limit
+                float3[4] vn = load_vert_normals(g.vtet, vertex_normals);
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
+
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     ao = new_ao;
                     if (new_ao.rgba.a < -5.5) {
@@ -260,6 +275,7 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      TensorView<int32_t> indices,
                      DiffTensorView vertices,
+                     DiffTensorView vertex_normals,
                      DiffTensorView cell_values,
                      DiffTensorView final_pixel_state,
                      DiffTensorView final_distortion_state,
@@ -333,27 +349,28 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 uint32_t g_idx = collected_idx[j];
                 SplatTetrahedra_interp g = collected_splats[j];
 
+                // Load vertex normals from global memory
+                float3[4] vn = load_vert_normals(g.vtet, vertex_normals);
+
                 CtrlPt tetra_ctrl;
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
+
                     ao = undo_alpha_out(ao, tetra_ctrl);
+
+                    // Autodiff through update_alpha_out
+                    DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
+                    DifferentialPair<CtrlPt> dp_ctrl = diffPair(tetra_ctrl);
+                    bwd_diff(update_alpha_out)(dp_ao, dp_ctrl, d_ao);
+                    d_ao = dp_ao.getDifferential();
 
                     DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
                     DifferentialPair<Ray> dp_ray = diffPair(ray);
-                    DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);
-                    DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
-
-                    bwd_diff(update_alpha_out)(dp_ao, dp_tetra_ctrl, d_ao);
-                    d_ao = dp_ao.getDifferential();
-                    CtrlPt.Differential d_tetra_scale = {
-                        dp_tetra_ctrl.d.rgba,
-                        dp_tetra_ctrl.d.dist,
-                        dp_tetra_ctrl.d.density,
-                        dp_tetra_ctrl.d.xyzd,
-                        dp_tetra_ctrl.d.aux
-                    };
-                    bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, d_tetra_scale);
+                    DifferentialPair<float3[4]> dp_vn = diffPair(vn);
+                    bwd_diff(evaluate_tetra_interp)(dp_g, dp_ray, cam.min_t, dp_vn, dp_ctrl.d);
                     bwd_diff(load_tet_alphablend_interp)(g_idx, vertices, indices, cell_values, dp_g.d);
+                    // Propagate vertex normal gradients back to vertex_normals tensor
+                    bwd_diff(load_vert_normals)(g.vtet, vertex_normals, dp_vn.d);
                 }
             }
         }
@@ -368,6 +385,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  TensorView<int32_t> tile_ranges,
                  TensorView<int32_t> indices,
                  DiffTensorView vertices,
+                 DiffTensorView vertex_normals,
                  DiffTensorView cell_values,
                  DiffTensorView output_img,
                  DiffTensorView xyzd_img,
@@ -402,6 +420,7 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
         sorted_gauss_idx,
         indices,
         vertices,
+        vertex_normals,
         cell_values,
         output_img,
         distortion_img,
@@ -444,6 +463,7 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                   TensorView<int32_t> tile_ranges,
                   TensorView<int32_t> indices,
                   TensorView<float> vertices,
+                  TensorView<float> vertex_normals,
                   TensorView<float> cell_values,
                   TensorView<float> output_img,
                   TensorView<float> gt,
@@ -487,6 +507,7 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
         sorted_gauss_idx,
         indices,
         vertices,
+        vertex_normals,
         cell_values,
         output_img,
         tet_err,
@@ -504,6 +525,7 @@ void calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
 void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                        TensorView<int32_t> indices,
                        TensorView<float> vertices,
+                       TensorView<float> vertex_normals,
                        TensorView<float> cell_values,
                        TensorView<float> final_pixel_state,
                        TensorView<float> tet_err,
@@ -567,9 +589,11 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 if (g_idx == 0xFFFFFFFF || g_idx >= tet_err.size(0)) continue;
 
                 SplatTetrahedra_interp g = collected_splats[j];
+                // Load vertex normals from global memory
+                float3[4] vn = load_vert_normals(g.vtet, vertex_normals);
                 CtrlPt tetra_ctrl;
 
-                if (evaluate_tetra_interp(g, ray, cam.min_t, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
+                if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
                     AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
                     float trans = exp(ao.rgba.a);
                     float T = trans * tetra_ctrl.rgba.a;

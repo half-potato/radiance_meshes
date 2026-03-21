@@ -124,6 +124,7 @@ class BaseModel(nn.Module):
         base_color_v0_raw = base_color_v0_raw.cpu().numpy().astype(np.float32)
         grds = normed_grd.reshape(-1, 3).cpu().numpy().astype(np.float32)
         densities = density.reshape(-1).cpu().numpy().astype(np.float32)
+        tet_count = densities.shape[0]
         if sh_dim > 0:
             sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
         else:

@@ -261,6 +261,11 @@ safe_sqrt = generate_safe_fn(
     x_max=max_val
 )
 
+def safe_arccos(x):
+  """jnp.arccos(x) where x is clipped to [-1, 1]."""
+  y = torch.acos(torch.clip(x, plus_eps(torch.tensor(-1.0, device=x.device)), minus_eps(torch.tensor(1.0, device=x.device))))
+  return torch.where(x >= 1, 0, torch.where(x <= -1, math.pi, y))
+
 # -------------------------------------------------------------------
 # inverse_sigmoid(x) = log(x / (1 - x))
 # No custom gradient override: PyTorch handles it normally
