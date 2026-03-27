@@ -65,6 +65,11 @@ class Camera(nn.Module):
         self.data_device = self.world_view_transform.device
 
     def set_size(self, h, w):
+        # Scale principal point proportionally with resolution change
+        if self.cx != -1 and self.image_width > 0:
+            self.cx = self.cx * w / self.image_width
+        if self.cy != -1 and self.image_height > 0:
+            self.cy = self.cy * h / self.image_height
         self.image_width = w
         self.image_height = h
 

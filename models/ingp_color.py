@@ -471,7 +471,7 @@ class Model(BaseModel):
 
     @staticmethod
     def init_from_pcd(point_cloud, cameras, device, max_sh_deg,
-                      voxel_size=0.00, **kwargs):
+                      voxel_size=0.00, convex_hull_radius=10, **kwargs):
         torch.manual_seed(2)
 
         ccenters = torch.stack([c.camera_center.reshape(3) for c in cameras], dim=0).to(device)
@@ -515,17 +515,17 @@ class Model(BaseModel):
         # within_sphere = sample_uniform_in_sphere(10000, 3, base_radius=new_radius, radius=new_radius, device='cpu') + center.reshape(1, 3).cpu()
         # vertices = torch.cat([vertices, within_sphere], dim=0)
 
-        num_ext = 1000
-        ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
-        num_ext = ext_vertices.shape[0]
-
         # num_ext = 1000
-        # ext_vertices = topo_utils.expand_convex_hull(vertices, 1, device=vertices.device)
-        # if ext_vertices.shape[0] > num_ext:
-        #     inds = np.random.default_rng().permutation(ext_vertices.shape[0])[:num_ext]
-        #     ext_vertices = ext_vertices[inds]
-        # else:
-        #     num_ext = ext_vertices.shape[0]
+        # ext_vertices = fibonacci_spiral_on_sphere(num_ext, new_radius, device='cpu') + center.reshape(1, 3).cpu()
+        # num_ext = ext_vertices.shape[0]
+
+        num_ext = 10000
+        ext_vertices = topo_utils.expand_convex_hull(vertices, convex_hull_radius, device=vertices.device)
+        if ext_vertices.shape[0] > num_ext:
+            inds = np.random.default_rng().permutation(ext_vertices.shape[0])[:num_ext]
+            ext_vertices = ext_vertices[inds]
+        else:
+            num_ext = ext_vertices.shape[0]
 
         vertices = torch.cat([vertices, ext_vertices], dim=0)
         ext_vertices = torch.empty((0, 3))
@@ -607,6 +607,67 @@ class Model(BaseModel):
     @property
     def vertex_normals(self):
         return torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
+
+    @property
+    def geometric_vertex_normals(self):
+        return self.compute_geometric_vertex_normals()
+
+    def compute_geometric_vertex_normals(self):
+        """Compute vertex normals from tet faces, weighted by density.
+
+        Each tet has 4 faces. Each face normal is oriented outward (away from
+        the opposite vertex) and weighted by the tet's density. Shared faces
+        get contributions from both adjacent tets — the denser side's normal
+        dominates, so the net normal naturally points away from dense regions.
+        Interior faces (equal density on both sides) cancel out.
+        """
+        verts = self.vertices  # [V, 3]
+        idx = self.indices     # [T, 4]
+
+        # Get per-tet density
+        density = self.calc_tet_density().detach()  # [T]
+
+        # 4 faces per tet: each face is the triangle opposite vertex i
+        face_configs = torch.tensor([
+            [1, 2, 3],
+            [0, 3, 2],
+            [0, 1, 3],
+            [0, 2, 1],
+        ], device=idx.device)
+
+        normals_acc = torch.zeros_like(verts)  # [V, 3]
+
+        for fi in range(4):
+            a_idx = idx[:, face_configs[fi, 0]]  # [T]
+            b_idx = idx[:, face_configs[fi, 1]]
+            c_idx = idx[:, face_configs[fi, 2]]
+            opp_idx = idx[:, fi]
+
+            a = verts[a_idx]  # [T, 3]
+            b = verts[b_idx]
+            c = verts[c_idx]
+            opp = verts[opp_idx]
+
+            # Face normal (magnitude = 2 * area)
+            fn = torch.cross(b - a, c - a, dim=-1)  # [T, 3]
+
+            # Orient outward: away from opposite vertex
+            centroid = (a + b + c) / 3
+            outward = centroid - opp
+            flip = (fn * outward).sum(-1, keepdim=True).sign()
+            fn = fn * flip
+
+            # Weight by density — dense tets dominate, so net normal
+            # points away from mass at density boundaries
+            fn = fn * density.unsqueeze(-1)
+
+            # Scatter to the 3 face vertices
+            normals_acc.scatter_add_(0, a_idx.unsqueeze(-1).expand_as(fn), fn)
+            normals_acc.scatter_add_(0, b_idx.unsqueeze(-1).expand_as(fn), fn)
+            normals_acc.scatter_add_(0, c_idx.unsqueeze(-1).expand_as(fn), fn)
+
+        # Normalize
+        return -F.normalize(normals_acc, dim=-1)
 
     def sh_up(self):
         self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
