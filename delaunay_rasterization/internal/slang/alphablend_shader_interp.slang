@@ -55,6 +55,13 @@ float moment_1_int(float a, float b, float density, float T) {
     float alpha = max(1.0f - exp_neg_u, 0);
     return T * (a * alpha + safe_div(1 - (1 + u) * exp_neg_u, density));
 }
+
+[Differentiable]
+float scale_dist(float x) {
+    return tukey_power_ladder(160 * x, 0.1);
+}
+
+
 [Differentiable]
 float self_dist(float a, float b, float density, float T) {
     float dt = max(b - a, 0);
@@ -70,8 +77,8 @@ DistortionState5 update_distortion_state(
     float density,
     float2 dist)
 {
-    float start = dist.x;
-    float end = max(dist.x, dist.y);
+    float start = scale_dist(dist.x);
+    float end = scale_dist(max(dist.x, dist.y));
 
     float m0 = moment_0_int(start, end, density, T);
     float m1 = moment_1_int(start, end, density, T);
@@ -92,8 +99,8 @@ DistortionState5 undo_distortion_state(
     float density,
     float2 dist)
 {
-    float start = dist.x;
-    float end = max(dist.x, dist.y);
+    float start = scale_dist(dist.x);
+    float end = scale_dist(max(dist.x, dist.y));
 
     float m0 = moment_0_int(start, end, density, T);
     float m1 = moment_1_int(start, end, density, T);

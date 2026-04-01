@@ -116,6 +116,15 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
             focal_length_y = intr.params[1]
             fovy = focal2fov(focal_length_y, height)
             fovx = focal2fov(focal_length_x, width)
+        elif intr.model=="OPENCV":
+            fx, fy, cx, cy = intr.params[:4]
+            k1, k2, p1, p2 = intr.params[4:8]
+            focal_length_x = fx
+            focal_length_y = fy
+            distortion_params = {'k1': k1, 'k2': k2, 'k3': 0, 'k4': 0}
+            model = ProjectionType.PERSPECTIVE
+            fovy = focal2fov(focal_length_y, height)
+            fovx = focal2fov(focal_length_x, width)
         elif intr.model=="SIMPLE_RADIAL":
             distortion_params = {}
             cx, cy = intr.params[1:3]
@@ -303,7 +312,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
         # Since this data set has no colmap data, we start with random points
-        num_pts = 50_000
+        num_pts = 10_000
         print(f"Generating random point cloud ({num_pts})...")
         
         # We create random points inside the bounds of the synthetic Blender scenes

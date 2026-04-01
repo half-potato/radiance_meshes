@@ -11,8 +11,6 @@ struct CtrlPt: IDifferentiable {
     float density;
     float4 xyzd;
     float aux[AUX_DIM];
-    float3 entry_contrib; // unused (reserved)
-    float3 exit_contrib;  // exit face normal n_exit (for end-of-ray correction)
 
     static CtrlPt zero(float density) {
         CtrlPt cp;
@@ -20,8 +18,6 @@ struct CtrlPt: IDifferentiable {
         cp.dist = float2(0);
         cp.density = density;
         cp.xyzd = float4(0);
-        cp.entry_contrib = float3(0);
-        cp.exit_contrib = float3(0);
         [ForceUnroll]
         for (int i = 0; i < AUX_DIM; ++i) cp.aux[i] = 0;
         return cp;
@@ -156,8 +152,6 @@ inline CtrlPt integrate_tetra_segment(
         result.aux[i] = g.aux[i] * alpha;
     }
 
-    result.entry_contrib = float3(0);
-    result.exit_contrib = float3(0);
 
     return result;
 }

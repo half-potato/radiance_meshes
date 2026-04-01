@@ -356,8 +356,7 @@ class Model(BaseModel):
         self.register_buffer('center', center.reshape(1, 3))
         self.register_buffer('scene_scaling', torch.tensor(float(scene_scaling), device=self.device))
         self.interior_vertices = nn.Parameter(vertices.detach())
-        # self.interior_vertex_normals = nn.Parameter(self.normal_init * torch.randn(vertices.shape[0], 3, device=self.device))
-        self.interior_vertex_normals = nn.Parameter(self.normal_init * F.normalize(torch.randn(vertices.shape[0], 3, device=self.device), dim=-1))
+        self.interior_vertex_normals = nn.Parameter(self.normal_init * torch.randn(vertices.shape[0], 3, device=self.device))
         self.register_buffer('ext_vertex_normals', self.normal_init * torch.randn(ext_vertices.shape[0], 3, device=self.device))
         self.update_triangulation()
 
@@ -552,9 +551,9 @@ class Model(BaseModel):
         ext_vertices = ckpt['ext_vertices']
         model = Model(vertices.to(device), ext_vertices, ckpt['center'], ckpt['scene_scaling'], **config.as_dict())
         if 'interior_vertex_normals' not in ckpt:
-            ckpt['interior_vertex_normals'] = torch.randn(vertices.shape[0], 3, device=device)
+            ckpt['interior_vertex_normals'] = torch.zeros(vertices.shape[0], 3, device=device)
         if 'ext_vertex_normals' not in ckpt:
-            ckpt['ext_vertex_normals'] = torch.randn(ext_vertices.shape[0], 3, device=device)
+            ckpt['ext_vertex_normals'] = torch.zeros(ext_vertices.shape[0], 3, device=device)
         model.load_state_dict(ckpt)
         model.min_t = getattr(config, 'min_t', 0.2)
         model.indices = torch.as_tensor(indices).cuda()
@@ -606,7 +605,7 @@ class Model(BaseModel):
 
     @property
     def vertex_normals(self):
-        return torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
+        return self.compute_geometric_vertex_normals() + torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
 
     @property
     def geometric_vertex_normals(self):
@@ -625,7 +624,7 @@ class Model(BaseModel):
         idx = self.indices     # [T, 4]
 
         # Get per-tet density
-        density = self.calc_tet_density().detach()  # [T]
+        density = self.calc_tet_density()  # [T]
 
         # 4 faces per tet: each face is the triangle opposite vertex i
         face_configs = torch.tensor([
