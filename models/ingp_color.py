@@ -611,7 +611,7 @@ class Model(BaseModel):
     def geometric_vertex_normals(self):
         return self.compute_geometric_vertex_normals()
 
-    def compute_geometric_vertex_normals(self):
+    def compute_geometric_vertex_normals(self, density=None):
         """Compute vertex normals from tet faces, weighted by density.
 
         Each tet has 4 faces. Each face normal is oriented outward (away from
@@ -619,12 +619,17 @@ class Model(BaseModel):
         get contributions from both adjacent tets — the denser side's normal
         dominates, so the net normal naturally points away from dense regions.
         Interior faces (equal density on both sides) cancel out.
+
+        Args:
+            density: Optional pre-computed per-tet density [T]. If None,
+                     runs calc_tet_density() (full iNGP forward pass).
         """
         verts = self.vertices  # [V, 3]
         idx = self.indices     # [T, 4]
 
         # Get per-tet density
-        density = self.calc_tet_density()  # [T]
+        if density is None:
+            density = self.calc_tet_density()  # [T]
 
         # 4 faces per tet: each face is the triangle opposite vertex i
         face_configs = torch.tensor([

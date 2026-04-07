@@ -31,7 +31,6 @@ def vertex_and_tile_shader(indices,
         vertices,
         cam,
         render_grid)
-    torch.cuda.synchronize()
 
     with torch.no_grad():
         min_x = rect_tile_space[..., 0]
@@ -170,3 +169,19 @@ class VertexShader(torch.autograd.Function):
                 gridSize=(ceil_div(n_tetra, 256), 1, 1)
         )
         return grad_indices, grad_vertices, None, None
+
+
+def vertex_tile_and_interval_shader(indices, vertices, vertex_normals, cell_values,
+                                    cam, render_grid, aux_dim):
+    """Convenience wrapper: vertex+tile shader + interval generation in one call."""
+    from delaunay_rasterization.internal.alphablend_tiled_slang_interval import run_interval_generate
+
+    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, rect_tile_space = \
+        vertex_and_tile_shader(indices, vertices, cam, render_grid)
+
+    interval_verts, interval_tet_data, interval_meta = run_interval_generate(
+        indices, vertices, vertex_normals, cell_values,
+        cam, aux_dim)
+
+    return (sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask,
+            rect_tile_space, interval_verts, interval_tet_data, interval_meta)

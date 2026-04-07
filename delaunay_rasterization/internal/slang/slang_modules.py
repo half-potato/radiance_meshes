@@ -39,6 +39,32 @@ class ShaderManager:
             )
         return self._cache[key]
 
+    def get_interval(self, tile_height, tile_width, aux_dim):
+        key = (tile_height, tile_width, aux_dim, "interval")
+        if key not in self._cache:
+            defines = {
+                "PYTHON_TILE_HEIGHT": tile_height,
+                "PYTHON_TILE_WIDTH": tile_width,
+                "PYTHON_AUX_DIM": aux_dim
+            }
+            self._cache[key] = slangtorch.loadModule(
+                os.path.join(self.shaders_dir, "alphablend_shader_interval.slang"),
+                defines=defines
+            )
+        return self._cache[key]
+
+    def get_interval_generate(self, aux_dim):
+        key = (aux_dim, "interval_generate")
+        if key not in self._cache:
+            defines = {
+                "PYTHON_AUX_DIM": aux_dim
+            }
+            self._cache[key] = slangtorch.loadModule(
+                os.path.join(self.shaders_dir, "interval_generate.slang"),
+                defines=defines
+            )
+        return self._cache[key]
+
 # Usage instance
 shaders_path = os.path.dirname(__file__)
 shader_manager = ShaderManager(shaders_path)

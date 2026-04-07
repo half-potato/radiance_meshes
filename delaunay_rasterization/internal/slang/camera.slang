@@ -361,6 +361,7 @@ Ray get_ray(Camera cam, float2 center_pix_coord)
 // Takes a normalized, undistorted point in camera space (where z=1) and applies distortion.
 // Brown-Conrady model — used for PERSPECTIVE cameras.
 // distortion_params: (k1, k2, p1, p2)
+[Differentiable]
 float2 distort(float2 p_undistorted, Camera cam)
 {
     // Optimization: If there are no distortion params, return immediately.
@@ -387,6 +388,7 @@ float2 distort(float2 p_undistorted, Camera cam)
 // p_undistorted is in equidistant space: |p_undistorted| = theta (true angle from optical axis).
 // Returns p_distorted with |p_distorted| = theta_d (distorted angle).
 // distortion_params: (k1, k2, k3, k4)
+[Differentiable]
 float2 fisheye_distort(float2 p_undistorted, Camera cam)
 {
     if (dot(cam.distortion_params, cam.distortion_params) < 1e-9f) {
@@ -452,6 +454,7 @@ float2 fisheye_undistort(float2 p_distorted, Camera cam)
 // Projects a 3D point from camera space to a 2D pixel coordinate (with depth).
 // This is the inverse of get_ray.
 // MODIFIED: This function now correctly handles fisheye projection.
+[Differentiable]
 float3 camspace_to_image(float3 p_cam, Camera cam)
 {
     float2 p_undistorted;

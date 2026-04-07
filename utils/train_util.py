@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from data.camera import Camera
 from delaunay_rasterization.internal.alphablend_tiled_slang import render_constant
 from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaBlendTiledRender
+from delaunay_rasterization.internal.alphablend_tiled_slang_interval import AlphaBlendTiledRenderInterval
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
 from utils.eval_sh_py import weigh_degree
@@ -61,7 +62,7 @@ def render_debug(render_tensor, model, camera, density_multi=1, tile_size=4):
 
 def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
            scene_scaling=1, clip_multi=0, ray_jitter=None,
-           **kwargs):
+           use_interval=False, **kwargs):
     device = model.device
     if ray_jitter is None:
         ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
@@ -100,17 +101,31 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         weighting = weigh_degree(shs, [0, 0.1, 0.5, 1])
         sh_reg = ((weighting * shs)**2).mean()
 
-    image_rgb, xyzd_img, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
-        sorted_tetra_idx,
-        tile_ranges,
-        model.indices,
-        vertices,
-        model.vertex_normals,
-        cell_values,
-        render_grid,
-        tcam,
-        ray_jitter,
-        model.additional_attr)
+    if use_interval:
+        image_rgb, xyzd_img, distortion_img = AlphaBlendTiledRenderInterval.apply(
+            sorted_tetra_idx,
+            tile_ranges,
+            model.indices,
+            vertices,
+            model.vertex_normals,
+            cell_values,
+            render_grid,
+            tcam,
+            ray_jitter,
+            model.additional_attr)
+        tet_alive = torch.zeros((model.indices.shape[0],), dtype=bool, device=device)
+    else:
+        image_rgb, xyzd_img, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
+            sorted_tetra_idx,
+            tile_ranges,
+            model.indices,
+            vertices,
+            model.vertex_normals,
+            cell_values,
+            render_grid,
+            tcam,
+            ray_jitter,
+            model.additional_attr)
     alpha = image_rgb.permute(2,0,1)[3, ...].exp()
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
