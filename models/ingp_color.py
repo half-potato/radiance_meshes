@@ -23,7 +23,6 @@ from models.base_model import BaseModel
 from utils.ingp_util import grid_scale, compute_grid_offsets
 from utils.hashgrid import HashEmbedderOptimized
 from utils import hashgrid
-import tinycudann as tcnn
 import time
 import torch.nn.functional as F
 
@@ -107,6 +106,24 @@ def approx_erf(x):
   """An approximation of erf() that is accurate to within 0.007."""
   return torch.sign(x) * torch.sqrt(1 - torch.exp(-(4 / torch.pi) * x**2))
 
+
+class DyT(nn.Module):
+    """Dynamic Tanh: γ · tanh(α · x + s) + β.
+
+    α, s are scalar; γ, β are per-channel. Init (α=1, s=0, γ=1, β=0) leaves
+    the layer in tanh's linear regime so behavior matches no-DyT at start.
+    """
+    def __init__(self, channels: int):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.tensor(1.0))
+        self.s = nn.Parameter(torch.tensor(0.0))
+        self.gamma = nn.Parameter(torch.ones(channels))
+        self.beta = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x):
+        return self.gamma * torch.tanh(self.alpha * x + self.s) + self.beta
+
+
 class iNGPDW(nn.Module):
     def __init__(self, 
                  sh_dim=0,
@@ -150,6 +167,7 @@ class iNGPDW(nn.Module):
             log2_hashmap_size=log2_hashmap_size,
         )
         if use_tcnn:
+            import tinycudann as tcnn
             self.encoding = tcnn.Encoding(3, self.config)
             print("Using TCNN")
             self.compile = False
@@ -165,6 +183,7 @@ class iNGPDW(nn.Module):
 
         def mk_head(n):
             network = nn.Sequential(
+                # DyT(self.encoding.n_output_dims),
                 nn.Linear(self.encoding.n_output_dims, hidden_dim),
                 nn.SELU(inplace=True),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -240,7 +259,7 @@ class iNGPDW(nn.Module):
         sigma = self.density_net(h)
         rgb = self.color_net(h)
         field_samples = self.gradient_net(h)
-        sh  = self.sh_net(h).half()
+        sh  = self.sh_net(h)
 
         if self.additional_attr > 0:
             attr = self.network(h)
@@ -558,7 +577,31 @@ class Model(BaseModel):
         model.min_t = getattr(config, 'min_t', 0.2)
         model.indices = torch.as_tensor(indices).cuda()
         model.empty_indices = torch.as_tensor(empty_indices).cuda()
+        model.compute_adjacency()
         return model
+
+    def query_density(self, points, radius, chunk=2**20):
+        """Density at arbitrary world-space points (volume-AO sampling etc.).
+
+        points [N, 3], radius: scalar or [N] world-space cone radius for the
+        contraction mip term (use roughly the sample spacing). Gradient flows
+        into the hash grid / density net; points are treated as constants.
+        Mirrors compute_batch_features's k_samples==1 query path.
+        """
+        assert self.backbone.k_samples == 1, "query_density supports k_samples=1"
+        pts = points.detach()
+        if not torch.is_tensor(radius):
+            radius = torch.full((pts.shape[0],), float(radius),
+                                device=pts.device, dtype=pts.dtype)
+        out = []
+        for s in range(0, pts.shape[0], chunk):
+            e = min(s + chunk, pts.shape[0])
+            normalized = (pts[s:e] - self.center) / self.scene_scaling
+            cv, cr = contract_mean_std(normalized, radius[s:e] / self.scene_scaling)
+            x = (cv / 2 + 1) / 2
+            density, *_ = self.backbone(x, cr)
+            out.append(density.reshape(-1))
+        return torch.cat(out)
 
     def calc_tet_density(self):
         densities = []
@@ -673,6 +716,85 @@ class Model(BaseModel):
         # Normalize
         return -F.normalize(normals_acc, dim=-1)
 
+    def face_normal_alignment_loss(
+        self,
+        density,
+        aggregation: str = 'min',
+        eps: float = 1e-8,
+    ):
+        """Per-face loss: align tet faces with their vertex normals.
+
+        For each unique face, compute the squared sine of the angle between
+        the face plane's normal and each of the 3 incident vertex normals,
+        aggregate across the 3 vertices, and weight the face by a saturating
+        function of the absolute density difference across its two adjacent
+        tets, `1 - exp(-|Δd|)` (boundary faces use the front-side density
+        alone). The saturation keeps any single high-density boundary face
+        from dominating the gradient. Vertex normals are detached, so the
+        loss only moves vertex positions.
+
+        Adjacency is read from the cache (`self.faces`, `self.side_index`),
+        which is refreshed by `update_triangulation`. Vertex normals are
+        derived from the density tensor passed in, avoiding a redundant
+        forward pass.
+
+        Args:
+            density: per-tet density [T] from the current render pass.
+            aggregation: how to combine per-vertex misalignments across the 3
+                face vertices. One of 'min' (best-aligned vertex; lenient),
+                'mean' (average), 'max' (worst-aligned; strict).
+            eps: small constant for normalization stability.
+
+        Returns:
+            Scalar loss in [0, 1].
+        """
+        density = density.reshape(-1)
+
+        faces = self.faces
+        side_index = self.side_index
+
+        verts = self.vertices
+
+        with torch.no_grad():
+            geo_vn = self.compute_geometric_vertex_normals(density=density)
+            learned = torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
+            # vn = F.normalize(geo_vn + learned, dim=-1, eps=eps)
+            vn = l2_normalize_th(geo_vn)
+
+        a = verts[faces[:, 0]]
+        b = verts[faces[:, 1]]
+        c = verts[faces[:, 2]]
+        fn = torch.cross(b - a, c - a, dim=-1)
+        fn = F.normalize(fn, dim=-1, eps=eps)
+
+        front = side_index[:, 0]
+        back = side_index[:, 1]
+        is_boundary = back < 0
+        d_front = density[front]
+        d_back = torch.where(
+            is_boundary, torch.zeros_like(d_front), density[back.clamp(min=0)]
+        )
+        weight = (-(d_front - d_back).abs()).expm1().neg().detach()
+
+        vn_face = vn[faces]  # [M, 3, 3]
+        cos_per_v = (fn.unsqueeze(1) * vn_face).sum(-1)  # [M, 3]
+        diff_per_v = 1.0 - cos_per_v.pow(2)
+
+        if aggregation == 'min':
+            per_face = diff_per_v.min(dim=-1).values
+        elif aggregation == 'mean':
+            per_face = diff_per_v.mean(dim=-1)
+        elif aggregation == 'max':
+            per_face = diff_per_v.max(dim=-1).values
+        else:
+            raise ValueError(
+                f"Unknown aggregation '{aggregation}'; expected min|mean|max"
+            )
+
+        return (weight * per_face).mean()
+        # total_weight = weight.sum().clamp(min=eps)
+        # return safe_div((weight * per_face).sum(), total_weight)
+
     def sh_up(self):
         self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg+1)
 
@@ -682,6 +804,7 @@ class Model(BaseModel):
     @torch.no_grad()
     def update_triangulation(self, high_precision=False, density_threshold=0.0, alpha_threshold=0.0):
         torch.cuda.empty_cache()
+
         verts = self.vertices
         if high_precision:
             d = Delaunay(verts.detach().cpu().numpy())
@@ -721,7 +844,8 @@ class Model(BaseModel):
         else:
             self.empty_indices = torch.empty((0, 4), dtype=self.indices.dtype, device='cuda')
             # self.mask = torch.ones((self.full_indices.shape[0]), dtype=bool, device='cuda')
-            
+
+        self.compute_adjacency()
         torch.cuda.empty_cache()
 
     def __len__(self):
@@ -766,6 +890,9 @@ class TetOptimizer:
 
                  percent_alpha: float = 0.02,
 
+                 lr_final_multi: float = None,
+                 lr_max_steps: int = None,
+
                  **kwargs):
 
         self.optim = optim.CustomAdam([
@@ -793,75 +920,154 @@ class TetOptimizer:
                                                 lr_delay_steps=0,
                                                 max_steps=freeze_start//3)
 
-        base_net_scheduler = get_expon_lr_func(lr_init=network_lr,
+        # Schedule construction params kept on self so reset_schedules() can rebuild.
+        # `vertices_lr` and `final_vertices_lr` here are PRE-multiplied by vert_lr_multi.
+        self._sched_params = dict(
+            encoding_lr=encoding_lr,
+            network_lr=network_lr,
+            vertices_lr=self.vert_lr_multi*vertices_lr,
+            normal_lr=normal_lr,
+            vertices_lr_delay_multi=vertices_lr_delay_multi,
+            lr_delay=lr_delay,
+            vert_lr_delay=vert_lr_delay,
+            spike_duration=spike_duration,
+            densify_interval=densify_interval,
+            densify_end=densify_end,
+            midpoint=midpoint,
+        )
+        max_steps = lr_max_steps if lr_max_steps is not None else freeze_start
+        if lr_final_multi is not None:
+            finals = dict(
+                final_encoding_lr=encoding_lr * lr_final_multi,
+                final_network_lr=network_lr * lr_final_multi,
+                final_vertices_lr=self.vert_lr_multi*vertices_lr * lr_final_multi,
+                final_normal_lr=normal_lr * lr_final_multi,
+            )
+        else:
+            finals = dict(
+                final_encoding_lr=final_encoding_lr,
+                final_network_lr=final_network_lr,
+                final_vertices_lr=self.vert_lr_multi*final_vertices_lr,
+                final_normal_lr=final_normal_lr,
+            )
+        self.iteration_offset = 0
+        self.iteration = 0
+        self.vertices_lr = self.vert_lr_multi*vertices_lr
+        self.final_vertices_lr = finals["final_vertices_lr"]
+        self.normal_lr = normal_lr
+        self._build_schedulers(max_steps=max_steps, **finals)
+
+    def _build_schedulers(self, *, max_steps,
+                          final_encoding_lr, final_network_lr,
+                          final_vertices_lr, final_normal_lr):
+        """(Re)construct the four LR schedulers from self._sched_params + the passed finals.
+
+        All schedulers are pure functions of `iteration - self.iteration_offset` so that
+        callers can swap base/final/max_steps mid-run (see reset_schedules)."""
+        p = self._sched_params
+
+        base_net_scheduler = get_expon_lr_func(lr_init=p["network_lr"],
                                                 lr_final=final_network_lr,
                                                 lr_delay_mult=1e-8,
-                                                lr_delay_steps=lr_delay,
-                                                max_steps=freeze_start)
-
+                                                lr_delay_steps=p["lr_delay"],
+                                                max_steps=max_steps)
         self.net_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_net_scheduler,
-            midpoint, densify_interval, densify_end,
-            network_lr, network_lr)
-            # network_lr, final_network_lr)
+            p["spike_duration"], max_steps, base_net_scheduler,
+            p["midpoint"], p["densify_interval"], p["densify_end"],
+            p["network_lr"], p["network_lr"])
 
-        base_encoder_scheduler = get_expon_lr_func(lr_init=encoding_lr,
+        base_encoder_scheduler = get_expon_lr_func(lr_init=p["encoding_lr"],
                                                 lr_final=final_encoding_lr,
                                                 lr_delay_mult=1e-8,
-                                                lr_delay_steps=lr_delay,
-                                                max_steps=freeze_start)
-
+                                                lr_delay_steps=p["lr_delay"],
+                                                max_steps=max_steps)
         self.encoder_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_encoder_scheduler,
-            midpoint, densify_interval, densify_end,
-            # encoding_lr, encoding_lr)
-            encoding_lr, encoding_lr)
+            p["spike_duration"], max_steps, base_encoder_scheduler,
+            p["midpoint"], p["densify_interval"], p["densify_end"],
+            p["encoding_lr"], p["encoding_lr"])
 
-        self.vertices_lr = self.vert_lr_multi*vertices_lr
-        self.final_vertices_lr = self.vert_lr_multi*final_vertices_lr
-        base_vertex_scheduler = get_expon_lr_func(lr_init=self.vertices_lr,
-                                                lr_final=self.final_vertices_lr,
-                                                lr_delay_mult=vertices_lr_delay_multi,
-                                                max_steps=freeze_start,
-                                                lr_delay_steps=vert_lr_delay)
-
-        self.vertex_scheduler_args = base_vertex_scheduler
+        base_vertex_scheduler = get_expon_lr_func(lr_init=p["vertices_lr"],
+                                                lr_final=final_vertices_lr,
+                                                lr_delay_mult=p["vertices_lr_delay_multi"],
+                                                max_steps=max_steps,
+                                                lr_delay_steps=p["vert_lr_delay"])
         self.vertex_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_vertex_scheduler,
-            midpoint, densify_interval, densify_end,
-            # self.vertices_lr, self.final_vertices_lr)
-            self.vertices_lr, self.vertices_lr)
+            p["spike_duration"], max_steps, base_vertex_scheduler,
+            p["midpoint"], p["densify_interval"], p["densify_end"],
+            p["vertices_lr"], p["vertices_lr"])
 
-        self.normal_lr = normal_lr
-        base_normal_scheduler = get_expon_lr_func(lr_init=normal_lr,
+        base_normal_scheduler = get_expon_lr_func(lr_init=p["normal_lr"],
                                                   lr_final=final_normal_lr,
                                                   lr_delay_mult=1e-8,
-                                                  lr_delay_steps=lr_delay,
-                                                  max_steps=freeze_start)
+                                                  lr_delay_steps=p["lr_delay"],
+                                                  max_steps=max_steps)
         self.normal_scheduler_args = SpikingLR(
-            spike_duration, freeze_start, base_normal_scheduler,
-            midpoint, densify_interval, densify_end,
-            normal_lr, normal_lr)
-        self.iteration = 0
+            p["spike_duration"], max_steps, base_normal_scheduler,
+            p["midpoint"], p["densify_interval"], p["densify_end"],
+            p["normal_lr"], p["normal_lr"])
+
+    def reset_schedules(self, *, current_iteration, lr_max_steps,
+                        encoding_lr=None, network_lr=None,
+                        vertices_lr=None, normal_lr=None,
+                        lr_final_multi=None,
+                        disable_spikes=True):
+        """Swap in a new LR schedule at `current_iteration`.
+
+        Any of {encoding,network,vertices,normal}_lr that you omit are kept at the
+        current base. `vertices_lr` is the *unscaled* lr (will be multiplied by
+        self.vert_lr_multi internally, matching __init__). `lr_max_steps` is the
+        horizon of the new schedule, measured from `current_iteration`.
+
+        If lr_final_multi is None, the final lrs collapse to the new base lrs (flat
+        schedule). If disable_spikes is True, the densify-window peaks are silenced
+        in the new schedule (typical for a post-warmup refinement phase).
+        """
+        p = self._sched_params
+        if encoding_lr is not None:
+            p["encoding_lr"] = encoding_lr
+        if network_lr is not None:
+            p["network_lr"] = network_lr
+        if vertices_lr is not None:
+            p["vertices_lr"] = self.vert_lr_multi * vertices_lr
+        if normal_lr is not None:
+            p["normal_lr"] = normal_lr
+        if disable_spikes:
+            # peak_start > peak_end past lr_max_steps disables SpikingLR's peak path.
+            p["midpoint"] = lr_max_steps + 1
+            p["densify_end"] = lr_max_steps + 1
+
+        m = lr_final_multi if lr_final_multi is not None else 1.0
+        finals = dict(
+            final_encoding_lr=p["encoding_lr"] * m,
+            final_network_lr=p["network_lr"] * m,
+            final_vertices_lr=p["vertices_lr"] * m,
+            final_normal_lr=p["normal_lr"] * m,
+        )
+        self.iteration_offset = current_iteration
+        self.vertices_lr = p["vertices_lr"]
+        self.final_vertices_lr = finals["final_vertices_lr"]
+        self.normal_lr = p["normal_lr"]
+        self._build_schedulers(max_steps=lr_max_steps, **finals)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         self.iteration = iteration
+        local = iteration - self.iteration_offset
         self.model.alpha = self.alpha_sched(iteration)
         for param_group in self.net_optim.param_groups:
-            lr = self.net_scheduler_args(iteration)
+            lr = self.net_scheduler_args(local)
             param_group['lr'] = lr
         for param_group in self.optim.param_groups:
             if param_group["name"] == "encoding":
-                lr = self.encoder_scheduler_args(iteration)
+                lr = self.encoder_scheduler_args(local)
                 param_group['lr'] = lr
         for param_group in self.vertex_optim.param_groups:
             if param_group["name"] == "interior_vertices":
-                lr = self.vertex_scheduler_args(iteration)
+                lr = self.vertex_scheduler_args(local)
                 self.vertices_lr = lr
                 param_group['lr'] = lr
             elif param_group["name"] == "interior_vertex_normals":
-                param_group['lr'] = self.normal_scheduler_args(iteration)
+                param_group['lr'] = self.normal_scheduler_args(local)
 
     def add_points(self, new_verts: torch.Tensor, clone_indices=None, raw_verts=False):
         if clone_indices is not None:
