@@ -660,8 +660,12 @@ class Model(BaseModel):
         Each tet has 4 faces. Each face normal is oriented outward (away from
         the opposite vertex) and weighted by the tet's density. Shared faces
         get contributions from both adjacent tets — the denser side's normal
-        dominates, so the net normal naturally points away from dense regions.
+        dominates, so the ACCUMULATOR points away from dense regions.
         Interior faces (equal density on both sides) cancel out.
+
+        NOTE the final negation: the RETURNED normals point TOWARD dense
+        regions — the INWARD convention carried by world_surf_norms
+        (measured; see docs/normals_audit.md).
 
         Args:
             density: Optional pre-computed per-tet density [T]. If None,
