@@ -144,6 +144,8 @@ class iNGPDW(nn.Module):
                  trunc_sigma=1,
                  additional_attr=0,
                  use_tcnn=False,
+                 use_triton_hashgrid=False,
+                 use_triton_heads=False,
                  **kwargs):
         super().__init__()
         self.scale_multi = scale_multi
@@ -157,6 +159,13 @@ class iNGPDW(nn.Module):
         self.trunc_sigma = trunc_sigma
         self.additional_attr = additional_attr
         self.sh_dim = sh_dim
+        self.use_triton_heads = use_triton_heads
+        if use_triton_heads:
+            # Bind the compiler-disabled entry once here, NOT inside forward:
+            # an `import` statement inside the torch.compiled forward makes
+            # dynamo trace IMPORT_NAME and re-parse the module (which failed).
+            from utils.triton_heads import fused_heads as _fused_heads
+            self._fused_heads = staticmethod(_fused_heads).__func__
 
         self.config = dict(
             per_level_scale=per_level_scale,
@@ -171,6 +180,22 @@ class iNGPDW(nn.Module):
             self.encoding = tcnn.Encoding(3, self.config)
             print("Using TCNN")
             self.compile = False
+        elif use_triton_hashgrid:
+            # Bitwise-equal Triton port of HashEmbedderOptimized (see
+            # utils/triton_hashgrid.py): same state_dict layout (checkpoints
+            # load unchanged), ~5x faster forward, checkpoint-friendly
+            # recompute backward (unlike tcnn). torch.compile stays on for
+            # the heads; it graph-breaks cleanly around the custom
+            # autograd.Function, and keeping it preserves the _orig_mod
+            # state-dict prefix existing checkpoints carry.
+            from utils.triton_hashgrid import TritonHashEmbedder
+            print("Using Triton iNGP")
+            self.encoding = TritonHashEmbedder(
+                [torch.zeros((3)), torch.ones((3))],
+                self.L, n_features_per_level=self.dim,
+                log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
+                finest_resolution=base_resolution*per_level_scale**self.L)
+            self.compile = True
         else:
             print("Using PyTorch iNGP")
             self.encoding = hashgrid.HashEmbedderOptimized(
@@ -256,10 +281,18 @@ class iNGPDW(nn.Module):
         # sh = self.s_init * h[:, 7:7+self.sh_dim].half()
         # attr = h[:, 7+self.sh_dim:]
 
-        sigma = self.density_net(h)
-        rgb = self.color_net(h)
-        field_samples = self.gradient_net(h)
-        sh  = self.sh_net(h)
+        if self.use_triton_heads:
+            # One fused Triton kernel for all four heads (tf32, activations
+            # kept in SRAM, [T,64] intermediates never materialized). Matches
+            # the eager-tf32 heads within tf32 noise; ~5x on the head forward.
+            sigma, rgb, field_samples, sh = self._fused_heads(
+                h, self.density_net, self.color_net, self.gradient_net,
+                self.sh_net, self.sh_dim)
+        else:
+            sigma = self.density_net(h)
+            rgb = self.color_net(h)
+            field_samples = self.gradient_net(h)
+            sh  = self.sh_net(h)
 
         if self.additional_attr > 0:
             attr = self.network(h)
