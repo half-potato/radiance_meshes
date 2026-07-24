@@ -1,3 +1,4 @@
+import os
 import torch
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.slang.slang_modules import shader_manager
@@ -6,23 +7,70 @@ from icecream import ic
 import time
 from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
 
+
+def _use_cuda_bwd(tcam):
+    """CUDA backward is opt-in (USE_CUDA_BWD env or module flag) and only
+    supports the tuned 4x4 tile (16-thread half-warp) that the warp reduction
+    assumes. Falls back to Slang otherwise so the A/B path always works."""
+    if not (os.environ.get("USE_CUDA_BWD", "0") == "1" or _CUDA_BWD_FLAG[0]):
+        return False
+    return int(tcam["tile_height"]) * int(tcam["tile_width"]) == 16
+
+
+_CUDA_BWD_FLAG = [False]  # in-process override (tests flip this)
+
+
+def _cuda_backward(sorted_tetra_idx, tile_ranges, indices, vertices, vertex_normals,
+                   cell_values, output_img, xyzd_img, distortion_img, n_contributors,
+                   ray_jitter, grad_output_img, grad_xyzd_img, grad_distortion_img,
+                   tcam, render_grid):
+    from delaunay_rasterization.internal.cuda import alphablend_bwd_cuda as _cu
+    vertices_grad = torch.zeros_like(vertices)
+    vertex_normals_grad = torch.zeros_like(vertex_normals)
+    cell_values_grad = torch.zeros_like(cell_values)
+    _cu.alphablend_backward(
+        sorted_tetra_idx.int().contiguous(),
+        tile_ranges.int().contiguous(),
+        indices.int().contiguous(),
+        vertices.contiguous(), vertex_normals.contiguous(), cell_values.contiguous(),
+        output_img.contiguous(), xyzd_img.contiguous(), distortion_img.contiguous(),
+        n_contributors.int().contiguous(), ray_jitter.contiguous(),
+        grad_output_img.contiguous(), grad_xyzd_img.contiguous(), grad_distortion_img.contiguous(),
+        vertices_grad, vertex_normals_grad, cell_values_grad,
+        tcam["world_view_transform"].float().contiguous(),
+        tcam["K"].float().contiguous(),
+        tcam["cam_pos"].float().contiguous(),
+        tcam["distortion_params"].float().contiguous(),
+        int(tcam["camera_type"]), float(tcam["min_t"]),
+        int(render_grid.image_height), int(render_grid.image_width),
+        int(render_grid.grid_width), int(render_grid.grid_height),
+        int(tcam["tile_width"]), int(tcam["tile_height"]),
+    )
+    return vertices_grad, vertex_normals_grad, cell_values_grad
+
 class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
     def forward(ctx,
                 sorted_tetra_idx, tile_ranges,
                 indices, vertices, vertex_normals, cell_values, render_grid,
                 tcam, ray_jitter, aux_dim, device="cuda"
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        distortion_img = torch.zeros((render_grid.image_height, 
-                                  render_grid.image_width, 5), 
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        distortion_img = torch.zeros((render_grid.image_height,
+                                  render_grid.image_width, 5),
                                  device=device)
-        output_img = torch.zeros((render_grid.image_height, 
-                                  render_grid.image_width, 4 + aux_dim), 
+        output_img = torch.zeros((render_grid.image_height,
+                                  render_grid.image_width, 4 + aux_dim),
                                  device=device)
-        xyzd_img = torch.zeros((render_grid.image_height, 
-                                render_grid.image_width, 4), 
+        xyzd_img = torch.zeros((render_grid.image_height,
+                                render_grid.image_width, 4),
                                  device=device)
-        n_contributors = torch.zeros((render_grid.image_height, 
+        # Forward-only median-depth output: depth at which transmittance T
+        # crosses 0.5 along the ray. Written from inside alpha_blend as a
+        # non-Diff TensorView (no gradient flows through it).
+        median_depth_img = torch.zeros((render_grid.image_height,
+                                        render_grid.image_width, 1),
+                                       device=device)
+        n_contributors = torch.zeros((render_grid.image_height,
                                       render_grid.image_width, 1),
                                      dtype=torch.int32, device=device)
 
@@ -47,13 +95,14 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             distortion_img=distortion_img,
             n_contributors=n_contributors,
             tet_alive=tet_alive,
+            median_depth_img=median_depth_img,
             tcam=tcam,
             ray_jitter=ray_jitter,
         )
         splat_kernel_with_args.launchRaw(
-            blockSize=(render_grid.tile_width, 
+            blockSize=(render_grid.tile_width,
                        render_grid.tile_height, 1),
-            gridSize=(render_grid.grid_width, 
+            gridSize=(render_grid.grid_width,
                       render_grid.grid_height, 1)
         )
 
@@ -61,7 +110,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             sorted_tetra_idx, tile_ranges,
             indices, vertices, vertex_normals, cell_values,
             output_img, xyzd_img, distortion_img, n_contributors,
-            ray_jitter
+            ray_jitter, median_depth_img
         ]
         non_tensor_data, tensor_data = split_tensors(tcam)
         ctx.save_for_backward(*tensors, *tensor_data)
@@ -71,16 +120,26 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
         ctx.render_grid = render_grid
 
-        return output_img, xyzd_img, distortion_img, tet_alive
+        return output_img, xyzd_img, distortion_img, tet_alive, median_depth_img
 
     @staticmethod
-    def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img, grad_vert_alive):
+    def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img,
+                 grad_vert_alive, grad_median_depth_img):
         (sorted_tetra_idx, tile_ranges,
          indices, vertices, vertex_normals, cell_values,
          output_img, xyzd_img, distortion_img, n_contributors,
-            ray_jitter) = ctx.saved_tensors[:ctx.len_tensors]
+            ray_jitter, median_depth_img) = ctx.saved_tensors[:ctx.len_tensors]
         tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
+
+        if _use_cuda_bwd(tcam):
+            vertices_grad, vertex_normals_grad, cell_values_grad = _cuda_backward(
+                sorted_tetra_idx, tile_ranges, indices, vertices, vertex_normals,
+                cell_values, output_img, xyzd_img, distortion_img, n_contributors,
+                ray_jitter, grad_output_img, grad_xyzd_img, grad_distortion_img,
+                tcam, render_grid)
+            return (None, None, None, vertices_grad, vertex_normals_grad, cell_values_grad,
+                    None, None, None, None)
 
         vertices_grad = torch.zeros_like(vertices)
         vertex_normals_grad = torch.zeros_like(vertex_normals)
@@ -103,13 +162,14 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             distortion_img=(distortion_img, grad_distortion_img),
             n_contributors=n_contributors,
             tet_alive=tet_alive,
+            median_depth_img=median_depth_img,
             ray_jitter=ray_jitter,
         )
-        
+
         kernel_with_args.launchRaw(
-            blockSize=(render_grid.tile_width, 
+            blockSize=(render_grid.tile_width,
                        render_grid.tile_height, 1),
-            gridSize=(render_grid.grid_width, 
+            gridSize=(render_grid.grid_width,
                       render_grid.grid_height, 1)
         )
 
