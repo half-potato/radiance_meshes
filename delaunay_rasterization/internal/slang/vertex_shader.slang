@@ -25,6 +25,9 @@ void vertex_shader(TensorView<int32_t> indices,
                    TensorCamera tcam,
                    TensorView<int32_t> out_tiles_touched,
                    TensorView<int32_t> out_rect_tile_space,
+                   TensorView<float> out_proj_verts,
+                   TensorView<float> out_extent,
+                   uint cull_enable,
                    DiffTensorView out_vs,
                    DiffTensorView out_circumcenter)
 {
@@ -104,10 +107,49 @@ void vertex_shader(TensorView<int32_t> indices,
     }
 
     out_tiles_touched[g_idx] = n_tiles;
+
+    // Max projected pixel extent of the tet's screen AABB (in PIXELS, not tiles).
+    // minv/maxv come from find_extent (image-space, pre tile division). Consumed
+    // by the host stochastic size-proportional sampler: p_i = min(s_i, 1). Left
+    // at 0 (host pre-zero) for any tet that returned early (non-visible/culled).
+    out_extent[g_idx] = max(maxv.x - minv.x, maxv.y - minv.y);
+
     out_rect_tile_space[uint2(g_idx, 0)] = rect_tile_space.min_x;
     out_rect_tile_space[uint2(g_idx, 1)] = rect_tile_space.min_y;
     out_rect_tile_space[uint2(g_idx, 2)] = rect_tile_space.max_x;
     out_rect_tile_space[uint2(g_idx, 3)] = rect_tile_space.max_y;
+
+    // --- Conservative tile-culling metadata ---
+    // The set of pixels whose (pinhole) camera ray hits a convex tet is exactly
+    // the convex hull of the 4 projected vertices. generate_keys uses these 4
+    // projected pixel positions to skip AABB tiles the hull does not touch.
+    // This is only valid when the projection is a well-defined central
+    // projection: perspective camera, no lens distortion, and ALL four verts
+    // strictly in front of the near plane (so no vertex was clipped in
+    // find_extent). Otherwise we emit a "not cullable" flag and generate_keys
+    // falls back to full-AABB emission. cols 0..7 = (x,y) per vert, col 8 = flag.
+    // Gated on cull_enable so the default (culling-off) path pays nothing here
+    // and stays byte-identical to the pre-culling pipeline (out_proj_verts is
+    // pre-zeroed by the host, so a skipped col-8 flag reads back as 0).
+    if (cull_enable != 0) {
+        float near_eps = max(cam.min_t, 1e-4);
+        bool no_distortion = dot(cam.distortion_params, cam.distortion_params) < 1e-9;
+        bool all_in_front = (camspace_tet.verts[0].z > near_eps) &&
+                            (camspace_tet.verts[1].z > near_eps) &&
+                            (camspace_tet.verts[2].z > near_eps) &&
+                            (camspace_tet.verts[3].z > near_eps);
+        float cull_flag = 0.0;
+        if (cam.camera_type == 0 && no_distortion && all_in_front) {
+            cull_flag = 1.0;
+            [unroll]
+            for (int i = 0; i < 4; ++i) {
+                float3 pv = camspace_to_image(camspace_tet.verts[i], cam);
+                out_proj_verts[uint2(g_idx, 2 * i + 0)] = pv.x;
+                out_proj_verts[uint2(g_idx, 2 * i + 1)] = pv.y;
+            }
+        }
+        out_proj_verts[uint2(g_idx, 8)] = cull_flag;
+    }
 
     out_vs.storeOnce(uint2(g_idx, 2), min(max(sort_depth, FLT_MIN), FLT_MAX));
 

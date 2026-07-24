@@ -9,7 +9,6 @@ from delaunay_rasterization.internal.alphablend_tiled_slang_interp import AlphaB
 from delaunay_rasterization.internal.alphablend_tiled_slang_interval import AlphaBlendTiledRenderInterval
 from delaunay_rasterization.internal.render_grid import RenderGrid
 from delaunay_rasterization.internal.tile_shader_slang import vertex_and_tile_shader
-from utils.eval_sh_py import weigh_degree
 import time
 from icecream import ic
 
@@ -62,7 +61,19 @@ def render_debug(render_tensor, model, camera, density_multi=1, tile_size=4):
 
 def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
            scene_scaling=1, clip_multi=0, ray_jitter=None,
-           use_interval=False, **kwargs):
+           use_interval=False, query=None, vertex_normals=None,
+           stochastic_subpixel=False, stochastic_seed=0, **kwargs):
+    """Rasterize ``camera``.
+
+    ``query``: a :class:`utils.model_query.ModelQuery` built by the caller
+    (the query-once pattern -- one iNGP pass shared by rasterizer, vertex
+    normals, densify criteria, and any other consumer). When ``None`` the
+    query is built here, which also covers legacy callers passing
+    ``cell_values=`` explicitly (their tables are honored unchanged and
+    normals fall back to the model property, bit-identical to the old path).
+    """
+    from utils.model_query import prepare_query
+    from utils.section_prof import section
     device = model.device
     if ray_jitter is None:
         ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
@@ -71,61 +82,50 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         assert(ray_jitter.shape[1] == camera.image_width)
         assert(ray_jitter.shape[2] == 2)
     vertices = model.vertices
-    
-    render_grid = RenderGrid(camera.image_height,
-                             camera.image_width,
-                             tile_height=tile_size,
-                             tile_width=tile_size)
-    tcam = dict(
-        tile_height=tile_size,
-        tile_width=tile_size,
-        grid_height=render_grid.grid_height,
-        grid_width=render_grid.grid_width,
-        min_t=min_t,
-        **camera.to_dict(device)
-    )
-    sorted_tetra_idx, tile_ranges, vs_tetra, circumcenter, mask, _ = vertex_and_tile_shader(
-        model.indices,
-        vertices,
-        tcam,
-        render_grid)
+
+    if query is None:
+        query = prepare_query(camera, model, tile_size=tile_size, min_t=min_t,
+                              cell_values=cell_values,
+                              vertex_normals=vertex_normals,
+                              stochastic_subpixel=stochastic_subpixel,
+                              stochastic_seed=stochastic_seed)
+    render_grid = query.render_grid
+    tcam = query.tcam
+    sorted_tetra_idx = query.sorted_tetra_idx
+    tile_ranges = query.tile_ranges
+    circumcenter = query.circumcenter
+    mask = query.mask
+    cell_values = query.cell_values
+    vertex_normals = query.vertex_normals
     extras = {}
-    sh_reg = 0
-    if cell_values is None:
-        cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
-        if mask.sum() > 0 and model.mask_values:
-            shs, values = model.get_cell_values(camera, mask, circumcenter[mask])
-            cell_values[mask] = values
-        else:
-            shs, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
-        weighting = weigh_degree(shs, [0, 0.1, 0.5, 1])
-        sh_reg = ((weighting * shs)**2).mean()
 
     if use_interval:
-        image_rgb, xyzd_img, distortion_img = AlphaBlendTiledRenderInterval.apply(
-            sorted_tetra_idx,
-            tile_ranges,
-            model.indices,
-            vertices,
-            model.vertex_normals,
-            cell_values,
-            render_grid,
-            tcam,
-            ray_jitter,
-            model.additional_attr)
+        with section('render/alphablend'):
+            image_rgb, xyzd_img, distortion_img, median_depth_img = AlphaBlendTiledRenderInterval.apply(
+                sorted_tetra_idx,
+                tile_ranges,
+                model.indices,
+                vertices,
+                vertex_normals,
+                cell_values,
+                render_grid,
+                tcam,
+                ray_jitter,
+                model.additional_attr)
         tet_alive = torch.zeros((model.indices.shape[0],), dtype=bool, device=device)
     else:
-        image_rgb, xyzd_img, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
-            sorted_tetra_idx,
-            tile_ranges,
-            model.indices,
-            vertices,
-            model.vertex_normals,
-            cell_values,
-            render_grid,
-            tcam,
-            ray_jitter,
-            model.additional_attr)
+        with section('render/alphablend'):
+            image_rgb, xyzd_img, distortion_img, tet_alive, median_depth_img = AlphaBlendTiledRender.apply(
+                sorted_tetra_idx,
+                tile_ranges,
+                model.indices,
+                vertices,
+                vertex_normals,
+                cell_values,
+                render_grid,
+                tcam,
+                ray_jitter,
+                model.additional_attr)
     alpha = image_rgb.permute(2,0,1)[3, ...].exp()
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
@@ -141,7 +141,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         'distortion_loss': distortion_loss.mean(),
         'mask': mask,
         'xyzd': rxyzd_img,
-        'sh_reg': sh_reg,
+        'median_depth': median_depth_img[..., 0].unsqueeze(0),
         'weight_square': image_rgb.permute(2,0,1)[4:5, ...],
         "cell_values": cell_values,
         **extras

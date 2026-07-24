@@ -23,6 +23,8 @@ dependencies = [
     "torchaudio",
     "torchvision",
     "tqdm>=4.67.1",
+    "warp-lang>=1.14.0",
+    "torchoptix>=0.0.1",
     "fused-ssim",
     "termplotlib>=0.3.9",
     "tinycudann",
@@ -30,6 +32,22 @@ dependencies = [
     "tetgen>=0.7.0",
     "marimo>=0.20.2",
     "maturin>=1.12.6",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the project root on sys.path so tests can `from utils...`, `from models...`
+# exactly as the training scripts do.
+pythonpath = ["."]
+# Test files in this repo are named `*_test.py` (absltest convention) rather than
+# the pytest default `test_*.py`, so discover both.
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-ra"
+markers = [
+    "gpu: requires a CUDA device (skipped when torch.cuda is unavailable)",
+    "jax: requires the jax/jaxutil quadrature reference (skipped when unimportable)",
+    "slow: heavier tests (real-geometry parity, large scenes) run opt-in",
 ]
 
 [tool.uv.sources]
