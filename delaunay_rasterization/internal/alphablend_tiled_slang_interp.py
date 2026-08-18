@@ -19,6 +19,17 @@ def _use_cuda_bwd(tcam):
 
 _CUDA_BWD_FLAG = [False]  # in-process override (tests flip this)
 
+# One-shot slot for the per-pixel distortion anchor (H, W, 3): (t_hat, tau,
+# gamma) in ray-t units. Set via set_dist_anchor() immediately before
+# AlphaBlendTiledRender.apply; consumed by the next forward. Kept out of
+# .apply's argument list on purpose: the anchor is non-differentiable, and
+# routing it through autograd would force every caller to change arity.
+_DIST_ANCHOR = [None]
+
+
+def set_dist_anchor(anchor):
+    _DIST_ANCHOR[0] = anchor
+
 
 def _cuda_backward(sorted_tetra_idx, tile_ranges, indices, vertices, vertex_normals,
                    cell_values, output_img, xyzd_img, distortion_img, n_contributors,
@@ -76,6 +87,17 @@ class AlphaBlendTiledRender(torch.autograd.Function):
 
         tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
 
+        dist_anchor = _DIST_ANCHOR[0]
+        _DIST_ANCHOR[0] = None  # one-shot
+        anchor_active = dist_anchor is not None
+        if dist_anchor is None:
+            dist_anchor = torch.zeros((render_grid.image_height,
+                                       render_grid.image_width, 3),
+                                      device=device)
+        assert dist_anchor.shape == (render_grid.image_height,
+                                     render_grid.image_width, 3), dist_anchor.shape
+        dist_anchor = dist_anchor.detach().float().contiguous()
+
         assert(len(ray_jitter.shape) == 3)
         assert(ray_jitter.shape[0] == render_grid.image_height)
         assert(ray_jitter.shape[1] == render_grid.image_width)
@@ -96,6 +118,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             n_contributors=n_contributors,
             tet_alive=tet_alive,
             median_depth_img=median_depth_img,
+            dist_anchor=dist_anchor,
             tcam=tcam,
             ray_jitter=ray_jitter,
         )
@@ -110,13 +133,14 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             sorted_tetra_idx, tile_ranges,
             indices, vertices, vertex_normals, cell_values,
             output_img, xyzd_img, distortion_img, n_contributors,
-            ray_jitter, median_depth_img
+            ray_jitter, median_depth_img, dist_anchor
         ]
         non_tensor_data, tensor_data = split_tensors(tcam)
         ctx.save_for_backward(*tensors, *tensor_data)
         ctx.non_tensor_data = non_tensor_data
         ctx.len_tensors = len(tensors)
         ctx.aux_dim = aux_dim
+        ctx.anchor_active = anchor_active
 
         ctx.render_grid = render_grid
 
@@ -128,11 +152,11 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         (sorted_tetra_idx, tile_ranges,
          indices, vertices, vertex_normals, cell_values,
          output_img, xyzd_img, distortion_img, n_contributors,
-            ray_jitter, median_depth_img) = ctx.saved_tensors[:ctx.len_tensors]
+            ray_jitter, median_depth_img, dist_anchor) = ctx.saved_tensors[:ctx.len_tensors]
         tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
 
-        if _use_cuda_bwd(tcam):
+        if _use_cuda_bwd(tcam) and not ctx.anchor_active:
             vertices_grad, vertex_normals_grad, cell_values_grad = _cuda_backward(
                 sorted_tetra_idx, tile_ranges, indices, vertices, vertex_normals,
                 cell_values, output_img, xyzd_img, distortion_img, n_contributors,
@@ -163,6 +187,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             n_contributors=n_contributors,
             tet_alive=tet_alive,
             median_depth_img=median_depth_img,
+            dist_anchor=dist_anchor,
             ray_jitter=ray_jitter,
         )
 

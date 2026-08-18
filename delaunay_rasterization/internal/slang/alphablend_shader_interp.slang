@@ -61,6 +61,22 @@ float scale_dist(float x) {
     return tukey_power_ladder(160 * x, 0.1);
 }
 
+// Double-hump distance parameterization: the fixed near-camera tukey ladder
+// PLUS a per-pixel sigmoid step centered on an anchor depth (GT or detached
+// predicted surface). Both terms are monotone in t, so the pairwise
+// distortion in this s-space decomposes EXACTLY into ladder-loss +
+// gamma * surface-straddle loss. danchor = (t_hat, tau, gamma) in ray-t
+// units; t_hat <= 0 disables the hump (pure ladder, legacy behavior).
+[Differentiable]
+float scale_dist_anchored(float x, no_diff float3 danchor) {
+    float s = tukey_power_ladder(160 * x, 0.1);
+    if (danchor.x > 0.f) {
+        float z = clamp((x - danchor.x) / max(danchor.y, 1e-6f), -30.f, 30.f);
+        s = s + danchor.z / (1.f + safe_exp(-z));
+    }
+    return s;
+}
+
 
 [Differentiable]
 float self_dist(float a, float b, float density, float T) {
@@ -75,10 +91,11 @@ DistortionState5 update_distortion_state(
     DistortionState5 old_state,
     float T,
     float density,
-    float2 dist)
+    float2 dist,
+    no_diff float3 danchor)
 {
-    float start = scale_dist(dist.x);
-    float end = scale_dist(max(dist.x, dist.y));
+    float start = scale_dist_anchored(dist.x, danchor);
+    float end = scale_dist_anchored(max(dist.x, dist.y), danchor);
 
     float m0 = moment_0_int(start, end, density, T);
     float m1 = moment_1_int(start, end, density, T);
@@ -97,10 +114,11 @@ DistortionState5 undo_distortion_state(
     DistortionState5 new_state,
     float T,
     float density,
-    float2 dist)
+    float2 dist,
+    no_diff float3 danchor)
 {
-    float start = scale_dist(dist.x);
-    float end = scale_dist(max(dist.x, dist.y));
+    float start = scale_dist_anchored(dist.x, danchor);
+    float end = scale_dist_anchored(max(dist.x, dist.y), danchor);
 
     float m0 = moment_0_int(start, end, density, T);
     float m1 = moment_1_int(start, end, density, T);
@@ -166,12 +184,12 @@ AlphaOut get_empty_alpha_out() {
 }
 
 [Differentiable]
-AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
+AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl, no_diff float3 danchor) {
     float T = safe_exp(prev.rgba.a);
 
     AlphaOut res;
     res.rgba = update_pixel_state(prev.rgba, ctrl.rgba);
-    res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist);
+    res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist, danchor);
 
     res.xyzd = update_xyzd_state(prev.xyzd, ctrl.xyzd, T);
 
@@ -184,12 +202,12 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
     return res;
 }
 
-AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
+AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl, no_diff float3 danchor) {
     float4 pix_state = undo_pixel_state(curr.rgba, ctrl.rgba);
     float T = safe_exp(pix_state.a);
     AlphaOut res;
     res.rgba = pix_state;
-    res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist);
+    res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist, danchor);
     res.xyzd = undo_xyzd_state(curr.xyzd, ctrl.xyzd, T);
 
     // 3. Undo Aux
@@ -212,6 +230,8 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      DiffTensorView final_xyzd_state,
                      TensorView<int32_t> n_contributors,
                      TensorView<bool> tet_alive,
+                     TensorView<float> median_depth_img,
+                     TensorView<float> dist_anchor,
                      no_diff Camera cam,
                      no_diff float ray_jitter_x,
                      no_diff float ray_jitter_y,
@@ -234,8 +254,22 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     bool print = false;
 
     Ray ray = get_ray(cam, center_pix_coord);
+    float3 danchor = float3(0.f, 1.f, 0.f);
+    if (is_inside) {
+        danchor = float3(
+            no_diff dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+            no_diff dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+            no_diff dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)]);
+    }
     int32_t local_n_contrib = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
+    // Per-pixel median-depth tracking: T_prev = transmittance before this tet.
+    // When the running T crosses 0.5 for the first time, store the depth at
+    // which the crossing happens (linearly between enter and exit). This is
+    // a forward-only diagnostic written to a non-Diff TensorView, so it does
+    // not contribute to any upstream gradient.
+    float T_prev_val = 1.0f;
+    bool median_set = false;
     for (int i = 0; i < shared_memory_rounds; i++)
     {
         AllMemoryBarrierWithGroupSync();
@@ -261,7 +295,31 @@ AlphaOut alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
 
-                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
+                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, danchor);
+                    // Median-depth crossing: T_new = exp(new_ao.rgba.a).
+                    // detach() strips autodiff from the diff state; the
+                    // write target median_depth_img is non-Diff so this
+                    // whole block is a forward-only side effect.
+                    if (!median_set && is_inside) {
+                        float T_new_val = safe_exp(detach(new_ao.rgba.a));
+                        if (T_prev_val > 0.5f && T_new_val <= 0.5f) {
+                            float t_exit = detach(tetra_ctrl.dist.y);
+                            float t_enter = detach(tetra_ctrl.dist.x);
+                            float dt = t_exit - t_enter;
+                            float density = detach(g.density);
+                            // Solve T_prev * exp(-density * (t - t_enter)) = 0.5 within the tet.
+                            // t_med = t_enter + ln(2 T_prev) / density, clamped to [t_enter, t_enter+dt].
+                            float t_med = t_enter;
+                            if (density > 1e-6f) {
+                                float frac = log(max(2.0f * T_prev_val, 1e-6f)) / density;
+                                t_med = t_enter + clamp(frac, 0.0f, dt);
+                            }
+                            float depth_med = t_med / max(ray.ortho, 1e-6f);
+                            median_depth_img[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), uint32_t(0))] = depth_med;
+                            median_set = true;
+                        }
+                        T_prev_val = T_new_val;
+                    }
                     ao = new_ao;
                     if (new_ao.rgba.a < -5.5) {
                         thread_active = false;
@@ -289,6 +347,8 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      DiffTensorView final_xyzd_state,
                      TensorView<int32_t> n_contributors,
                      TensorView<bool> tet_alive,
+                     TensorView<float> median_depth_img,
+                     TensorView<float> dist_anchor,
                      no_diff Camera cam,
                      no_diff float ray_jitter_x,
                      no_diff float ray_jitter_y,
@@ -332,6 +392,13 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     }
 
     Ray ray = get_ray(cam, center_pix_coord);
+    float3 danchor = float3(0.f, 1.f, 0.f);
+    if (is_inside) {
+        danchor = float3(
+            dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+            dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+            dist_anchor[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)]);
+    }
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
     for (int i = 0; i < rounds; i++)
     {
@@ -363,12 +430,12 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
 
-                    ao = undo_alpha_out(ao, tetra_ctrl);
+                    ao = undo_alpha_out(ao, tetra_ctrl, danchor);
 
                     // Autodiff through update_alpha_out
                     DifferentialPair<AlphaOut> dp_ao = diffPair(ao);
                     DifferentialPair<CtrlPt> dp_ctrl = diffPair(tetra_ctrl);
-                    bwd_diff(update_alpha_out)(dp_ao, dp_ctrl, d_ao);
+                    bwd_diff(update_alpha_out)(dp_ao, dp_ctrl, danchor, d_ao);
                     d_ao = dp_ao.getDifferential();
 
                     DifferentialPair<SplatTetrahedra_interp> dp_g = diffPair(g);
@@ -399,6 +466,8 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  DiffTensorView distortion_img,
                  TensorView<int32_t> n_contributors,
                  TensorView<bool> tet_alive,
+                 TensorView<float> median_depth_img,
+                 TensorView<float> dist_anchor,
                  TensorView<float> ray_jitter,
                  TensorCamera tcam)
 {
@@ -434,6 +503,8 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
         xyzd_img,
         n_contributors,
         tet_alive,
+        median_depth_img,
+        dist_anchor,
         cam,
         rjx,
         rjy,
@@ -601,7 +672,7 @@ void kern_calc_tet_err(TensorView<int32_t> sorted_gauss_idx,
                 CtrlPt tetra_ctrl;
 
                 if (evaluate_tetra_interp(g, ray, cam.min_t, vn, tetra_ctrl) && tetra_ctrl.rgba.a > 0) {
-                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl);
+                    AlphaOut new_ao = update_alpha_out(ao, tetra_ctrl, float3(0.f, 1.f, 0.f));
                     float trans = exp(ao.rgba.a);
                     float T = trans * tetra_ctrl.rgba.a;
                     float mismatch = pixel_err;
