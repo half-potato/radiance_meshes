@@ -79,12 +79,24 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
                                     render_grid.image_width, 1),
                                     dtype=torch.int32, device=device)
     tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=device)
+    # The splat_tiled kernel requires a median_depth_img output buffer. Error
+    # stats only read output_img, so this is a throwaway (like xyzd/distortion).
+    median_depth_img = torch.zeros((render_grid.image_height,
+                                    render_grid.image_width, 1), device=device)
     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
 
     torch.cuda.synchronize()
     shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0)
     st = time.time()
-    vertex_normals = model.vertex_normals
+    # Query-once: reuse the density already queried above instead of the
+    # model.vertex_normals property (which runs a second FULL-table iNGP
+    # pass). Saves num_samples full-table forwards per densify round.
+    if hasattr(model, 'compute_geometric_vertex_normals'):
+        vertex_normals = model.compute_geometric_vertex_normals(
+            density=cell_values[:, 0]) + torch.cat([
+                model.interior_vertex_normals, model.ext_vertex_normals])
+    else:
+        vertex_normals = model.vertex_normals
     args = dict(
         sorted_gauss_idx=sorted_tetra_idx,
         tile_ranges=tile_ranges,
@@ -97,11 +109,18 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
         tcam=tcam,
     )
 
+    # Null distortion anchor (kernel signature gained dist_anchor for the
+    # anchored double-hump distortion; the error-votes pass never anchors).
+    _null_anchor = torch.zeros((render_grid.image_height,
+                                render_grid.image_width, 3),
+                               device=vertices.device)
     splat_kernel_with_args = shader.splat_tiled(
         **args,
         distortion_img=distortion_img,
         xyzd_img=xyzd_img,
         tet_alive=tet_alive,
+        median_depth_img=median_depth_img,
+        dist_anchor=_null_anchor,
         ray_jitter=ray_jitter,
     )
     splat_kernel_with_args.launchRaw(
