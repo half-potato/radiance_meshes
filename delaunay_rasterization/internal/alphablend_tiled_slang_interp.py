@@ -64,7 +64,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
     def forward(ctx,
                 sorted_tetra_idx, tile_ranges,
                 indices, vertices, vertex_normals, cell_values, render_grid,
-                tcam, ray_jitter, aux_dim, device="cuda"
+                tcam, ray_jitter, aux_dim, device="cuda", shared_ray_flash=False
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         distortion_img = torch.zeros((render_grid.image_height,
                                   render_grid.image_width, 5),
@@ -103,7 +103,16 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         assert(ray_jitter.shape[1] == render_grid.image_width)
         assert(ray_jitter.shape[2] == 2)
 
-        alpha_blend_tile_shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, aux_dim)
+        # Immutable selectors belong to this autograd invocation, including backward.
+        if shared_ray_flash:
+            selectors = shared_ray_flash if isinstance(shared_ray_flash, tuple) else (0, 0)
+            alpha_blend_tile_shader = shader_manager.get_shared_ray_flash(
+                render_grid.tile_height, render_grid.tile_width, aux_dim, *selectors)
+        else:
+            alpha_blend_tile_shader = shader_manager.get_interp(
+                render_grid.tile_height, render_grid.tile_width, aux_dim)
+        ctx.shader = alpha_blend_tile_shader
+        ctx.shared_ray_flash = shared_ray_flash
         st = time.time()
         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
             sorted_gauss_idx=sorted_tetra_idx,
@@ -156,20 +165,20 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         tcam = recombine_tensors(ctx.non_tensor_data, ctx.saved_tensors[ctx.len_tensors:])
         render_grid = ctx.render_grid
 
-        if _use_cuda_bwd(tcam) and not ctx.anchor_active:
+        if _use_cuda_bwd(tcam) and not ctx.anchor_active and not ctx.shared_ray_flash:
             vertices_grad, vertex_normals_grad, cell_values_grad = _cuda_backward(
                 sorted_tetra_idx, tile_ranges, indices, vertices, vertex_normals,
                 cell_values, output_img, xyzd_img, distortion_img, n_contributors,
                 ray_jitter, grad_output_img, grad_xyzd_img, grad_distortion_img,
                 tcam, render_grid)
             return (None, None, None, vertices_grad, vertex_normals_grad, cell_values_grad,
-                    None, None, None, None)
+                    None, None, None, None, None, None)[:len(ctx.needs_input_grad)]
 
         vertices_grad = torch.zeros_like(vertices)
         vertex_normals_grad = torch.zeros_like(vertex_normals)
         cell_values_grad = torch.zeros_like(cell_values)
 
-        alpha_blend_tile_shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, ctx.aux_dim)
+        alpha_blend_tile_shader = ctx.shader
 
         tet_alive = torch.zeros((indices.shape[0]), dtype=bool, device=vertices.device)
         st = time.time()
@@ -199,4 +208,4 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         )
 
         return (None, None, None, vertices_grad, vertex_normals_grad, cell_values_grad,
-                None, None, None, None)
+                None, None, None, None, None, None)[:len(ctx.needs_input_grad)]
