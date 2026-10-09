@@ -98,11 +98,12 @@ CtrlPt evaluate_tetra(in SplatTetrahedra g,
     float2 dist;
     int exit_face;
     float3 enter_norm, exit_norm;
-    
+    float seg_len;
+
     bool hit = ray_tetrahedron_intersect_fused(
-        ray_o, ray_d, float4x3(g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3]), dist, enter_norm, exit_norm);
-    
-    float dt = max(abs(dist.y - dist.x), 0.0f);
+        ray_o, ray_d, float4x3(g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3]), dist, seg_len, enter_norm, exit_norm);
+
+    float dt = max(seg_len, 0.0f);
 
     if (!hit) {
         return { FeatureVector.zero(), 0.f, dist, g.density };
@@ -318,9 +319,13 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 SplatTetrahedra g = collected_splats[j];
 
                 CtrlPt tetra_ctrl = evaluate_tetra(g, ray.o, ray.d);
-                if (tetra_ctrl.alpha < 1/255.f) continue;
 
+                // The forward pass applied update_alpha_out for EVERY splat,
+                // so the undo must run unconditionally to keep the replayed
+                // state in sync. Only the gradient work below may be skipped
+                // for negligible contributions (near-identity update).
                 ao = undo_alpha_out(ao, tetra_ctrl);
+                if (tetra_ctrl.alpha < 1/255.f) continue;
 
                 DifferentialPair<SplatTetrahedra> dp_g = diffPair(g);
                 DifferentialPair<CtrlPt> dp_tetra_ctrl = diffPair(tetra_ctrl);

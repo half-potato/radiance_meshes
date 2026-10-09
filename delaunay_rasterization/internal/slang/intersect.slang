@@ -395,6 +395,7 @@ bool ray_tetrahedron_intersect_fused(
     float3 orig, float3 dir,
     float4x3 verts,
     inout float2 t,
+    out float seg_len,
     out float3 enter_norm,
     out float3 exit_norm)
 {
@@ -427,7 +428,21 @@ bool ray_tetrahedron_intersect_fused(
     float3 v0 = verts[0];
     float3 v1 = verts[1];
     float3 v2 = verts[2];
-    float3 v3 = verts[3];    
+    float3 v3 = verts[3];
+
+#ifdef RECENTER_INTERSECT
+    // Recenter the ray origin near the tet before the plane math. The per-plane
+    // t's become O(tet size) instead of O(camera distance), so the segment
+    // length t_exit - t_enter no longer loses ~eps*distance to cancellation
+    // (which zeroes alpha and gradients on thin/grazing crossings).
+    // detach is gradient-exact: d(t_local)/d(t_shift) = -1 cancels the
+    // +t_shift added back, so no derivative path is lost.
+    const float t_shift = detach(dot(0.25f * (v0 + v1 + v2 + v3) - orig, dir));
+    orig = orig + t_shift * dir;
+#else
+    const float t_shift = 0.f;
+#endif
+
     // const float3 n0 = cross(
     //     verts[kTetTriangles[0][2]] - verts[kTetTriangles[0][0]],
     //     verts[kTetTriangles[0][1]] - verts[kTetTriangles[0][0]]);
@@ -481,6 +496,7 @@ bool ray_tetrahedron_intersect_fused(
     float t_enter = -1e30f;
     float t_exit  = 1e30f;
     float eps     = 1e-10f;
+    seg_len = 0.f;
     enter_norm = {0.f, 0.f, 0.f};
     exit_norm = {0.f, 0.f, 0.f};
 
@@ -615,11 +631,15 @@ bool ray_tetrahedron_intersect_fused(
     // 7. Final intersection range
     //    Return the clipped segment length if it's in front of the origin
     // --------------------------------------------------------------------
-    if (t_exit <= 0.0f) {
+    if (t_exit + t_shift <= 0.0f) {
         return false;
     }
-    t_enter = max(t_enter, 0.f);
-    t = { t_enter, t_exit };
+    t_enter = max(t_enter, 0.f - t_shift);
+    // Segment length from the (recentered) plane t's, BEFORE adding the shift
+    // back: adding t_shift and differencing at the caller would re-lose the
+    // low-order bits this exists to keep.
+    seg_len = max(t_exit - t_enter, 0.f);
+    t = { t_enter + t_shift, t_exit + t_shift };
     return true;
 }
 

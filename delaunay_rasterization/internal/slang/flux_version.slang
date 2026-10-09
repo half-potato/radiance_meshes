@@ -130,11 +130,12 @@ inline CtrlPt integrate_tetra_segment(
     in Ray ray,
     in float enter,
     in float exit,
+    in float seg_len,
     in float3 enter_norm,
     in float3 exit_norm
 )
 {
-    float dt = max(exit - enter, 0.0f);
+    float dt = max(seg_len, 0.0f);
     
     // 1. Geometry Prep
     float3 v0 = g.tet.verts[0];
@@ -216,8 +217,9 @@ inline bool evaluate_tetra_interp(
     float4x3 verts = float4x3(g.tet.verts[0], g.tet.verts[1], g.tet.verts[2], g.tet.verts[3]);
 
     float3 enter_norm, exit_norm;
+    float seg_len;
     bool hit = ray_tetrahedron_intersect_fused(
-        ray.o, ray.d, verts, dist, enter_norm, exit_norm);
+        ray.o, ray.d, verts, dist, seg_len, enter_norm, exit_norm);
 
     float enter = dist.x;
     float exit = max(dist.y, enter);
@@ -226,7 +228,7 @@ inline bool evaluate_tetra_interp(
         ctrl_pt = { (float4)(0.f), {0.f, 0.f}, 0.f };
         return false;
     } else {
-        ctrl_pt = integrate_tetra_segment(g, ray, enter, exit, enter_norm, exit_norm);
+        ctrl_pt = integrate_tetra_segment(g, ray, enter, exit, seg_len, enter_norm, exit_norm);
         return true;
     }
 }
