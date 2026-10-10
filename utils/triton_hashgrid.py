@@ -75,6 +75,12 @@ class TritonHashEmbedder(HashEmbedderOptimized):
     @torch.compiler.disable
     def forward(self, x):
         meta = self._meta(x.device)
+        # The Triton kernel requires float32; the PyTorch HashEmbedderOptimized
+        # this replaces was dtype-tolerant, and some callers (e.g. the exact
+        # shadow path's get_cell_values) pass float64 query points. Cast so the
+        # "always Triton" default is a drop-in replacement.
+        if x.dtype != torch.float32:
+            x = x.float()
         return _TritonHashEncode.apply(
             x, meta, *[emb.weight for emb in self.embeddings])
 

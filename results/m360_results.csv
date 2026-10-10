@@ -1,0 +1,10 @@
+dataset_path,error,gpu_id,image_folder,n_interior_vertices,n_tets,n_vertices,output_folder,psnr,test_LPIPS,test_PSNR,test_SSIM
+/optane/nerf_datasets/360/stump,,2,images_4,292837,1268778,292837,output/stump_ifimages_4,25.52324039134674,0.4172252416610718,24.986106872558594,0.6665095090866089
+/optane/nerf_datasets/360/garden,,1,images_4,403613,2157983,403613,output/garden_ifimages_4,25.6447193522706,0.28892087936401367,25.615530014038086,0.7673800587654114
+/optane/nerf_datasets/360/treehill,,3,images_4,952941,3856208,952941,output/treehill_ifimages_4,22.562108053745856,0.4951208829879761,22.521148681640625,0.5789509415626526
+/optane/nerf_datasets/360/bicycle,Process failed and no JSON output file found,0,images_4,,,,output/bicycle_ifimages_4,,,,
+/optane/nerf_datasets/360/counter,Process failed and no JSON output file found,3,images_2,,,,output/counter_ifimages_2,,,,
+/optane/nerf_datasets/360/room,Process failed and no JSON output file found,1,images_2,,,,output/room_ifimages_2,,,,
+/optane/nerf_datasets/360/flowers,Process failed and no JSON output file found,2,images_4,,,,output/flowers_ifimages_4,,,,
+/optane/nerf_datasets/360/kitchen,Process failed and no JSON output file found,0,images_2,,,,output/kitchen_ifimages_2,,,,
+/optane/nerf_datasets/360/bonsai,Process failed and no JSON output file found,3,images_2,,,,output/bonsai_ifimages_2,,,,

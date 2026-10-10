@@ -3,7 +3,8 @@ from absl.testing import parameterized
 import torch
 from pyquaternion import Quaternion
 import numpy as np
-from utils.compare_quad import test_tetrahedra_rendering
+# Alias so pytest doesn't collect the imported helper as a test function.
+from utils.compare_quad import test_tetrahedra_rendering as run_tetrahedra_rendering
 from utils.test_util import compare_dict_values, bcolors, check_tile_indices
 import random
 import math
@@ -13,6 +14,7 @@ from utils.topo_utils import calculate_circumcenters_torch
 torch.set_printoptions(precision=32)
 
 key_pairs = [
+    ('rt_image', 'jax_image', 'RT Image', 1e-1, 1e-1),
     ('torch_image', 'jax_image', 'Image', 1e-1, 1e-1),
     ('torch_dist_loss', 'jax_dist_loss', 'Distortion Loss', 1e-2, 1e-2),
     # vertex grad is not checked because it is 0 when using quadrature
@@ -53,9 +55,9 @@ class TetrahedraRenderingTest(parameterized.TestCase):
         tet_density = torch.tensor([[10.0]]).cuda()
 
 
-        results1 = test_tetrahedra_rendering(vertices, self.indices, raw_cell_values, tet_density, viewmat, 
+        results1 = run_tetrahedra_rendering(vertices, self.indices, raw_cell_values, tet_density, viewmat, 
                                              height=self.height, width=self.width, tile_size=tile_size, n_samples=10000)
-        results2 = test_tetrahedra_rendering(vertices, self.indices, raw_cell_values, tet_density, viewmat, 
+        results2 = run_tetrahedra_rendering(vertices, self.indices, raw_cell_values, tet_density, viewmat, 
                                              height=self.height, width=self.width, tile_size=tile_size, n_samples=5000)
         compare_dict_values(results1, results2, key_pairs, vertices, viewmat)
 
@@ -126,7 +128,7 @@ class TetrahedraRenderingTest(parameterized.TestCase):
     #         viewmat = torch.linalg.inv(viewmat)
     #         rgbs = torch.ones(1, 4).cuda()
     #         rgbs[:, 3] = 10
-    #         results = test_tetrahedra_rendering(vertices, self.indices, rgbs, viewmat, 
+    #         results = run_tetrahedra_rendering(vertices, self.indices, rgbs, viewmat, 
     #                                         height=self.height, width=self.width, tile_size=tile_size, n_samples=10000)
     #         im = results['torch_image']
     #         rt = results['rect_tile_space'][0]

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -71,7 +72,7 @@ class FrozenTetModel(BaseModel):
         self.density   = nn.Parameter(density, requires_grad=True)    # (T, 1)
         self.gradient  = nn.Parameter(gradient, requires_grad=True)   # (T, 3, 3)
         self.rgb       = nn.Parameter(rgb, requires_grad=True)        # (T, 3)
-        self.sh        = nn.Parameter(sh.half(), requires_grad=True)         # (T, SH, 3)
+        self.sh        = nn.Parameter(sh.float(), requires_grad=True)         # (T, SH, 3)
 
         # misc --------------------------------------------------------------------
         self.max_sh_deg      = max_sh_deg
@@ -383,21 +384,15 @@ class FrozenTetOptimizer:
         self.zero_grad()
 
     def update_learning_rate(self, iteration):
-        # ''' Learning rate scheduling per step '''
-        # self.iteration = iteration
-        # for param_group in self.optim.param_groups:
-        #     lr = self.scheduler(iteration)
-        #     param_group['lr'] = lr
-        #
-        # for param_group in self.sh_optim.param_groups:
-        #     lr = self.scheduler(iteration)
-        #     param_group['lr'] = lr
-        # for param_group in self.vertex_optim.param_groups:
-        #     if param_group["name"] == "interior_vertices":
-        #         lr = self.vertex_scheduler_args(iteration)
-        #         self.vertex_lr = lr
-        #         param_group['lr'] = lr
-        pass
+        # Continue the pre-freeze vertex LR schedule across the freeze. The
+        # previous behavior (restart at vertices_lr and hold it constant, with
+        # per-iteration steps and no Delaunay repair) decayed the model
+        # ~2-3 dB right after freeze_start.
+        for param_group in self.vertex_optim.param_groups:
+            if param_group["name"] == "interior_vertices":
+                lr = self.vertex_scheduler_args(iteration)
+                self.vertex_lr = lr
+                param_group['lr'] = lr
 
     # ------------------------------------------------------------------
     # regularisers ------------------------------------------------------

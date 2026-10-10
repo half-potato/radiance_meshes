@@ -39,6 +39,23 @@ python convert3.py -s <source_path> --fisheye --video input.insv --insta360
 python evaluate.py -o <output_path>
 ```
 
+### Tests
+
+Run under pytest (config in `pyproject.toml`, fixtures in `tests/conftest.py`). Tests
+needing a CUDA device or the JAX quadrature reference auto-skip when those are missing,
+so collection never errors off-rig. Note the suite uses the `*_test.py` (absltest) naming
+in addition to pytest's default `test_*.py`.
+
+```bash
+uv run pytest tests/ -v                              # whole suite
+uv run pytest tests/freeze_gradient_test.py -v -s    # gradient-after-freeze diagnostics
+uv run pytest tests/single_tet_test.py -v            # rasterizer-vs-JAX/raytracer parity
+uv run pytest tests/interval_parity_test.py -v -s    # interval-vs-interp renderer parity + grads
+```
+
+If a `.slang` shader was edited and a test hangs or fails to compile, clear the stale
+cache (see Troubleshooting below).
+
 ## Architecture
 
 ### Pipeline: Data → Delaunay Mesh → iNGP → Tiled Rasterization

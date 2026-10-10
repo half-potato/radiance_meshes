@@ -63,7 +63,7 @@ run_update(in SplineState old_dual_state, in ControlPoint old_ctrl_pt, in Contro
         model.dL_dfeatures.InterlockedAdd(uint2(prim_ind, 2u), deriv_state.d.base_color.z, temp);
         model.dL_dfeatures.InterlockedAdd(uint2(prim_ind, 3u), deriv_state.d.grd.x, temp);
         model.dL_dfeatures.InterlockedAdd(uint2(prim_ind, 4u), deriv_state.d.grd.y, temp);
-        model.dL_dfeatures.InterlockedAdd(uint2(prim_ind, 3u), deriv_state.d.grd.z, temp);
+        model.dL_dfeatures.InterlockedAdd(uint2(prim_ind, 5u), deriv_state.d.grd.z, temp);
         model.dL_ddensities.InterlockedAdd(prim_ind, deriv_state.d.density, temp);
 
         density = model.densities[prim_ind];

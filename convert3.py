@@ -556,7 +556,7 @@ if not args.skip_matching:
             f"--image_path \"{input_dir}\" "
             f"--ImageReader.single_camera 1 "
             f"--ImageReader.camera_model {camera_model} "
-            f"--FeatureExtraction.use_gpu {use_gpu}",
+            f"--SiftExtraction.use_gpu {use_gpu}",
             "Database creation + image registration")
 
         # 2. Replace SIFT keypoints with hloc keypoints via sqlite3
@@ -612,7 +612,7 @@ if not args.skip_matching:
             f"--database_path \"{hloc_db_path}\" "
             f"--match_list_path \"{raw_matches_path}\" "
             f"--match_type raw "
-            f"--FeatureMatching.use_gpu {use_gpu}",
+            f"--SiftMatching.use_gpu {use_gpu}",
             "Geometric verification")
 
         if args.use_glomap:
@@ -633,7 +633,7 @@ if not args.skip_matching:
             f"--image_path \"{input_dir}\" "
             f"--ImageReader.single_camera 1 "
             f"--ImageReader.camera_model {camera_model} "
-            f"--FeatureExtraction.use_gpu {use_gpu}"
+            f"--SiftExtraction.use_gpu {use_gpu}"
             + (" --SiftExtraction.estimate_affine_shape 1"
                " --SiftExtraction.domain_size_pooling 1"
                if args.fisheye else ""),
@@ -644,7 +644,7 @@ if not args.skip_matching:
         run(
             f"{colmap_command} exhaustive_matcher "
             f"--database_path \"{db_path}\" "
-            f"--FeatureMatching.use_gpu {use_gpu}",
+            f"--SiftMatching.use_gpu {use_gpu}",
             "SIFT feature matching"
         )
 

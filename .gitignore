@@ -62,3 +62,6 @@ output/*
 nv_profiles/*
 *.pkl
 *.ply
+
+# Local shader cache directories and symlinks
+.slangtorch_cache

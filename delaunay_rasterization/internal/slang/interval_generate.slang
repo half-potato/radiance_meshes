@@ -1,12 +1,18 @@
 // Interval generation compute prepass.
 // 1 thread per visible tet: projects 4 vertices to pixel space,
 // classifies the silhouette, and writes fan vertex data.
+//
+// Each fan vertex carries the depth interval (z_front, z_back) plus the
+// interpolated normal and color at the front/back surface points, so the
+// fragment shader can reproduce the interp renderer's spatially-varying
+// color c(p) = dot(grd, p - v0) + base_color without ray-tet intersection.
 
 import utils;
 import safe_math;
 import camera;
 import intersect;
 import interp_version;
+import interval_version;
 
 [Differentiable]
 float3[4] load_vert_normals(no_diff uint4 vtet, DiffTensorView vertex_normals) {
@@ -106,18 +112,6 @@ SilhouetteClassification classify_silhouette(float2 pix[4]) {
             result.sil_indices[1] = f.y;
             result.sil_indices[2] = f.z;
             result.sil_indices[3] = 0; // unused
-
-            // Order silhouette vertices CCW around center
-            // Check winding: if cross product is negative, swap to make CCW
-            float2 e0 = pix[result.sil_indices[0]] - result.center_pixel;
-            float2 e1 = pix[result.sil_indices[1]] - result.center_pixel;
-            float cross_val = e0.x * e1.y - e0.y * e1.x;
-            if (cross_val < 0) {
-                // Swap to fix winding
-                uint temp = result.sil_indices[1];
-                result.sil_indices[1] = result.sil_indices[2];
-                result.sil_indices[2] = temp;
-            }
             return result;
         }
     }
@@ -134,24 +128,13 @@ SilhouetteClassification classify_silhouette(float2 pix[4]) {
             result.crossing_point = lerp(pix[e0.x], pix[e0.y], t);
             result.center_pixel = result.crossing_point;
 
-            // Silhouette: 4 vertices arranged around the crossing
-            // Order: e0.x, e1.x, e0.y, e1.y (forming a quad around the crossing)
+            // Silhouette: 4 vertices arranged around the crossing,
+            // alternating between the two crossing edges so consecutive
+            // fan vertices are adjacent around the quad.
             result.sil_indices[0] = e0.x;
             result.sil_indices[1] = e1.x;
             result.sil_indices[2] = e0.y;
             result.sil_indices[3] = e1.y;
-
-            // Ensure CCW winding by checking cross product of first two edges
-            float2 ea = pix[result.sil_indices[0]] - result.center_pixel;
-            float2 eb = pix[result.sil_indices[1]] - result.center_pixel;
-            float cross_val = ea.x * eb.y - ea.y * eb.x;
-            if (cross_val < 0) {
-                // Swap sil_indices[1] and sil_indices[3]
-                uint temp = result.sil_indices[1];
-                result.sil_indices[1] = result.sil_indices[3];
-                result.sil_indices[3] = temp;
-            }
-
             return result;
         }
     }
@@ -160,32 +143,31 @@ SilhouetteClassification classify_silhouette(float2 pix[4]) {
     return result;
 }
 
-// Compute barycentric coordinates of a point in a tet (world space)
-// Returns float4 bary where p = bary[0]*v0 + bary[1]*v1 + bary[2]*v2 + bary[3]*v3
+// Store one fan vertex (16 floats — see IntervalVertex layout).
 [Differentiable]
-float4 tet_barycentric(float3 p, float3 v0, float3 v1, float3 v2, float3 v3) {
-    float3 e1 = v1 - v0;
-    float3 e2 = v2 - v0;
-    float3 e3 = v3 - v0;
-    float3 pv = p - v0;
-
-    float3 c23 = cross(e2, e3);
-    float3 c31 = cross(e3, e1);
-    float3 c12 = cross(e1, e2);
-    float inv_det = safe_div(1.0f, dot(e1, c23));
-
-    float b1 = dot(pv, c23) * inv_det;
-    float b2 = dot(pv, c31) * inv_det;
-    float b3 = dot(pv, c12) * inv_det;
-    float b0 = 1.0f - b1 - b2 - b3;
-
-    return float4(b0, b1, b2, b3);
-}
-
-// Compute interpolated vertex normal at a point inside the tet
-[Differentiable]
-float3 interp_normal(float4 bary, float3[4] vn) {
-    return bary[0] * vn[0] + bary[1] * vn[1] + bary[2] * vn[2] + bary[3] * vn[3];
+void store_fan_vertex(
+    DiffTensorView interval_verts,
+    no_diff uint tet_idx, no_diff uint vert_idx,
+    float2 pixel_xy, float z_front, float z_back,
+    float3 n_front, float3 n_back,
+    float3 c_front, float3 c_back)
+{
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 0), pixel_xy.x);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 1), pixel_xy.y);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 2), z_front);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 3), z_back);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 4), n_front.x);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 5), n_front.y);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 6), n_front.z);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 7), n_back.x);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 8), n_back.y);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 9), n_back.z);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 10), c_front.x);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 11), c_front.y);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 12), c_front.z);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 13), c_back.x);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 14), c_back.y);
+    interval_verts.storeOnce(uint3(tet_idx, vert_idx, 15), c_back.z);
 }
 
 [AutoPyBindCUDA]
@@ -196,12 +178,11 @@ void interval_generate(
     DiffTensorView vertices,
     DiffTensorView vertex_normals,
     DiffTensorView cell_values,
-    DiffTensorView interval_verts,       // [N, 5, 10]
-    DiffTensorView interval_tet_data,    // [N, 7 + AUX_DIM]
+    DiffTensorView interval_verts,       // [N, 5, 16]
+    DiffTensorView interval_tet_data,    // [N, 1 + AUX_DIM]
     TensorView<int32_t> interval_meta,  // [N]
     TensorCamera tcam)
 {
-    /*
     uint g_idx = cudaBlockIdx().x * cudaBlockDim().x + cudaThreadIdx().x;
     if (g_idx >= indices.size(0))
         return;
@@ -278,21 +259,24 @@ void interval_generate(
         cell_values[uint2(g_idx, 5)],
         cell_values[uint2(g_idx, 6)]);
 
-    // Write per-tet data
+    // Per-vertex colors: c(p) = dot(grd, p - v0) + base_color is linear in p,
+    // so evaluating it at the tet vertices and interpolating with the same
+    // weights as positions is exact.
+    float3 vc[4];
+    vc[0] = base_color;
+    vc[1] = dot(grd, tet.verts[1] - tet.verts[0]) + base_color;
+    vc[2] = dot(grd, tet.verts[2] - tet.verts[0]) + base_color;
+    vc[3] = dot(grd, tet.verts[3] - tet.verts[0]) + base_color;
+
+    // Write per-tet data: density + aux (color now lives in the fan verts)
     interval_tet_data.storeOnce(uint2(g_idx, 0), density);
-    interval_tet_data.storeOnce(uint2(g_idx, 1), base_color.x);
-    interval_tet_data.storeOnce(uint2(g_idx, 2), base_color.y);
-    interval_tet_data.storeOnce(uint2(g_idx, 3), base_color.z);
-    interval_tet_data.storeOnce(uint2(g_idx, 4), grd.x);
-    interval_tet_data.storeOnce(uint2(g_idx, 5), grd.y);
-    interval_tet_data.storeOnce(uint2(g_idx, 6), grd.z);
     [ForceUnroll]
     for (int i = 0; i < AUX_DIM; ++i) {
-        interval_tet_data.storeOnce(uint2(g_idx, 7 + i), float(cell_values[uint2(g_idx, 7 + i)]));
+        interval_tet_data.storeOnce(uint2(g_idx, 1 + i), float(cell_values[uint2(g_idx, 7 + i)]));
     }
 
     // Write meta
-    interval_meta[g_idx] = sil.num_sil_verts;
+    interval_meta[g_idx] = int32_t(sil.num_sil_verts);
 
     // --- Write fan vertices ---
     // Vertex 0 = center vertex
@@ -303,11 +287,6 @@ void interval_generate(
     if (sil.center_idx >= 0) {
         // Case 1: Center is an actual tet vertex
         int ci = sil.center_idx;
-
-        // The center vertex sees the full thickness of the tet along the view direction.
-        // z_front and z_back: we need to find the depth interval.
-        // The center vertex is "inside" the opposite face's projection.
-        // Its z is one endpoint; the opposite face's interpolated z is the other.
 
         // z of center vertex
         float z_center = cam_verts[ci].z;
@@ -324,6 +303,8 @@ void interval_generate(
         float2 sv2 = pix[si2];
 
         // Barycentric coords of center pixel in silhouette triangle
+        // (screen space — consistent with the fragment shader's screen-space
+        // interpolation of the silhouette surface).
         float2 e0 = sv1 - sv0;
         float2 e1 = sv2 - sv0;
         float2 v = sil.center_pixel - sv0;
@@ -335,68 +316,42 @@ void interval_generate(
         float inv_d = safe_div(1.0f, d00 * d11 - d01 * d01);
         float u = (d11 * d02 - d01 * d12) * inv_d;
         float w = (d00 * d12 - d01 * d02) * inv_d;
-        float z_opp = (1.0f - u - w) * cam_verts[si0].z + u * cam_verts[si1].z + w * cam_verts[si2].z;
+        float b0 = 1.0f - u - w;
+        float z_opp = b0 * cam_verts[si0].z + u * cam_verts[si1].z + w * cam_verts[si2].z;
 
-        float z_front_c = min(z_center, z_opp);
-        float z_back_c = max(z_center, z_opp);
+        // Normal and color at the center vertex and at the opposite-face point
+        float3 n_center = vn[ci];
+        float3 c_center = vc[ci];
+        float3 n_opp = b0 * vn[si0] + u * vn[si1] + w * vn[si2];
+        float3 c_opp = b0 * vc[si0] + u * vc[si1] + w * vc[si2];
 
-        // Normals at front and back: interpolate using tet barycentric coords
-        // Front point: closer to camera; back point: further
-        // We need 3D points for barycentric interpolation in the tet
-        // For the center vertex, the 3D point is known.
-        // For the opposite face point, we reconstruct from the opposite face barycentric coords.
-        float3 opp_point_cam = (1.0f - u - w) * cam_verts[si0] + u * cam_verts[si1] + w * cam_verts[si2];
-        float3 opp_point_world = (1.0f - u - w) * tet.verts[si0] + u * tet.verts[si1] + w * tet.verts[si2];
-        float3 center_world = tet.verts[ci];
-
-        float4 bary_center = tet_barycentric(center_world, tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]);
-        float4 bary_opp = tet_barycentric(opp_point_world, tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]);
-
-        float3 n_center = interp_normal(bary_center, vn);
-        float3 n_opp = interp_normal(bary_opp, vn);
-
-        float3 n_front_c, n_back_c;
+        float z_front_c, z_back_c;
+        float3 n_front_c, n_back_c, c_front_c, c_back_c;
         if (z_center <= z_opp) {
-            n_front_c = n_center;
-            n_back_c = n_opp;
+            z_front_c = z_center; z_back_c = z_opp;
+            n_front_c = n_center; n_back_c = n_opp;
+            c_front_c = c_center; c_back_c = c_opp;
         } else {
-            n_front_c = n_opp;
-            n_back_c = n_center;
+            z_front_c = z_opp; z_back_c = z_center;
+            n_front_c = n_opp; n_back_c = n_center;
+            c_front_c = c_opp; c_back_c = c_center;
         }
 
         // Store center vertex (index 0)
-        interval_verts.storeOnce(uint3(g_idx, 0, 0), sil.center_pixel.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 1), sil.center_pixel.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 2), z_front_c);
-        interval_verts.storeOnce(uint3(g_idx, 0, 3), z_back_c);
-        interval_verts.storeOnce(uint3(g_idx, 0, 4), n_front_c.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 5), n_front_c.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 6), n_front_c.z);
-        interval_verts.storeOnce(uint3(g_idx, 0, 7), n_back_c.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 8), n_back_c.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 9), n_back_c.z);
+        store_fan_vertex(interval_verts, g_idx, 0, sil.center_pixel,
+                         z_front_c, z_back_c, n_front_c, n_back_c, c_front_c, c_back_c);
 
         // Store silhouette vertices (indices 1,2,3)
         // At silhouette edges, z_front == z_back (zero thickness)
         for (int s = 0; s < 3; ++s) {
             uint vi = sil.sil_indices[s];
             float z_sil = cam_verts[vi].z;
-            float3 n_sil = interp_normal(tet_barycentric(tet.verts[vi], tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]), vn);
-
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 0), pix[vi].x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 1), pix[vi].y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 2), z_sil);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 3), z_sil);  // zero thickness at silhouette
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 4), n_sil.x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 5), n_sil.y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 6), n_sil.z);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 7), n_sil.x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 8), n_sil.y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 9), n_sil.z);
+            store_fan_vertex(interval_verts, g_idx, 1 + s, pix[vi],
+                             z_sil, z_sil, vn[vi], vn[vi], vc[vi], vc[vi]);
         }
 
         // Vertex 4 unused in Case 1 — write zero
-        for (int k = 0; k < 10; ++k) {
+        for (int k = 0; k < 16; ++k) {
             interval_verts.storeOnce(uint3(g_idx, 4, k), 0.0f);
         }
 
@@ -404,8 +359,7 @@ void interval_generate(
         // Case 2: Edge crossing. Center is the crossing point.
         // The crossing point has z_front/z_back interpolated from the two crossing edges.
 
-        // Edges that cross
-        // We need to find which pair crossed. Re-derive from sil_indices.
+        // Edges that cross — re-derive from sil_indices.
         // sil_indices = {e0.x, e1.x, e0.y, e1.y} — the 4 vertices of the two crossing edges
         uint a0 = sil.sil_indices[0]; // first edge start
         uint a1 = sil.sil_indices[2]; // first edge end
@@ -414,64 +368,40 @@ void interval_generate(
 
         // Compute t,s parameters of crossing
         float t_cross, s_cross;
-        segments_intersect_2d(pix[a0], pix[a1], pix[b0], pix[b1], t_cross, s_cross);
+        no_diff segments_intersect_2d(pix[a0], pix[a1], pix[b0], pix[b1], t_cross, s_cross);
 
         // Interpolate z along each edge at the crossing
         float z_edge_a = lerp(cam_verts[a0].z, cam_verts[a1].z, t_cross);
         float z_edge_b = lerp(cam_verts[b0].z, cam_verts[b1].z, s_cross);
 
-        float z_front_c = min(z_edge_a, z_edge_b);
-        float z_back_c = max(z_edge_a, z_edge_b);
+        // Normals/colors at crossing: interpolate along each edge
+        float3 n_a = lerp(vn[a0], vn[a1], t_cross);
+        float3 n_b = lerp(vn[b0], vn[b1], s_cross);
+        float3 c_a = lerp(vc[a0], vc[a1], t_cross);
+        float3 c_b = lerp(vc[b0], vc[b1], s_cross);
 
-        // Normals at crossing: interpolate along each edge
-        float3 world_a = lerp(tet.verts[a0], tet.verts[a1], t_cross);
-        float3 world_b = lerp(tet.verts[b0], tet.verts[b1], s_cross);
-
-        float4 bary_a = tet_barycentric(world_a, tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]);
-        float4 bary_b = tet_barycentric(world_b, tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]);
-
-        float3 n_a = interp_normal(bary_a, vn);
-        float3 n_b = interp_normal(bary_b, vn);
-
-        float3 n_front_c, n_back_c;
+        float z_front_c, z_back_c;
+        float3 n_front_c, n_back_c, c_front_c, c_back_c;
         if (z_edge_a <= z_edge_b) {
-            n_front_c = n_a;
-            n_back_c = n_b;
+            z_front_c = z_edge_a; z_back_c = z_edge_b;
+            n_front_c = n_a; n_back_c = n_b;
+            c_front_c = c_a; c_back_c = c_b;
         } else {
-            n_front_c = n_b;
-            n_back_c = n_a;
+            z_front_c = z_edge_b; z_back_c = z_edge_a;
+            n_front_c = n_b; n_back_c = n_a;
+            c_front_c = c_b; c_back_c = c_a;
         }
 
         // Store center vertex (index 0)
-        interval_verts.storeOnce(uint3(g_idx, 0, 0), sil.crossing_point.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 1), sil.crossing_point.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 2), z_front_c);
-        interval_verts.storeOnce(uint3(g_idx, 0, 3), z_back_c);
-        interval_verts.storeOnce(uint3(g_idx, 0, 4), n_front_c.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 5), n_front_c.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 6), n_front_c.z);
-        interval_verts.storeOnce(uint3(g_idx, 0, 7), n_back_c.x);
-        interval_verts.storeOnce(uint3(g_idx, 0, 8), n_back_c.y);
-        interval_verts.storeOnce(uint3(g_idx, 0, 9), n_back_c.z);
+        store_fan_vertex(interval_verts, g_idx, 0, sil.crossing_point,
+                         z_front_c, z_back_c, n_front_c, n_back_c, c_front_c, c_back_c);
 
         // Store 4 silhouette vertices (indices 1..4)
         for (int s = 0; s < 4; ++s) {
             uint vi = sil.sil_indices[s];
             float z_sil = cam_verts[vi].z;
-            float3 n_sil = interp_normal(
-                tet_barycentric(tet.verts[vi], tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3]), vn);
-
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 0), pix[vi].x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 1), pix[vi].y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 2), z_sil);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 3), z_sil);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 4), n_sil.x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 5), n_sil.y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 6), n_sil.z);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 7), n_sil.x);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 8), n_sil.y);
-            interval_verts.storeOnce(uint3(g_idx, 1 + s, 9), n_sil.z);
+            store_fan_vertex(interval_verts, g_idx, 1 + s, pix[vi],
+                             z_sil, z_sil, vn[vi], vn[vi], vc[vi], vc[vi]);
         }
     }
-    */
 }

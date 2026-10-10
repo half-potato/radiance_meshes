@@ -108,6 +108,20 @@ def load_cameras(cam_infos, resolution_scale, resolution, data_device):
         print(cam_infos[0])
     return camera_list
 
+def transform_cameras_known_pca(cameras, transform):
+    if len(cameras) == 0:
+        return cameras, np.eye(4)
+    new_poses = np.stack([
+        transform @ np.linalg.inv(view.world_view_transform.T.cpu().numpy())#[:3]
+        for view in cameras], axis=0)
+    for i, cam in enumerate(cameras):
+        T = np.eye(4)
+        T[:3] = new_poses[i][:3]
+        T = torch.linalg.inv(torch.tensor(T).float()).to(cam.world_view_transform.device)
+        T[:3, 0] = T[:3, 0]*torch.linalg.det(T[:3, :3])
+        cameras[i] = set_pose(cam, T)
+    return cameras, transform
+
 def transform_cameras_pca(cameras):
     if len(cameras) == 0:
         return cameras, np.eye(4)
@@ -135,7 +149,9 @@ def set_pose(camera, T):
     return camera
 
 
-def load_dataset(source_path, images_folder, data_device, eval, white_background=True, resolution_scale=1.0, resolution=-1, apply_pcd=True):
+def load_dataset(source_path, images_folder, data_device, eval,
+                 white_background=True, resolution_scale=1.0, resolution=-1,
+                 apply_pcd=True, pca_transform=None):
     if os.path.exists(os.path.join(source_path, "sparse")):
         scene_info = sceneLoadTypeCallbacks["Colmap"](source_path, images_folder, eval)
     elif os.path.exists(os.path.join(source_path, "transforms_train.json")):
@@ -152,7 +168,10 @@ def load_dataset(source_path, images_folder, data_device, eval, white_background
 
     if apply_pcd:
         print("Transforming poses")
-        _, pca_transform = transform_cameras_pca(train_cameras + test_cameras)
+        if pca_transform is None:
+            _, pca_transform = transform_cameras_pca(train_cameras + test_cameras)
+        else:
+            transform_cameras_known_pca(train_cameras + test_cameras, pca_transform)
         xyz = scene_info.point_cloud.points
         xyz_hom = np.hstack((xyz, np.ones((xyz.shape[0], 1))))
         xyz_transformed_hom = (pca_transform @ xyz_hom.T).T

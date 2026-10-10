@@ -3,7 +3,8 @@ from absl.testing import parameterized
 import torch
 from pyquaternion import Quaternion
 import numpy as np
-from utils.compare_quad import test_tetrahedra_rendering
+# Alias so pytest doesn't collect the imported helper as a test function.
+from utils.compare_quad import test_tetrahedra_rendering as run_tetrahedra_rendering
 from utils.test_util import compare_dict_values, bcolors, compute_delaunay, generate_color_palette
 import random
 import math
@@ -63,13 +64,13 @@ class DelaunayRenderTest(parameterized.TestCase):
 
         tet_density = torch.ones((len(indices),1), device='cuda')
         raw_cell_values = torch.cat([tet_density, new_color, new_grd.reshape(-1, 3)], dim=1)
-        results = test_tetrahedra_rendering(
+        results = run_tetrahedra_rendering(
             points, indices, raw_cell_values, tet_density, viewmat,
             height=self.height, width=self.width, 
             tile_size=tile_size, n_samples=10000
         )
         
-        results2 = test_tetrahedra_rendering(
+        results2 = run_tetrahedra_rendering(
             points, indices, raw_cell_values, tet_density, viewmat,
             height=self.height, width=self.width, 
             tile_size=tile_size, n_samples=5000

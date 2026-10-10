@@ -198,7 +198,10 @@ def depths_to_points(depthmap, view):
 def depth_to_camera_normals(depth, fx, fy):
     """Compute normals in camera space from a z-depth map using Sobel filters.
 
-    Returns [H, W, 3] normals that always face toward the camera (positive z).
+    Returns [H, W, 3] normals with z always POSITIVE, i.e. pointing AWAY
+    from the camera (camera +z is forward into the scene). This is the
+    INWARD family, matching render_pkg['cam_surf_norms'] — consumers that
+    want outward normals (MoGe cache, GTAO) negate at the point of use.
     """
     f_blur = torch.tensor([1, 2, 1], device=depth.device, dtype=depth.dtype) / 4
     f_edge = torch.tensor([-1, 0, 1], device=depth.device, dtype=depth.dtype) / 2
@@ -223,8 +226,8 @@ def depth_to_camera_normals(depth, fx, fy):
 def depth_to_normal(depth, view):
     """Compute world-space normals from a z-depth map.
 
-    Uses Sobel-filtered camera-space normals (always facing toward camera)
-    rotated to world space.
+    Uses Sobel-filtered camera-space normals (INWARD: +z, away from the
+    camera) rotated to world space. Same convention as world_surf_norms.
     """
     depth = depth.unsqueeze(0).squeeze(-1).squeeze(0)  # ensure [H, W]
     H, W = depth.shape

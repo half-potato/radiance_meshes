@@ -159,8 +159,8 @@ class iNGPDW(nn.Module):
         self.trunc_sigma = trunc_sigma
         self.additional_attr = additional_attr
         self.sh_dim = sh_dim
-        self.use_triton_heads = use_triton_heads
-        if use_triton_heads:
+        self.use_triton_heads = True   # latest Triton speedup: always on (no flag)
+        if self.use_triton_heads:
             # Bind the compiler-disabled entry once here, NOT inside forward:
             # an `import` statement inside the torch.compiled forward makes
             # dynamo trace IMPORT_NAME and re-parse the module (which failed).
@@ -180,25 +180,17 @@ class iNGPDW(nn.Module):
             self.encoding = tcnn.Encoding(3, self.config)
             print("Using TCNN")
             self.compile = False
-        elif use_triton_hashgrid:
-            # Bitwise-equal Triton port of HashEmbedderOptimized (see
-            # utils/triton_hashgrid.py): same state_dict layout (checkpoints
-            # load unchanged), ~5x faster forward, checkpoint-friendly
-            # recompute backward (unlike tcnn). torch.compile stays on for
-            # the heads; it graph-breaks cleanly around the custom
-            # autograd.Function, and keeping it preserves the _orig_mod
-            # state-dict prefix existing checkpoints carry.
+        else:
+            # Always use the Triton iNGP now (latest speedup, no flag): a
+            # bitwise-equal Triton port of HashEmbedderOptimized (see
+            # utils/triton_hashgrid.py) with the SAME state_dict layout, so
+            # existing checkpoints load unchanged — ~5x faster forward and a
+            # checkpoint-friendly recompute backward (unlike tcnn). torch.compile
+            # stays on for the heads; it graph-breaks cleanly around the custom
+            # autograd.Function and preserves the _orig_mod state-dict prefix.
             from utils.triton_hashgrid import TritonHashEmbedder
             print("Using Triton iNGP")
             self.encoding = TritonHashEmbedder(
-                [torch.zeros((3)), torch.ones((3))],
-                self.L, n_features_per_level=self.dim,
-                log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
-                finest_resolution=base_resolution*per_level_scale**self.L)
-            self.compile = True
-        else:
-            print("Using PyTorch iNGP")
-            self.encoding = hashgrid.HashEmbedderOptimized(
                 [torch.zeros((3)), torch.ones((3))],
                 self.L, n_features_per_level=self.dim,
                 log2_hashmap_size=log2_hashmap_size, base_resolution=base_resolution,
@@ -681,7 +673,19 @@ class Model(BaseModel):
 
     @property
     def vertex_normals(self):
-        return self.compute_geometric_vertex_normals() + torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
+        # detach_geo_normals: skip autograd through the geometric component.
+        # It requires a FULL-table density pass (calc_tet_density over all
+        # tets) whose backward re-traverses the entire hash grid -- profiled
+        # at ~60% of the training step. When no normal-dependent loss is
+        # active (lambda_norm == lambda_dist == 0) the gradient is provably
+        # unused; the learned interior/ext normal offsets stay trainable
+        # either way.
+        if getattr(self, 'detach_geo_normals', False):
+            with torch.no_grad():
+                geo = self.compute_geometric_vertex_normals()
+        else:
+            geo = self.compute_geometric_vertex_normals()
+        return geo + torch.cat([self.interior_vertex_normals, self.ext_vertex_normals])
 
     @property
     def geometric_vertex_normals(self):
@@ -951,6 +955,13 @@ class TetOptimizer:
         ])
         self.model = model
 
+        # Persistent per-interior-vertex visibility buffers for occlusion culling
+        # (None = disabled -> legacy path byte-identical). Lazily created by
+        # densification.cull_occluded_tets; kept aligned with interior_vertices
+        # here at add_points / remove_points (the only interior-vertex mutators).
+        self.visibility_max = None   # [num_int_verts] scatter-MAX of peak_contrib, never reset
+        self.vis_obs = None          # [num_int_verts] count of cull passes the vertex was rendered
+
         self.alpha_sched = get_expon_lr_func(lr_init=percent_alpha*float(model.scene_scaling.cpu()),
                                                 lr_final=1e-20,
                                                 lr_delay_mult=1e-8,
@@ -1119,10 +1130,19 @@ class TetOptimizer:
         ))
         self.model.interior_vertices = result['interior_vertices']
         self.model.interior_vertex_normals = result['interior_vertex_normals']
+        if self.visibility_max is not None:
+            # New verts start unseen (visibility 0, obs 0) -> grace-protected
+            # by cull_min_obs until they have been observed.
+            z = torch.zeros(new_verts.shape[0], device=self.visibility_max.device)
+            self.visibility_max = torch.cat([self.visibility_max, z])
+            self.vis_obs = torch.cat([self.vis_obs, z.clone()])
         self.model.update_triangulation()
 
     def remove_points(self, keep_mask: torch.Tensor):
         keep_mask = keep_mask[:self.model.interior_vertices.shape[0]]
+        if self.visibility_max is not None:
+            self.visibility_max = self.visibility_max[keep_mask]
+            self.vis_obs = self.vis_obs[keep_mask]
         result = self.vertex_optim.prune_optimizer(keep_mask)
         self.model.interior_vertices = result['interior_vertices']
         self.model.interior_vertex_normals = result['interior_vertex_normals']

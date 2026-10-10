@@ -14,14 +14,15 @@ def run_interval_generate(indices, vertices, vertex_normals, cell_values,
     """Run the interval generation compute prepass.
 
     Returns:
-        interval_verts: [N, 5, 10] fan vertex data
-        interval_tet_data: [N, 7 + aux_dim] per-tet data
-        interval_meta: [N] uint32 num_sil_verts per tet
+        interval_verts: [N, 5, 16] fan vertex data
+            (pixel_xy, z_front, z_back, n_front, n_back, c_front, c_back)
+        interval_tet_data: [N, 1 + aux_dim] per-tet data (density, aux)
+        interval_meta: [N] int32 num_sil_verts per tet
     """
     n_tets = indices.shape[0]
 
-    interval_verts = torch.zeros((n_tets, 5, 10), device=device)
-    interval_tet_data = torch.zeros((n_tets, 7 + aux_dim), device=device)
+    interval_verts = torch.zeros((n_tets, 5, 16), device=device)
+    interval_tet_data = torch.zeros((n_tets, 1 + aux_dim), device=device)
     interval_meta = torch.zeros((n_tets,), dtype=torch.int32, device=device)
 
     gen_shader = shader_manager.get_interval_generate(aux_dim)
@@ -65,6 +66,13 @@ class AlphaBlendTiledRenderInterval(torch.autograd.Function):
         xyzd_img = torch.zeros((render_grid.image_height,
                                 render_grid.image_width, 4),
                                device=device)
+        # Median-depth output: not currently produced by the interval shader;
+        # allocated as zeros so callers always see a 5th return slot. Callers
+        # gating on `use_median_depth` will detect the all-zero map and can
+        # fall back to surf_depth if needed.
+        median_depth_img = torch.zeros((render_grid.image_height,
+                                        render_grid.image_width, 1),
+                                       device=device)
         n_contributors = torch.zeros((render_grid.image_height,
                                       render_grid.image_width, 1),
                                      dtype=torch.int32, device=device)
@@ -114,10 +122,11 @@ class AlphaBlendTiledRenderInterval(torch.autograd.Function):
         ctx.render_grid = render_grid
         ctx.interval_meta = interval_meta  # uint32, not a grad tensor
 
-        return output_img, xyzd_img, distortion_img
+        return output_img, xyzd_img, distortion_img, median_depth_img
 
     @staticmethod
-    def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img):
+    def backward(ctx, grad_output_img, grad_xyzd_img, grad_distortion_img,
+                 grad_median_depth_img):
         (sorted_tetra_idx, tile_ranges,
          indices, vertices, vertex_normals, cell_values,
          interval_verts, interval_tet_data,

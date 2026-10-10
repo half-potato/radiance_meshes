@@ -14,8 +14,6 @@ static const uint TILE_WIDTH = PYTHON_TILE_WIDTH;
 // (L1 cache coherent since all tile threads read the same tet).
 struct IntervalSMData {
     float density;
-    float3 base_color;
-    float3 grd;
     uint num_sil_verts;
     uint tet_idx;
     float aux[AUX_DIM];
@@ -245,16 +243,18 @@ AlphaOut alpha_blend_interval(
     const int shared_memory_rounds = ((tile_idx_end - tile_idx_start) + block_size - 1) / block_size;
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
 
-    // Compute ray_scale: the ratio to convert camera-space z difference to ray distance.
-    // For perspective cameras: ray_scale = 1/cos(angle) where angle is from principal axis.
-    // This matches what the interp variant computes via ray.ortho.
+    // ray_scale converts camera-space z extents to distance along the pixel
+    // ray: 1/cos(angle to principal axis) = sqrt(1 + dx^2 + dy^2).
+    // (Approximation: uses distorted normalized coords; exact when the camera
+    // has no lens distortion, matching what get_ray produces for the interp
+    // variant.)
     float fx = cam.K[0][0];
     float fy = cam.K[1][1];
     float cx = cam.K[0][2];
     float cy = cam.K[1][2];
     float dx = (center_pix_coord.x - cx) / fx;
     float dy = (center_pix_coord.y - cy) / fy;
-    float ray_scale = 1.0f / sqrt(1.0f + dx * dx + dy * dy);
+    float ray_scale = sqrt(1.0f + dx * dx + dy * dy);
 
     int32_t local_n_contrib = 0;
     int splats_left_to_process = tile_idx_end - tile_idx_start;
@@ -273,24 +273,14 @@ AlphaOut alpha_blend_interval(
                 sm.num_sil_verts = meta;
                 sm.tet_idx = coll_id;
                 sm.density = max(float(interval_tet_data[uint2(coll_id, 0)]), 0.f);
-                sm.base_color = float3(
-                    interval_tet_data[uint2(coll_id, 1)],
-                    interval_tet_data[uint2(coll_id, 2)],
-                    interval_tet_data[uint2(coll_id, 3)]);
-                sm.grd = float3(
-                    interval_tet_data[uint2(coll_id, 4)],
-                    interval_tet_data[uint2(coll_id, 5)],
-                    interval_tet_data[uint2(coll_id, 6)]);
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) {
-                    sm.aux[a] = float(interval_tet_data[uint2(coll_id, 7 + a)]);
+                    sm.aux[a] = float(interval_tet_data[uint2(coll_id, 1 + a)]);
                 }
             } else {
                 sm.density = 0;
                 sm.num_sil_verts = 0;
                 sm.tet_idx = 0;
-                sm.base_color = float3(0);
-                sm.grd = float3(0);
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) sm.aux[a] = 0;
             }
@@ -307,14 +297,12 @@ AlphaOut alpha_blend_interval(
 
                 IntervalTetData td;
                 td.density = sm.density;
-                td.base_color = sm.base_color;
-                td.grd = sm.grd;
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) td.aux[a] = sm.aux[a];
 
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interval(center_pix_coord, sm.tet_idx, sm.num_sil_verts,
-                                            interval_verts, td, ray_scale, tetra_ctrl)
+                                            interval_verts, td, ray_scale, cam.min_t, tetra_ctrl)
                     && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
 
@@ -368,7 +356,7 @@ void bwd_alpha_blend_interval(
     float cy = cam.K[1][2];
     float dx = (center_pix_coord.x - cx) / fx;
     float dy = (center_pix_coord.y - cy) / fy;
-    float ray_scale = 1.0f / sqrt(1.0f + dx * dx + dy * dy);
+    float ray_scale = sqrt(1.0f + dx * dx + dy * dy);
 
     int32_t n_contrib_fwd;
     AlphaOut ao = get_empty_alpha_out();
@@ -415,24 +403,14 @@ void bwd_alpha_blend_interval(
                 sm.num_sil_verts = meta;
                 sm.tet_idx = coll_id;
                 sm.density = max(float(interval_tet_data[uint2(coll_id, 0)]), 0.f);
-                sm.base_color = float3(
-                    interval_tet_data[uint2(coll_id, 1)],
-                    interval_tet_data[uint2(coll_id, 2)],
-                    interval_tet_data[uint2(coll_id, 3)]);
-                sm.grd = float3(
-                    interval_tet_data[uint2(coll_id, 4)],
-                    interval_tet_data[uint2(coll_id, 5)],
-                    interval_tet_data[uint2(coll_id, 6)]);
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) {
-                    sm.aux[a] = float(interval_tet_data[uint2(coll_id, 7 + a)]);
+                    sm.aux[a] = float(interval_tet_data[uint2(coll_id, 1 + a)]);
                 }
             } else {
                 sm.density = 0;
                 sm.num_sil_verts = 0;
                 sm.tet_idx = 0;
-                sm.base_color = float3(0);
-                sm.grd = float3(0);
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) sm.aux[a] = 0;
             }
@@ -451,14 +429,12 @@ void bwd_alpha_blend_interval(
 
                 IntervalTetData td;
                 td.density = sm.density;
-                td.base_color = sm.base_color;
-                td.grd = sm.grd;
                 [ForceUnroll]
                 for (int a = 0; a < AUX_DIM; ++a) td.aux[a] = sm.aux[a];
 
                 CtrlPt tetra_ctrl;
                 if (evaluate_tetra_interval(center_pix_coord, sm.tet_idx, sm.num_sil_verts,
-                                            interval_verts, td, ray_scale, tetra_ctrl)
+                                            interval_verts, td, ray_scale, cam.min_t, tetra_ctrl)
                     && isfinite(tetra_ctrl.rgba.a) && tetra_ctrl.rgba.a > 0) {
                     tetra_ctrl.dist.y = max(tetra_ctrl.dist.x, tetra_ctrl.dist.y);
 
@@ -470,28 +446,17 @@ void bwd_alpha_blend_interval(
                     bwd_diff(update_alpha_out)(dp_ao, dp_ctrl, d_ao);
                     d_ao = dp_ao.getDifferential();
 
-                    // Autodiff through evaluate_tetra_interval
+                    // Autodiff through evaluate_tetra_interval: accumulates
+                    // interval_verts gradients (atomic) and returns d_td.
                     DifferentialPair<IntervalTetData> dp_td = diffPair(td);
                     bwd_diff(evaluate_tetra_interval)(
                         center_pix_coord, sm.tet_idx, sm.num_sil_verts,
-                        interval_verts, dp_td, ray_scale, dp_ctrl.d);
+                        interval_verts, dp_td, ray_scale, cam.min_t, dp_ctrl.d);
 
-                    // Propagate gradients to interval_tet_data
-                    IntervalTetData d_td = dp_td.getDifferential();
-                    // density gradient
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 0), d_td.density);
-                    // base_color gradient
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 1), d_td.base_color.x);
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 2), d_td.base_color.y);
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 3), d_td.base_color.z);
-                    // grd gradient
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 4), d_td.grd.x);
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 5), d_td.grd.y);
-                    interval_tet_data.storeOnce(uint2(sm.tet_idx, 6), d_td.grd.z);
-                    [ForceUnroll]
-                    for (int a = 0; a < AUX_DIM; ++a) {
-                        interval_tet_data.storeOnce(uint2(sm.tet_idx, 7 + a), d_td.aux[a]);
-                    }
+                    // Scatter d_td into interval_tet_data's gradient buffer
+                    // (atomic accumulation via the load function's backward).
+                    bwd_diff(load_interval_tet_data)(sm.tet_idx, interval_tet_data,
+                                                     dp_td.getDifferential());
                 }
             }
         }

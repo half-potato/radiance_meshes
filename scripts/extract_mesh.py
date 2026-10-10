@@ -35,13 +35,16 @@ args = Args.from_namespace(args.get_parser().parse_args())
 
 device = torch.device('cuda')
 try:
-    model = Model.load_ckpt(args.output_path, device, args)
-except:
+    model = Model.load_ckpt(args.output_path, device)
+except Exception as e:
+    print(e)
     # if args.freeze_features:
     #     from models.frozen_features import FrozenTetModel, FrozenTetOptimizer
     # else:
     from models.frozen import FrozenTetModel, FrozenTetOptimizer
     model = FrozenTetModel.load_ckpt(args.output_path, device)
+
+model.current_sh_deg = min(model.current_sh_deg, model.max_sh_deg)
 
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device="cpu", eval=False)
@@ -51,7 +54,7 @@ train_cameras, test_cameras, scene_info = loader.load_dataset(
 
 # --- 2. Initial setup for smoothing ---
 current_vertices = model.vertices.clone()
-density = model.density.detach()
+density = model.calc_tet_density().detach()
 v_densities = density.detach().reshape(-1).cpu()
 indices_cpu = model.indices.cpu()
 
@@ -70,7 +73,7 @@ for cam in cameras:
     camera_center = cam.camera_center.to(device)
 
     image_votes, extras = render_err(
-        target, cam, model,
+        target, cam.gt_alpha_mask.to(device), cam, model,
         scene_scaling=model.scene_scaling,
         tile_size=args.tile_size,
         lambda_ssim=0
@@ -129,7 +132,7 @@ normed_grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=T
 tet_color_raw = eval_sh(
     tets.mean(dim=1).detach(),
     RGB2SH(rgb),
-    sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3),
+    sh.reshape(-1, (model.max_sh_deg+1)**2 - 1, 3) if model.max_sh_deg > 0 else sh,
     camera_center,
     model.max_sh_deg).float()
 tet_color = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)

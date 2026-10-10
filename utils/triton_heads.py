@@ -210,7 +210,7 @@ def _pad_last(x, npad):
 
 @torch.compiler.disable
 def fused_heads(h, density_net, color_net, gradient_net, sh_net, sh_dim,
-                npad=16):
+                npad=None):
     """Drop-in replacement for the four eager heads of ``iNGPDW``.
 
     ``torch.compiler.disable``: ``iNGPDW.forward`` is wrapped in
@@ -231,6 +231,11 @@ def fused_heads(h, density_net, color_net, gradient_net, sh_net, sh_dim,
     """
     heads = [density_net, color_net, gradient_net, sh_net]
     nout = [1, 3, 3, sh_dim]
+    if npad is None:
+        # NPAD must cover the widest head: F.pad with a negative amount
+        # silently TRUNCATES (sh_dim=45 at max_sh_deg=3 was cut to 16).
+        # tl.arange needs a power of two and tl.dot needs >= 16.
+        npad = max(16, triton.next_power_of_2(max(nout)))
 
     W1 = torch.stack([net[0].weight.t() for net in heads], 0)   # [NH, D, HID]
     B1 = torch.stack([net[0].bias for net in heads], 0)         # [NH, HID]

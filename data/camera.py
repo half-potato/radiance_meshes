@@ -1,3 +1,4 @@
+import os
 import torch
 from torch import nn
 import numpy as np
@@ -50,7 +51,14 @@ class Camera(nn.Module):
         self.image_height = self.original_image.shape[1]
 
         if gt_alpha_mask is not None:
-            self.original_image *= gt_alpha_mask.to(self.data_device)
+            if os.environ.get("DSPLAT_WHITE_BG", "0") == "1":
+                # Standard blender protocol: composite RGBA onto white.
+                # Default path premultiplies to black AND render() masks the
+                # prediction by this alpha, so empty space is never supervised.
+                mask = gt_alpha_mask.to(self.data_device)
+                self.original_image = self.original_image * mask + (1 - mask)
+            else:
+                self.original_image *= gt_alpha_mask.to(self.data_device)
             self.gt_alpha_mask = gt_alpha_mask
         else:
             # self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)

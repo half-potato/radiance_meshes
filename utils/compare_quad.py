@@ -8,7 +8,9 @@ from icecream import ic
 from jax import jacrev, grad
 import jax.numpy as jnp
 from utils.train_util import render
+from utils.topo_utils import build_adj
 from data.camera import Camera
+from delaunay_rasterization.internal.ray_trace import TetrahedralRayTrace
 
 def get_projection_matrix(znear, zfar, fy, fx, height, width, device):
     """Calculate projection matrix for given camera parameters."""
@@ -118,6 +120,11 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
     model.device = 'cuda'
     model.linear = False
     model.feature_dim = 7
+    # The current rasterizer (alphablend_tiled_slang_interp) needs both of
+    # these on the model; the test scenes don't actually use either, so a
+    # zero normal field and zero aux channel count are fine.
+    model.vertex_normals = torch.zeros_like(vertices)
+    model.additional_attr = 0
     def get_cell_values(camera, mask=None, all_circumcenters=None):
         if mask is not None:
             return tet_density, cell_values[mask]
@@ -128,7 +135,30 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
 
     render_pkg = render(camera, model, tile_size=tile_size, min_t=tmin, ladder_p=1, pre_multi=1, clip_multi=0)
     torch_image = render_pkg['render'].permute(1, 2, 0)
-    
+
+    # Ray-traced image. The kernel walks tet adjacency starting at the per-ray
+    # start tet; for these small test scenes we always start at tet 0 and let
+    # the in-kernel face clipping clamp t_enter -- correct whether the camera
+    # is inside, on, or outside the boundary as long as a ray that hits the
+    # mesh first hits tet 0's plane shell.
+    with torch.no_grad():
+        tet_adj = build_adj(vertices.detach(), indices.long(), device='cuda').int()
+        cds = camera.get_camera_space_directions('cuda')
+        rays_world = camera.get_world_space_rays(cds, 'cuda')
+        n_rays = rays_world.shape[0]
+        start_tet_ids = torch.zeros(n_rays, dtype=torch.int32, device='cuda')
+        rt_output, rt_aux = TetrahedralRayTrace.apply(
+            rays_world,
+            indices,
+            vertices.detach(),
+            cell_values.detach(),
+            tet_adj,
+            start_tet_ids,
+            tmin,
+            200,
+        )
+    rt_image_np = rt_output[:, :3].reshape(height, width, 3).cpu().numpy()
+
     vc = cell_values[:, 1:].reshape(-1, 6)
     td = cell_values[:, :1]
     jax_image, extras = tetra_quad.render_camera(
@@ -152,6 +182,8 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
     results = {
         'torch_image': torch_image_np,
         'jax_image': jax_image[..., :3],
+        'rt_image': rt_image_np,
+        'rt_aux': rt_aux.cpu().numpy(),
         'difference': diff,
         'mean_error': mean_error,
         'max_error': max_error,
@@ -192,7 +224,9 @@ def test_tetrahedra_rendering(vertices, indices, cell_values, tet_density, viewm
                 jnp.linspace(0, 1, n_samples)
             )
             dist = img[..., 4]
-            return img[..., :3].sum()
+            # Match torch_loss above: image sum + mean distortion, so the
+            # gradient comparisons compare gradients of the SAME loss.
+            return img[..., :3].sum() + dist.mean()
 
         # Compute JAX gradients using jacrev
         jax_verts_grad, jax_cell_values_grad, jax_tet_density_grad = grad(render_fn)((

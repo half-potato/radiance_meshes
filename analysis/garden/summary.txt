@@ -1,0 +1,29 @@
+runs: baseline, fp32, fp32_b1   split: test   images: 24
+
+=== mean metrics ===
+  baseline      PSNR 25.616  SSIM 0.7674  LPIPS 0.2889   brightErr 0.0395  restErr 0.0350  ratio 1.13
+  fp32          PSNR 25.642  SSIM 0.7697  LPIPS 0.2865   brightErr 0.0413  restErr 0.0348  ratio 1.19
+  fp32_b1       PSNR 25.520  SSIM 0.7613  LPIPS 0.3023   brightErr 0.0402  restErr 0.0356  ratio 1.13
+
+=== fp32 vs baseline: biggest PSNR regressions (top) / gains (bottom) ===
+  img 0018  baseline 26.165 -> fp32 25.737  (d -0.428)   brightErr baseline 0.0508 fp32 0.0651
+  img 0015  baseline 24.833 -> fp32 24.405  (d -0.428)   brightErr baseline 0.0302 fp32 0.0366
+  img 0010  baseline 25.427 -> fp32 25.218  (d -0.209)   brightErr baseline 0.0528 fp32 0.0537
+  img 0014  baseline 27.444 -> fp32 27.257  (d -0.187)   brightErr baseline 0.0308 fp32 0.0324
+  img 0009  baseline 26.104 -> fp32 25.928  (d -0.176)   brightErr baseline 0.0362 fp32 0.0388
+  ...
+  img 0022  baseline 25.973 -> fp32 26.211  (d +0.238)   brightErr baseline 0.0253 fp32 0.0262
+  img 0020  baseline 26.867 -> fp32 27.131  (d +0.264)   brightErr baseline 0.0338 fp32 0.0322
+  img 0017  baseline 27.200 -> fp32 27.586  (d +0.386)   brightErr baseline 0.0310 fp32 0.0284
+  img 0008  baseline 24.869 -> fp32 25.340  (d +0.472)   brightErr baseline 0.0414 fp32 0.0428
+  img 0012  baseline 25.401 -> fp32 26.011  (d +0.610)   brightErr baseline 0.0294 fp32 0.0314
+
+=== worst images by baseline PSNR ===
+  img 0004  PSNR 20.880  hi/lo errRatio 1.68
+  img 0001  PSNR 23.283  hi/lo errRatio 1.51
+  img 0003  PSNR 23.554  hi/lo errRatio 1.06
+  img 0000  PSNR 23.683  hi/lo errRatio 1.13
+  img 0015  PSNR 24.833  hi/lo errRatio 0.82
+  img 0008  PSNR 24.869  hi/lo errRatio 1.12
+  img 0021  PSNR 25.211  hi/lo errRatio 1.56
+  img 0012  PSNR 25.401  hi/lo errRatio 0.80

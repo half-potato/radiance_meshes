@@ -1,5 +1,6 @@
 import cv2
 import math
+import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -134,9 +135,16 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
     rotated = xyzd_img[..., :3].reshape(-1, 3) @ camera.world_view_transform[:3, :3].to(device)
     rxyzd_img = torch.cat([rotated.reshape(xyzd_img[..., :3].shape), xyzd_img[..., 3:]], dim=-1)
     
+    if os.environ.get("DSPLAT_WHITE_BG", "0") == "1":
+        # White-background protocol: composite leftover transmittance onto
+        # white instead of masking the prediction by GT alpha (which leaks GT
+        # into the render and leaves empty space unsupervised).
+        rendered_rgb = image_rgb.permute(2,0,1)[:3, ...] + alpha[None]
+    else:
+        rendered_rgb = image_rgb.permute(2,0,1)[:3, ...] * camera.gt_alpha_mask.to(device)
     render_pkg = {
         'aux': image_rgb.permute(2,0,1)[4:, ...] * camera.gt_alpha_mask.to(device),
-        'render': image_rgb.permute(2,0,1)[:3, ...] * camera.gt_alpha_mask.to(device),
+        'render': rendered_rgb,
         'alpha': alpha,
         'distortion_loss': distortion_loss.mean(),
         'mask': mask,

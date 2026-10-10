@@ -82,7 +82,11 @@ def compute_vertex_colors_from_field(
 def offset_normalize(rgb, grd, circumcenters, tets):
     grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).min(dim=1, keepdim=True).values
     # grd = grd.reshape(-1, 1, 3) * rgb.reshape(-1, 3, 1).mean(dim=1, keepdim=True)#.detach()
-    radius = torch.linalg.norm(tets[:, 0] - circumcenters, dim=-1, keepdim=True).reshape(-1, 1, 1)
+    # Detach radius: it's a unit-conversion factor, not a learnable scale.
+    # Without detach, tiny tets (e.g. fresh clones from densification) produce
+    # ~max_val gradients via safe_div backward (-grd/radius^2) → vertex NaNs.
+    radius = torch.linalg.norm(tets[:, 0].detach() - circumcenters.detach(), dim=-1, keepdim=True).reshape(-1, 1, 1)
+    radius = radius.clamp(min=1e-8)
     normed_grd = safe_div(grd, radius)
     vcolors = compute_vertex_colors_from_field(
         tets.detach(), rgb.reshape(-1, 3), normed_grd.float(), circumcenters.float().detach())

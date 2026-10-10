@@ -43,6 +43,74 @@ def determine_cull_mask(
     mask = ((peak_contrib > args.contrib_threshold))
     return mask
 
+
+@torch.no_grad()
+def scatter_tet_amax(per_tet, indices, n_verts, device):
+    """Per-vertex max over incident tets of a per-tet scalar.
+
+    indices: [T, 4] into the full model.vertices range. Returns [n_verts];
+    callers keep the interior prefix. Mirrors TetOptimizer.prune's amax scatter.
+    """
+    out = torch.zeros(n_verts, device=device)
+    idx = indices.long()
+    for c in range(4):
+        out.scatter_reduce_(0, idx[:, c], per_tet, reduce="amax", include_self=True)
+    return out
+
+
+@torch.no_grad()
+def cull_occluded_tets(sampled_cameras, model, tet_optim, args, iteration, device):
+    """Occlusion-based interior-vertex culling (RadSplat peak_contrib).
+
+    Accumulates a persistent per-interior-vertex MAX of peak_contrib
+    (= max over rays of alpha*transmittance-in-front) across cull passes, and
+    removes vertices that have been observed for >= cull_min_obs passes yet were
+    never seen with peak_contrib > cull_thresh (i.e. buried behind opaque
+    geometry in every sampled view of every pass). Decoupled from the active
+    densify criterion -- it computes peak_contrib itself, like collect_render_stats.
+    Returns the number of interior vertices removed.
+    """
+    n_int = model.interior_vertices.shape[0]
+    n_all = model.vertices.shape[0]
+
+    if tet_optim.visibility_max is None:
+        tet_optim.visibility_max = torch.zeros(n_int, device=device)
+        tet_optim.vis_obs = torch.zeros(n_int, device=device)
+
+    # 1. This pass's per-tet peak_contrib + observation, max-reduced over cams.
+    peak = torch.zeros(model.indices.shape[0], device=device)
+    obs = torch.zeros(model.indices.shape[0], device=device)
+    for cam in sampled_cameras:
+        target = cam.original_image.cuda()
+        gt_mask = cam.gt_alpha_mask.cuda()
+        # min_t matches the training render so near-field surface isn't clipped
+        # (and thus wrongly judged invisible).
+        _, extras = render_err(target, gt_mask, cam, model,
+                               tile_size=args.tile_size, min_t=args.min_t)
+        tc = extras["tet_count"][..., 0]
+        max_T = extras["tet_count"][..., 1].float() / 65535
+        peak = torch.maximum(peak, max_T)
+        obs = torch.maximum(obs, (tc > 0).float())
+
+    # 2. Scatter tet->interior-vertex (max) and accumulate persistently.
+    v_peak = scatter_tet_amax(peak, model.indices, n_all, device)[:n_int]
+    v_obs = scatter_tet_amax(obs, model.indices, n_all, device)[:n_int]
+    tet_optim.visibility_max = torch.maximum(tet_optim.visibility_max, v_peak)
+    tet_optim.vis_obs += v_obs
+
+    # 3. Keep unless observed enough passes AND never seen visible.
+    eligible = tet_optim.vis_obs >= args.cull_min_obs
+    buried = tet_optim.visibility_max <= args.cull_thresh
+    keep = ~(eligible & buried)                       # interior keep-mask
+    n_removed = int((~keep).sum())
+    if n_removed > 0:
+        tet_optim.remove_points(keep)                 # also compacts the buffers
+    print(f"[cull] iter {iteration}: removed {n_removed} "
+          f"(eligible {int(eligible.sum())}, buried {int(buried.sum())}) "
+          f"| verts {model.vertices.shape[0]}")
+    return n_removed
+
+
 def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
     """
     Calculates the approximate intersection point for pairs of line segments.
@@ -303,8 +371,30 @@ def apply_densification(
     
     # clone_mask = within_mask | total_mask
 
-    within_mask = (within_var > args.within_thresh)
-    total_mask = (total_var > args.total_thresh)
+    # Score-distribution stats over the nonzero (contributing) population.
+    # Logged every round; also the basis for the scale-free relative mode.
+    nz_w = within_var[within_var > 0]
+    nz_t = total_var[total_var > 0]
+    def _q(t, q):
+        return t.quantile(q).item() if t.numel() > 0 else 0.0
+    print(f"#DensifyDist within nz={nz_w.numel()} "
+          f"p50={_q(nz_w, 0.5):.3e} p90={_q(nz_w, 0.9):.3e} p99={_q(nz_w, 0.99):.3e} | "
+          f"total nz={nz_t.numel()} "
+          f"p50={_q(nz_t, 0.5):.3e} p90={_q(nz_t, 0.9):.3e} p99={_q(nz_t, 0.99):.3e}")
+
+    # densify_rel_mode='median': thresholds are dimensionless tail multipliers
+    # on the nonzero-score medians instead of absolute values, so one setting
+    # transfers across datasets with different error scales (synthetic vs
+    # photo). 'none' keeps the legacy absolute thresholds.
+    if getattr(args, "densify_rel_mode", "none") == "median":
+        within_thresh = args.within_rel * _q(nz_w, 0.5) if nz_w.numel() > 0 else float("inf")
+        total_thresh = args.total_rel * _q(nz_t, 0.5) if nz_t.numel() > 0 else float("inf")
+    else:
+        within_thresh = args.within_thresh
+        total_thresh = args.total_thresh
+
+    within_mask = (within_var > within_thresh)
+    total_mask = (total_var > total_thresh)
     clone_mask = within_mask | total_mask
     if clone_mask.sum() > target_addition:
         true_indices = clone_mask.nonzero().squeeze(-1)
@@ -345,6 +435,7 @@ def apply_densification(
     # Clamped intersection is already inside tet bbox; no fallback needed
 
     tet_optim.split(split_point, clone_indices=clone_indices, **args.as_dict())
+
     # keep_verts = keep_verts > 0
     # keep_verts = torch.cat([keep_verts, torch.ones((model.vertices.shape[0] - keep_verts.shape[0]), device=device, dtype=bool)])
     # print(f"Pruned: {(~keep_verts).sum()}")

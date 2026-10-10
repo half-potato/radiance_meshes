@@ -39,7 +39,21 @@ namespace extension_cpp {
       values_ptr, values_sorted_ptr,
       keys.sizes()[0]);
 
-    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    // Allocate CUB's temp storage through PyTorch's caching allocator rather
+    // than a raw cudaMalloc. Two reasons, both load-bearing:
+    //   1. A raw cudaMalloc cannot reuse the blocks torch has already reserved
+    //      from the driver, so it fails under memory pressure even when torch
+    //      itself has plenty cached -- and torch reserves aggressively.
+    //   2. The old cudaMalloc return value was NEVER checked, so on failure
+    //      d_temp_storage stayed nullptr and was handed straight to SortPairs
+    //      with a non-zero size. CUB then wrote through null: "an illegal
+    //      memory access was encountered", surfacing asynchronously at whatever
+    //      unrelated torch op ran next. Going through torch turns that silent
+    //      corruption into a clean, attributable OutOfMemoryError.
+    at::Tensor temp_storage = torch::empty(
+      {static_cast<int64_t>(temp_storage_bytes)},
+      keys.options().dtype(torch::kUInt8));
+    d_temp_storage = temp_storage.data_ptr();
 
     cub::DeviceRadixSort::SortPairs(
       d_temp_storage, temp_storage_bytes,
@@ -47,7 +61,7 @@ namespace extension_cpp {
       values_ptr, values_sorted_ptr,
       keys.sizes()[0], 0, 32 + highest_tile_id_msb);
 
-    cudaFree(d_temp_storage);
+    // no cudaFree: temp_storage is a torch tensor and frees itself.
 
     return std::make_tuple(keys_sorted_contig, values_sorted_contig);
   }

@@ -143,7 +143,13 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, metadata_pa
 
         # image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_path = os.path.join(images_folder, extr.name)
-        image_name = os.path.basename(image_path).split(".")[0]
+        # Keep the COLMAP-relative path in the name so nested layouts (e.g.
+        # multi-illumination captures with flash/ lit/ long/ subfolders) stay
+        # unique. image_name is used as a cache key elsewhere (MoGe depth, GT
+        # albedo), where a bare basename would collide across subfolders.
+        # Flat datasets are unaffected: relpath is just the basename.
+        image_name = os.path.splitext(os.path.relpath(image_path, images_folder))[0]
+        image_name = image_name.replace(os.sep, "_")
         image_path = image_path.replace(" ", "_")
         image = None
         # temp = Image.open(image_path)
@@ -216,7 +222,21 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         metadata_path=os.path.join(path, "metadata.json"))
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
-    if eval:
+    split_path = os.path.join(path, "split.json")
+    if eval and os.path.exists(split_path):
+        # Explicit split, for captures where the held-out set is not a stride
+        # over the sorted list (e.g. train on one illumination channel, test on
+        # the others). Entries are image_name values.
+        with open(split_path) as f:
+            split = json.load(f)
+        train_names, test_names = set(split["train"]), set(split["test"])
+        known = {c.image_name for c in cam_infos}
+        unknown = (train_names | test_names) - known
+        assert not unknown, f"split.json names not in the model: {sorted(unknown)[:5]}"
+        train_cam_infos = [c for c in cam_infos if c.image_name in train_names]
+        test_cam_infos = [c for c in cam_infos if c.image_name in test_names]
+        print(f"Using split.json: {len(train_cam_infos)} train / {len(test_cam_infos)} test")
+    elif eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
