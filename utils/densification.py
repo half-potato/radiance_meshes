@@ -404,7 +404,7 @@ def apply_densification(
         clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
         clone_mask[selected_indices] = True
 
-    if args.output_path is not None:
+    if args.output_path is not None and getattr(args, "save_diagnostics", True):
         # f = mask_alive.float().unsqueeze(1).expand(-1, 4).clone()
         # color = torch.rand_like(f[:, :3])
         # # color = rgb + 0.5#torch.rand_like(f[:, :3])
